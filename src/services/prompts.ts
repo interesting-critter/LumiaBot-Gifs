@@ -235,6 +235,14 @@ export function getVideoReactionInstructions(): string {
 }
 
 /**
+ * Get GIF reaction instructions
+ */
+export function getGifReactionInstructions(): string {
+  const instructions = loadTextFile('instructions/gif_reaction.txt');
+  return instructions ? substituteVariables(instructions) : '';
+}
+
+/**
  * Get reply context template
  */
 export function getReplyContextTemplate(type: 'reply_to_bot' | 'reply_to_other', variables: { [key: string]: string } = {}): string {
