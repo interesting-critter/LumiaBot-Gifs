@@ -5,6 +5,7 @@ import { channelHistoryService } from './channel-history';
 import { getTriggerKeywords, getErrorMessage } from './prompts';
 import { knowledgeGraphService } from './knowledge-graph';
 import { config } from '../utils/config';
+import { gifService } from './gif';
 import type { ChatMessage } from './openai';
 import type { MusicActivity } from './user-activity';
 import type { ResolveUserMention } from './user-mention-resolver';
@@ -158,6 +159,7 @@ export interface MessageHandlerResponse {
   text: string;
   reactions: string[];
   attachments: GeneratedImageAttachment[];
+  gifUrl?: string;
 }
 
 /**
@@ -361,6 +363,8 @@ export async function handleMessage(options: MessageHandlerOptions): Promise<Mes
       currentMessageTurn,
     ];
 
+    const isGifEnabled = gifService.isGifEnabled(guildId); // <-- Check if enabled for this server
+
     const generatedImages: GeneratedImageAttachment[] = [];
     const aiService = getAIService();
     const response = await aiService.createChatCompletion({
@@ -368,8 +372,8 @@ export async function handleMessage(options: MessageHandlerOptions): Promise<Mes
       enableSearch: shouldSearch,
       enableKnowledgeGraph: shouldQueryLocalKnowledge,
       collectiveKnowledgeContext,
-      images: processedImages, // Only pass images if not using vision secondary model
-      videos: processedVideos, // Only pass videos if not using vision secondary model
+      images: processedImages,
+      videos: processedVideos,
       textAttachments,
       pageContents,
       userId,
@@ -384,6 +388,7 @@ export async function handleMessage(options: MessageHandlerOptions): Promise<Mes
       resolveUserMention,
       isNsfwChannel,
       allowNsfwImageGeneration,
+      isGifEnabled, // <-- Pass the toggle flag into the AI call
       orchestratorEventId,
       orchestratorTurnId,
       requestFollowUp,
@@ -391,19 +396,23 @@ export async function handleMessage(options: MessageHandlerOptions): Promise<Mes
       onImageGenerated: (image: GeneratedImageAttachment) => generatedImages.push(image),
     });
 
-    // Extract reactions from the response
-    const { text, reactions } = extractReactions(response);
+    // 1. Extract and resolve GIF tag (<gif>query</gif>)
+    const { text: textWithoutGif, gifUrl } = await gifService.extractAndResolveGif(response);
+
+    // 2. Extract reactions from the cleaned text ([REACT: emoji])
+    const { text, reactions } = extractReactions(textWithoutGif);
     
     if (reactions.length > 0) {
       console.log(`😀 [HANDLER] Extracted ${reactions.length} reaction(s): ${reactions.join(', ')}`);
     }
 
-    // Store assistant response (without reaction tags) in conversation history
+    // Store assistant response (without reaction tags or gif tags) in conversation history
     if (userId && username) {
       conversationHistoryService.addMessage(userId, guildId, username, 'assistant', text);
     }
 
-    return { text, reactions, attachments: generatedImages };
+    // Return text, reactions, generated images, and the resolved GIF URL
+    return { text, reactions, attachments: generatedImages, gifUrl };
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     console.error(`❌ [HANDLER] ${errorMessage}`);
