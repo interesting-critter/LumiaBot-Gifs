@@ -125,10 +125,17 @@ const command: Command = {
         await interaction.reply({ embeds: [embed], ephemeral: true });
 
       } else if (subcommand === 'clear') {
-        // In a real implementation, you'd want to check for bot owner/admin permissions
-        // For now, just return info
+        const users = userMemoryService.listUsers();
+        let deletedCount = 0;
+
+        for (const user of users) {
+          deletedCount += userMemoryService.deleteOpinion(user.userId);
+        }
+
         await interaction.reply({
-          content: 'This command would clear all user memories. Feature available to bot owner only.',
+          content: deletedCount > 0
+            ? `✅ Cleared all user memories. ${deletedCount} opinion${deletedCount === 1 ? '' : 's'} removed.`
+            : 'No stored opinions found to clear.',
           ephemeral: true,
         });
       } else if (subcommand === 'clear-user') {
