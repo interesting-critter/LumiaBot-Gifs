@@ -21,6 +21,7 @@ import {
 } from './image-prompt-guidance';
 import {
   getVideoReactionInstructions,
+  getGifReactionInstructions,
   getBoredomUpdateInstructions,
   getMusicTasteTemplate,
   getReplyContextTemplate,
@@ -109,6 +110,7 @@ export interface ChatCompletionOptions {
   requestCollectiveKnowledge?: (query: string, maxResults?: number) => Promise<string>;
   isNsfwChannel?: boolean;
   allowNsfwImageGeneration?: boolean;
+  isGifEnabled?: boolean;
   onImageGenerated?: (image: GeneratedImageAttachment) => void;
 }
 
@@ -415,6 +417,13 @@ If they mention @OtherUser, they are talking TO that user, not AS them.`;
         systemPrompt += `\n<file name="${attachment.name}">\n${attachment.content}\n</file>`;
       }
       systemPrompt += `\n</attached-files>`;
+    }
+
+    if (options.isGifEnabled) {
+     const gifInstructions = getGifReactionInstructions();
+     if (gifInstructions) {
+       systemPrompt += `\n\n${gifInstructions}`;
+     }
     }
 
     // Add extracted web page contents if present
