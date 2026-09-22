@@ -1,4 +1,4 @@
-import { SlashCommandBuilder, ChatInputCommandInteraction, EmbedBuilder } from 'discord.js';
+import { SlashCommandBuilder, ChatInputCommandInteraction, EmbedBuilder, MessageFlags } from 'discord.js';
 import { guildMemoryService } from '../services/guild-memory';
 import { getCommandResponse, getErrorMessage } from '../services/prompts';
 import type { Command } from '../bot/client';
@@ -56,7 +56,7 @@ const command: Command = {
       const guildOnlyResponse = getCommandResponse('inside_jokes_only_guild') || 'Inside jokes are for servers only!';
       await interaction.reply({
         content: guildOnlyResponse,
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
@@ -92,7 +92,7 @@ const command: Command = {
             'No inside jokes found for this server yet! Add some with `/jokes add`.';
           await interaction.reply({
             content: noJokesResponse,
-            ephemeral: true,
+            flags: MessageFlags.Ephemeral,
           });
           return;
         }
@@ -119,7 +119,7 @@ const command: Command = {
           embed.setFooter({ text: `Showing 10 of ${jokes.length} jokes` });
         }
 
-        await interaction.reply({ embeds: [embed], ephemeral: true });
+        await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
 
       } else if (subcommand === 'random') {
         const joke = guildMemoryService.getRandomInsideJoke(guildId);
@@ -129,7 +129,7 @@ const command: Command = {
             'No inside jokes found for this server yet! Add some with `/jokes add`.';
           await interaction.reply({
             content: noJokesResponse,
-            ephemeral: true,
+            flags: MessageFlags.Ephemeral,
           });
           return;
         }
@@ -168,7 +168,7 @@ const command: Command = {
             "Couldn't find an inside joke with that ID! Use `/jokes list` to see available jokes.";
           await interaction.reply({
             content: notFoundResponse,
-            ephemeral: true,
+            flags: MessageFlags.Ephemeral,
           });
           return;
         }
@@ -181,13 +181,13 @@ const command: Command = {
           .setColor(0xFF6B6B)
           .setTimestamp();
 
-        await interaction.reply({ embeds: [embed], ephemeral: true });
+        await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
       }
     } catch (error) {
       console.error('Jokes command error:', error);
       await interaction.reply({
         content: getErrorMessage('generic_error'),
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
     }
   },
