@@ -11,7 +11,7 @@ import type { Command } from '../bot/client';
 export const data = new SlashCommandBuilder()
   .setName('gif')
   .setDescription('Configure GIF reactions from the bot')
-  .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+  .setDefaultMemberPermissions(PermissionFlagsBits.SendMessages)
   .addSubcommand((sub) =>
     sub.setName('enable').setDescription('Enable GIF reactions in this server')
   )
