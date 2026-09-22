@@ -280,6 +280,8 @@ export async function handleMessage(options: MessageHandlerOptions): Promise<Mes
 
     const shouldQueryCollectiveKnowledge = typeof requestCollectiveKnowledge === 'function';
 
+    const isGifEnabled = gifService.isGifEnabled(guildId);
+
     if (shouldSearch) {
       console.log(`🔍 [HANDLER] Web search tool will be attached for model-directed use`);
     } else {
@@ -362,8 +364,6 @@ export async function handleMessage(options: MessageHandlerOptions): Promise<Mes
       ...(channelMessages || []),
       currentMessageTurn,
     ];
-
-    const isGifEnabled = gifService.isGifEnabled(guildId); // <-- Check if enabled for this server
 
     const generatedImages: GeneratedImageAttachment[] = [];
     const aiService = getAIService();
