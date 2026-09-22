@@ -398,8 +398,8 @@ export async function handleMessage(options: MessageHandlerOptions): Promise<Mes
 
     // 1. Extract and resolve GIF if present (and remove <gif> tags from the text)
     const { text: textWithoutGif, gifUrl } = isGifEnabled
-      ? await gifService.extractAndResolveGif(rawResponse)
-      : { text: rawResponse, gifUrl: undefined };
+      ? await gifService.extractAndResolveGif(response)
+      : { text: response, gifUrl: undefined };
 
     // 2. Extract [REACT: emoji] reactions from the remaining text
     const { text, reactions } = extractReactions(textWithoutGif);
