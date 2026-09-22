@@ -1,4 +1,4 @@
-import { SlashCommandBuilder, ChatInputCommandInteraction, EmbedBuilder } from 'discord.js';
+import { SlashCommandBuilder, ChatInputCommandInteraction, EmbedBuilder, MessageFlags } from 'discord.js';
 import { conversationHistoryService } from '../services/conversation-history';
 import { getCommandResponse, getErrorMessage } from '../services/prompts';
 import type { Command } from '../bot/client';
@@ -67,7 +67,7 @@ const command: Command = {
           });
         }
 
-        await interaction.reply({ embeds: [embed], ephemeral: true });
+        await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
 
       } else if (subcommand === 'history') {
         const history = conversationHistoryService.getHistory(userId, guildId);
@@ -77,7 +77,7 @@ const command: Command = {
             "You don't have any conversation history in this server yet. Start chatting!";
           await interaction.reply({
             content: noHistoryResponse,
-            ephemeral: true,
+            flags: MessageFlags.Ephemeral,
           });
           return;
         }
@@ -112,14 +112,14 @@ const command: Command = {
           .setFooter({ text: `Showing last ${recentHistory.length} of ${history.length} messages` })
           .setTimestamp();
 
-        await interaction.reply({ embeds: [embed], ephemeral: true });
+        await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
 
       } else if (subcommand === 'clear') {
         conversationHistoryService.clearHistory(userId, guildId);
         
         await interaction.reply({
           content: '✅ Your conversation history has been cleared. Starting fresh!',
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
       } else if (subcommand === 'clear-user') {
         const targetUserId = interaction.options.getString('user-id', true);
@@ -130,14 +130,14 @@ const command: Command = {
           content: deletedCount > 0
             ? `✅ Cleared ${deletedCount} stored conversation message${deletedCount === 1 ? '' : 's'} for user ID ${targetUserId} across ${conversations.length} location${conversations.length === 1 ? '' : 's'}.`
             : `No stored conversation history found for user ID ${targetUserId}.`,
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
       }
     } catch (error) {
       console.error('Conversation command error:', error);
       await interaction.reply({
         content: getErrorMessage('generic_error'),
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
     }
   },
