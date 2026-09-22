@@ -773,7 +773,7 @@ ${botDefinition}
       const pronouns = userId ? userMemoryService.getPronouns(userId) : null;
       const pronounsAttr = pronouns ? ` pronouns="${pronouns}"` : '';
       systemPrompt += `\n\n<current-user name="${username}"${userId ? ` id="${userId}"` : ''}${pronounsAttr}>
-The current human participant for this exchange. Usually address them directly, while also acknowledging relevant activity in the surrounding chat when it matters.
+The current human participant for this exchange. Usually address them directly as ${username}, while also acknowledging relevant activity in the surrounding chat when it matters. You are responding to ${username}, even if your previous responses were to someone else.
 If they mention @OtherUser, they are talking TO that user, not AS them.`;
 
       if (mentionedUsers && mentionedUsers.size > 0) {
