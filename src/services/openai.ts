@@ -927,7 +927,7 @@ If they mention @OtherUser, they are talking TO that user, not AS them.`;
   }
 
   async createChatCompletion(options: ChatCompletionOptions): Promise<string> {
-    const { messages, enableSearch, enableKnowledgeGraph, temperature, maxTokens, images, videos, textAttachments, pageContents, collectiveKnowledgeContext, userId, username, guildId, replyContext, boredomAction, orchestratorContextNote, enableMusicTaste = false, conversationSummary, mentionedUsers } = options;
+    const { messages, enableSearch, enableKnowledgeGraph, temperature, maxTokens, images, videos, textAttachments, pageContents, collectiveKnowledgeContext, userId, username, guildId, replyContext, boredomAction, orchestratorContextNote, enableMusicTaste = false, conversationSummary, mentionedUsers, isGifEnabled } = options;
 
     // Check if this is a multimodal request
     const isMultimodal = (images && images.length > 0) || (videos && videos.length > 0);
@@ -2264,7 +2264,7 @@ ONLY use this tool when you detect CLEAR, EXPLICIT intent to change boredom sett
   }
 
   async *streamChatCompletion(options: ChatCompletionOptions): AsyncGenerator<string> {
-    const { messages, temperature, maxTokens, images, videos, textAttachments, pageContents, collectiveKnowledgeContext, userId, username, guildId, replyContext, boredomAction, orchestratorContextNote, enableMusicTaste = false, conversationSummary, mentionedUsers } = options;
+    const { messages, temperature, maxTokens, images, videos, textAttachments, pageContents, collectiveKnowledgeContext, userId, username, guildId, replyContext, boredomAction, orchestratorContextNote, enableMusicTaste = false, conversationSummary, mentionedUsers, isGifEnabled } = options;
 
     // Check if this is a multimodal request
     const isMultimodal = (images && images.length > 0) || (videos && videos.length > 0);
