@@ -10,3 +10,9 @@
   "general_success": "All done!",
   "thinking": "Let me think about that for a moment..."
 }
+{
+  "gif_enabled": "🎉 GIF reactions have been **enabled** for this server! (=^-^=)",
+  "gif_disabled": "🛑 GIF reactions have been **disabled** for this server. (◕︵◕)",
+  "gif_status_enabled": "✨ GIF reactions are currently **enabled** in this server.",
+  "gif_status_disabled": "💤 GIF reactions are currently **disabled** in this server."
+}
