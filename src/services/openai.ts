@@ -22,6 +22,7 @@ import {
 import { getBotDefinition } from '../utils/bot-definition';
 import {
   getVideoReactionInstructions,
+  getGifReactionInstructions,
   getBoredomUpdateInstructions,
   getMusicTasteTemplate,
   getReplyContextTemplate,
@@ -131,6 +132,7 @@ export interface ChatCompletionOptions {
   requestCollectiveKnowledge?: (query: string, maxResults?: number) => Promise<string>;
   isNsfwChannel?: boolean;
   allowNsfwImageGeneration?: boolean;
+  isGifEnabled?: boolean;
   onImageGenerated?: (image: GeneratedImageAttachment) => void;
 }
 
@@ -808,6 +810,13 @@ If they mention @OtherUser, they are talking TO that user, not AS them.`;
       systemPrompt += `\n</attached-files>`;
     }
 
+    if (isGifEnabled) {
+     const gifInstructions = getGifReactionInstructions();
+     if (gifInstructions) {
+       systemPrompt += `\n\n${gifInstructions}`;
+     }
+    }
+
     // Extracted web page contents
     if (pageContents && pageContents.length > 0) {
       systemPrompt += `\n\n<web-pages>`;
@@ -947,7 +956,7 @@ If they mention @OtherUser, they are talking TO that user, not AS them.`;
       : undefined;
 
     // Build system prompt with user memory, guild context, and knowledge instruction
-    const systemPrompt = this.buildSystemPrompt(userId, username, guildId, hasVideos, replyContext, knowledgeInstruction, collectiveKnowledgeContext, boredomAction, orchestratorContextNote, enableMusicTaste, lastMessageContent, conversationSummary, textAttachments, mentionedUsers, pageContents, imageToolEnabled, options.allowNsfwImageGeneration, options.isNsfwChannel);
+    const systemPrompt = this.buildSystemPrompt(userId, username, guildId, hasVideos, replyContext, knowledgeInstruction, collectiveKnowledgeContext, boredomAction, orchestratorContextNote, enableMusicTaste, lastMessageContent, conversationSummary, textAttachments, mentionedUsers, pageContents, imageToolEnabled, options.allowNsfwImageGeneration, options.isGifEnabled, options.isNsfwChannel);
 
     // Convert image URLs to base64 data URIs so external APIs can access them
     let processedImages = images;
@@ -2298,7 +2307,7 @@ ONLY use this tool when you detect CLEAR, EXPLICIT intent to change boredom sett
       : undefined;
 
     // Build system prompt with knowledge instruction
-    const systemPrompt = this.buildSystemPrompt(userId, username, guildId, hasVideos, replyContext, knowledgeInstruction, collectiveKnowledgeContext, boredomAction, orchestratorContextNote, enableMusicTaste, lastMessageContent, conversationSummary, textAttachments, mentionedUsers, pageContents, imageToolEnabled, options.allowNsfwImageGeneration, options.isNsfwChannel);
+    const systemPrompt = this.buildSystemPrompt(userId, username, guildId, hasVideos, replyContext, knowledgeInstruction, collectiveKnowledgeContext, boredomAction, orchestratorContextNote, enableMusicTaste, lastMessageContent, conversationSummary, textAttachments, mentionedUsers, pageContents, imageToolEnabled, options.allowNsfwImageGeneration, options.isGifEnabled, options.isNsfwChannel);
 
     // Build the per-turn user message prefix: datetime reminder + persona directive.
     const now = new Date();
