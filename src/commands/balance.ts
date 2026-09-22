@@ -1,4 +1,4 @@
-import { SlashCommandBuilder, ChatInputCommandInteraction, EmbedBuilder } from 'discord.js';
+import { SlashCommandBuilder, ChatInputCommandInteraction, EmbedBuilder, MessageFlags } from 'discord.js';
 import { config, isMoonshotProvider } from '../utils/config';
 import { getLastBalance, getLastRequestCost, getBalanceCurrency } from '../services/moonshot';
 import { getLastToolExecutionSnapshot } from '../services/openai';
@@ -14,7 +14,7 @@ const balanceCommand: Command = {
     if (interaction.user.id !== config.bot.ownerId) {
       await interaction.reply({
         content: 'This command is only available to the bot owner.',
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
@@ -22,7 +22,7 @@ const balanceCommand: Command = {
     if (!isMoonshotProvider()) {
       await interaction.reply({
         content: 'Balance tracking is only available when using a Moonshot API provider.',
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
@@ -32,7 +32,7 @@ const balanceCommand: Command = {
     if (!balance) {
       await interaction.reply({
         content: 'No balance data available yet. Send a message first so the bot can fetch the balance.',
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
@@ -66,7 +66,7 @@ const balanceCommand: Command = {
 
     await interaction.reply({
       embeds: [embed],
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
   },
 };
