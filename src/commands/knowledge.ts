@@ -1,4 +1,4 @@
-import { SlashCommandBuilder, ChatInputCommandInteraction } from 'discord.js';
+import { SlashCommandBuilder, ChatInputCommandInteraction, MessageFlags } from 'discord.js';
 import { knowledgeGraphService } from '../services/knowledge-graph';
 import type { Command } from '../bot/client';
 
@@ -161,7 +161,7 @@ const command: Command = {
 
           await interaction.reply({
             content: `✅ Document "${title}" added to knowledge base under topic "${topic}"!`,
-            ephemeral: true,
+            flags: MessageFlags.Ephemeral,
           });
           break;
         }
@@ -179,7 +179,7 @@ const command: Command = {
           if (documents.length === 0) {
             await interaction.reply({
               content: '📚 No documents found in the knowledge base.',
-              ephemeral: true,
+              flags: MessageFlags.Ephemeral,
             });
             return;
           }
@@ -204,14 +204,14 @@ const command: Command = {
 
           await interaction.reply({
             content: chunks[0],
-            ephemeral: true,
+            flags: MessageFlags.Ephemeral,
           });
 
           // Send additional chunks if needed
           for (let i = 1; i < chunks.length; i++) {
             await interaction.followUp({
               content: chunks[i],
-              ephemeral: true,
+              flags: MessageFlags.Ephemeral,
             });
           }
           break;
@@ -227,7 +227,7 @@ const command: Command = {
           if (results.length === 0) {
             await interaction.reply({
               content: `🔍 No documents found matching "${query}".`,
-              ephemeral: true,
+              flags: MessageFlags.Ephemeral,
             });
             return;
           }
@@ -241,7 +241,7 @@ const command: Command = {
 
           await interaction.reply({
             content: `🔍 **Search Results for "${query}":**\n\n${formatted}`,
-            ephemeral: true,
+            flags: MessageFlags.Ephemeral,
           });
           break;
         }
@@ -253,7 +253,7 @@ const command: Command = {
           if (!doc) {
             await interaction.reply({
               content: `❌ Document with ID ${id} not found.`,
-              ephemeral: true,
+              flags: MessageFlags.Ephemeral,
             });
             return;
           }
@@ -262,7 +262,7 @@ const command: Command = {
 
           await interaction.reply({
             content: `🗑️ Document "${doc.title}" deleted from knowledge base.`,
-            ephemeral: true,
+            flags: MessageFlags.Ephemeral,
           });
           break;
         }
@@ -289,7 +289,7 @@ const command: Command = {
 
           await interaction.reply({
             content: message,
-            ephemeral: true,
+            flags: MessageFlags.Ephemeral,
           });
           break;
         }
@@ -300,7 +300,7 @@ const command: Command = {
           if (topics.length === 0) {
             await interaction.reply({
               content: '📚 No topics found in the knowledge base.',
-              ephemeral: true,
+              flags: MessageFlags.Ephemeral,
             });
             return;
           }
@@ -310,7 +310,7 @@ const command: Command = {
 
           await interaction.reply({
             content: message,
-            ephemeral: true,
+            flags: MessageFlags.Ephemeral,
           });
           break;
         }
@@ -321,7 +321,7 @@ const command: Command = {
           if (!confirm) {
             await interaction.reply({
               content: '⚠️ This would clear ALL documents from the knowledge base! Set confirm to true if you\'re sure.',
-              ephemeral: true,
+              flags: MessageFlags.Ephemeral,
             });
             return;
           }
@@ -331,7 +331,7 @@ const command: Command = {
 
           await interaction.reply({
             content: `🗑️ **Knowledge Base Cleared**\n\nDeleted ${result.deletedCount} documents from ${stats.totalTopics} topics.\nThe knowledge base is now empty.`,
-            ephemeral: true,
+            flags: MessageFlags.Ephemeral,
           });
           break;
         }
@@ -343,7 +343,7 @@ const command: Command = {
           if (!confirm) {
             await interaction.reply({
               content: `⚠️ This would clear all documents from topic "${topic}"! Set confirm to true if you're sure.`,
-              ephemeral: true,
+              flags: MessageFlags.Ephemeral,
             });
             return;
           }
@@ -353,7 +353,7 @@ const command: Command = {
           if (topicDocs.length === 0) {
             await interaction.reply({
               content: `❌ Topic "${topic}" not found or has no documents.`,
-              ephemeral: true,
+              flags: MessageFlags.Ephemeral,
             });
             return;
           }
@@ -362,7 +362,7 @@ const command: Command = {
 
           await interaction.reply({
             content: `🗑️ **Topic Cleared: "${topic}"**\n\nDeleted ${result.deletedCount} documents.`,
-            ephemeral: true,
+            flags: MessageFlags.Ephemeral,
           });
           break;
         }
@@ -370,14 +370,14 @@ const command: Command = {
         default:
           await interaction.reply({
             content: '❓ Unknown subcommand.',
-            ephemeral: true,
+            flags: MessageFlags.Ephemeral,
           });
       }
     } catch (error) {
       console.error('Knowledge command error:', error);
       await interaction.reply({
           content: '❌ An error occurred while processing your command.',
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
     }
   },
