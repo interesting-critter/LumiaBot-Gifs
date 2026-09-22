@@ -1783,17 +1783,6 @@ ${sections.join('\n\n')}
           throw replyError;
         }
 
-        // Send GIF in a separate message below
-      if (response.gifUrl && 'send' in message.channel) {
-        try {
-          await message.channel.send(response.gifUrl);
-          console.log(`🎬 [CLIENT] Sent GIF in separate message: ${response.gifUrl}`);
-        } catch (gifError) {
-          console.error(`❌ [CLIENT] Failed to send GIF message:`, gifError);
-        }
-      }
-      // -------------------------------------------------------------
-
         console.warn('⚠️ [CLIENT] Reply target unavailable, sending as regular message:', replyError);
         if (message.channel instanceof TextChannel ||
             message.channel instanceof ThreadChannel ||
@@ -1808,6 +1797,16 @@ ${sections.join('\n\n')}
           });
         } else {
           throw replyError;
+        }
+      }
+
+      // Send GIF in a separate message below
+      if (response.gifUrl && 'send' in message.channel) {
+        try {
+          await message.channel.send(response.gifUrl);
+          console.log(`🎬 [CLIENT] Sent GIF in separate message: ${response.gifUrl}`);
+        } catch (gifError) {
+          console.error(`❌ [CLIENT] Failed to send GIF message:`, gifError);
         }
       }
 
