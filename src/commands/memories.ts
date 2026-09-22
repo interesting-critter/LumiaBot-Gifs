@@ -1,4 +1,4 @@
-import { SlashCommandBuilder, ChatInputCommandInteraction, EmbedBuilder } from 'discord.js';
+import { SlashCommandBuilder, ChatInputCommandInteraction, EmbedBuilder, MessageFlags } from 'discord.js';
 import { userMemoryService } from '../services/user-memory';
 import { getCommandResponse, getErrorMessage } from '../services/prompts';
 import type { Command } from '../bot/client';
@@ -53,7 +53,7 @@ const command: Command = {
             "I haven't formed any opinions about users yet. Start chatting with me to build up your memory collection~";
           await interaction.reply({
             content: noMemoriesResponse,
-            ephemeral: true,
+            flags: MessageFlags.Ephemeral,
           });
           return;
         }
@@ -81,7 +81,7 @@ const command: Command = {
           });
         });
 
-        await interaction.reply({ embeds: [embed], ephemeral: true });
+        await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
 
       } else if (subcommand === 'view') {
         const username = interaction.options.getString('username', true);
@@ -90,7 +90,7 @@ const command: Command = {
         if (!opinion) {
           await interaction.reply({
             content: `Lumia doesn't have any opinions about **${username}** yet.`,
-            ephemeral: true,
+            flags: MessageFlags.Ephemeral,
           });
           return;
         }
@@ -122,7 +122,7 @@ const command: Command = {
           });
         }
 
-        await interaction.reply({ embeds: [embed], ephemeral: true });
+        await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
 
       } else if (subcommand === 'clear') {
         const users = userMemoryService.listUsers();
@@ -136,7 +136,7 @@ const command: Command = {
           content: deletedCount > 0
             ? `✅ Cleared all user memories. ${deletedCount} opinion${deletedCount === 1 ? '' : 's'} removed.`
             : 'No stored opinions found to clear.',
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
       } else if (subcommand === 'clear-user') {
         const userId = interaction.options.getString('user-id', true);
@@ -147,14 +147,14 @@ const command: Command = {
           content: deletedCount > 0
             ? `✅ Cleared stored opinion for ${opinion?.username || userId} (${userId}).`
             : `No stored opinion found for user ID ${userId}.`,
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
       }
     } catch (error) {
       console.error('Memories command error:', error);
       await interaction.reply({
         content: getErrorMessage('generic_error'),
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
     }
   },
