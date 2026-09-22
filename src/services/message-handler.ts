@@ -273,14 +273,15 @@ export async function handleMessage(options: MessageHandlerOptions): Promise<Mes
       }
     }
 
+    // Check if GIF reactions are enabled for this server
+    const isGifEnabled = gifService.isGifEnabled(guildId);
+
     const shouldSearch = enableSearch !== undefined ? enableSearch : true;
     const shouldQueryLocalKnowledge = enableKnowledgeGraph !== undefined
       ? enableKnowledgeGraph
       : knowledgeGraphService.hasDocuments();
 
     const shouldQueryCollectiveKnowledge = typeof requestCollectiveKnowledge === 'function';
-
-    const isGifEnabled = gifService.isGifEnabled(guildId);
 
     if (shouldSearch) {
       console.log(`🔍 [HANDLER] Web search tool will be attached for model-directed use`);
@@ -321,10 +322,9 @@ export async function handleMessage(options: MessageHandlerOptions): Promise<Mes
     let processedContent = content;
     let processedImages = imageUrls;
     let processedVideos = videoUrls;
-    
+    // Don't pass images/videos to main model since vision model already processed them
     if (isVisionRequest && config.vision.enabled) {
       processedContent = await processVisionContent(content, imageUrls, videoUrls);
-      // Don't pass images/videos to main model since vision model already processed them
       processedImages = undefined;
       processedVideos = undefined;
     }
@@ -388,7 +388,7 @@ export async function handleMessage(options: MessageHandlerOptions): Promise<Mes
       resolveUserMention,
       isNsfwChannel,
       allowNsfwImageGeneration,
-      isGifEnabled, // <-- Pass the toggle flag into the AI call
+      isGifEnabled, 
       orchestratorEventId,
       orchestratorTurnId,
       requestFollowUp,
@@ -396,28 +396,28 @@ export async function handleMessage(options: MessageHandlerOptions): Promise<Mes
       onImageGenerated: (image: GeneratedImageAttachment) => generatedImages.push(image),
     });
 
-    // 1. Extract and resolve GIF tag (<gif>query</gif>)
-    const { text: textWithoutGif, gifUrl } = await gifService.extractAndResolveGif(response);
+    // 1. Extract and resolve GIF if present (and remove <gif> tags from the text)
+    const { text: textWithoutGif, gifUrl } = isGifEnabled
+      ? await gifService.extractAndResolveGif(rawResponse)
+      : { text: rawResponse, gifUrl: undefined };
 
-    // 2. Extract reactions from the cleaned text ([REACT: emoji])
+    // 2. Extract [REACT: emoji] reactions from the remaining text
     const { text, reactions } = extractReactions(textWithoutGif);
     
     if (reactions.length > 0) {
       console.log(`😀 [HANDLER] Extracted ${reactions.length} reaction(s): ${reactions.join(', ')}`);
     }
 
-    // Store assistant response (without reaction tags or gif tags) in conversation history
+    // Store assistant response in history
     if (userId && username) {
       conversationHistoryService.addMessage(userId, guildId, username, 'assistant', text);
     }
 
-    // Return text, reactions, generated images, and the resolved GIF URL
     return { text, reactions, attachments: generatedImages, gifUrl };
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     console.error(`❌ [HANDLER] ${errorMessage}`);
     
-    // Provide more specific error messages using dynamic templates
     if (errorMessage.includes('Failed to generate response after multiple attempts') || 
         errorMessage.includes('Failed to generate response')) {
       return {
@@ -439,4 +439,4 @@ export async function handleMessage(options: MessageHandlerOptions): Promise<Mes
       attachments: []
     };
   }
-}
+      }
