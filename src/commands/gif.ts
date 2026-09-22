@@ -1,4 +1,9 @@
-import { SlashCommandBuilder, PermissionFlagsBits, type ChatInputCommandInteraction } from 'discord.js';
+import { 
+  SlashCommandBuilder, 
+  PermissionFlagsBits, 
+  MessageFlags, 
+  type ChatInputCommandInteraction 
+} from 'discord.js';
 import { gifService } from '../services/gif';
 import { getCommandResponse } from '../services/prompts';
 import type { Command } from '../bot/client';
@@ -24,17 +29,17 @@ export async function execute(interaction: ChatInputCommandInteraction): Promise
   if (subcommand === 'enable') {
     gifService.setGifEnabled(guildId, true);
     const msg = getCommandResponse('gif_enabled') || 'GIF reactions enabled!';
-    await interaction.reply({ content: msg, ephemeral: true });
+    await interaction.reply({ content: msg, flags: MessageFlags.Ephemeral });
   } else if (subcommand === 'disable') {
     gifService.setGifEnabled(guildId, false);
     const msg = getCommandResponse('gif_disabled') || 'GIF reactions disabled.';
-    await interaction.reply({ content: msg, ephemeral: true });
+    await interaction.reply({ content: msg, flags: MessageFlags.Ephemeral });
   } else if (subcommand === 'status') {
     const isEnabled = gifService.isGifEnabled(guildId);
     const msg = isEnabled
       ? (getCommandResponse('gif_status_enabled') || 'GIF reactions are enabled.')
       : (getCommandResponse('gif_status_disabled') || 'GIF reactions are disabled.');
-    await interaction.reply({ content: msg, ephemeral: true });
+    await interaction.reply({ content: msg, flags: MessageFlags.Ephemeral });
   }
 }
 
@@ -43,5 +48,4 @@ export const command: Command = {
   execute,
 };
 
-// Export as default AND named export to satisfy any loader pattern
 export default command;
