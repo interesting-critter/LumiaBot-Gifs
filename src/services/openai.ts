@@ -661,6 +661,7 @@ export class OpenAIService {
     pageContents?: { url: string; title: string; content: string; excerpt?: string; siteName?: string; byline?: string }[],
     imageToolEnabled?: boolean,
     allowNsfwImageGeneration?: boolean,
+    isGifEnabled?: boolean,
     isNsfwChannel?: boolean
   ): string {
     const botDefinition = getBotDefinition();
