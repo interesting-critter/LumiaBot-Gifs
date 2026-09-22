@@ -1,4 +1,4 @@
-import { SlashCommandBuilder, ChatInputCommandInteraction, PermissionFlagsBits } from 'discord.js';
+import { SlashCommandBuilder, ChatInputCommandInteraction, PermissionFlagsBits, MessageFlags } from 'discord.js';
 import { boredomService, getRandomBoredomMessage } from '../services/boredom';
 import { getCommandResponse } from '../services/prompts';
 import type { Command } from '../bot/client';
@@ -65,7 +65,7 @@ ${stats.enabled
   ? '*I\'ll randomly ping you 10-60 minutes after our last conversation when I get bored~* (=^･ω･^=)' 
   : '*I\'ll leave you alone... for now...* (=･ω･=)'}
 `,
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
         break;
       }
@@ -79,14 +79,14 @@ ${stats.enabled
             'You are already opted in to boredom pings!';
           await interaction.reply({
             content: alreadyEnabledResponse,
-            ephemeral: true,
+            flags: MessageFlags.Ephemeral,
           });
         } else {
           const enableResponse = getCommandResponse('boredom_enabled_confirm') || 
             'Boredom pings enabled! I will message you randomly 10-60 minutes after you stop chatting.';
           await interaction.reply({
             content: enableResponse,
-            ephemeral: true,
+            flags: MessageFlags.Ephemeral,
           });
         }
         break;
@@ -101,14 +101,14 @@ ${stats.enabled
             'You are already opted out of boredom pings.';
           await interaction.reply({
             content: alreadyDisabledResponse,
-            ephemeral: true,
+            flags: MessageFlags.Ephemeral,
           });
         } else {
           const disableResponse = getCommandResponse('boredom_disabled_confirm') || 
             'Boredom pings disabled. I will no longer message you randomly.';
           await interaction.reply({
             content: disableResponse,
-            ephemeral: true,
+            flags: MessageFlags.Ephemeral,
           });
         }
         break;
@@ -138,7 +138,7 @@ ${stats.enabled
   ? '_Remember: I get bored 10-60 minutes after we stop talking!_' 
   : '_You\'ve opted out of my random chaos._'}
 `,
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
         break;
       }
@@ -151,7 +151,7 @@ ${stats.enabled
 ${previewMessage}
 
 _This is an example of what I might send when I get bored! Each message is randomly selected._`,
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
         break;
       }
@@ -160,7 +160,7 @@ _This is an example of what I might send when I get bored! Each message is rando
         if (!interaction.guildId) {
           await interaction.reply({
             content: 'This command can only be used in a server!',
-            ephemeral: true,
+            flags: MessageFlags.Ephemeral,
           });
           return;
         }
@@ -170,7 +170,7 @@ _This is an example of what I might send when I get bored! Each message is rando
         if (guildUsers.length === 0) {
           await interaction.reply({
             content: 'No users have interacted with Lumia in this server yet!',
-            ephemeral: true,
+            flags: MessageFlags.Ephemeral,
           });
           return;
         }
@@ -200,7 +200,7 @@ ${userList}
 
 ${guildUsers.length > 20 ? `_...and ${guildUsers.length - 20} more users_` : ''}
 `,
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
         break;
       }
@@ -208,7 +208,7 @@ ${guildUsers.length > 20 ? `_...and ${guildUsers.length - 20} more users_` : ''}
       default:
         await interaction.reply({
           content: 'Unknown subcommand!',
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
     }
   },
