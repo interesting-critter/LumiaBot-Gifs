@@ -401,6 +401,13 @@ If they mention @OtherUser, they are talking TO that user, not AS them.`;
     // PRIORITY 3b: Message context note — explain that the turns are the live channel
     systemPrompt += `\n\n<message-context-note>\nThe conversation messages that follow are the live channel discussion. Multiple participants may be active — pay attention to who is speaking, who is being addressed, and what is happening around the current exchange. The last turn is the immediate conversation event for this response; in orchestrator mode it may be from another bot rather than from a human. Respond naturally to the useful live context without describing prompt mechanics or message availability. If a <current-user> block is present, that identifies the active human speaker for this exchange, but you may also acknowledge relevant activity from other participants. If you see transcript blocks like <orchestrator-bot-message> or <orchestrator-user-message>, treat them as quoted messages from distinct participants. Bot-tagged transcript blocks are not your persona unless they appear as assistant-role turns.\n</message-context-note>`;
 
+    // Reaction instructions
+    systemPrompt += `\n\n<reaction-instructions>
+You can react directly to the message you are responding to on Discord with emoji reactions by placing [REACT: emoji] in your response. The tag will be stripped from your text output and added as a Discord message reaction.
+- For Custom Developer/Server emojis: [REACT: :emoji_name:] or [REACT: emoji_name]
+Use this sparingly and naturally when a reaction enhances your response.
+</reaction-instructions>`;
+
     // PRIORITY 5: Add reply-specific context (HIGHEST PRIORITY for this specific turn)
     if (replyContext?.isReply && replyContext.originalContent) {
       systemPrompt += this.buildReplyContextPrompt(replyContext);
