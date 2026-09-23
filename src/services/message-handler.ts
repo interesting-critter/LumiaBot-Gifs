@@ -169,16 +169,15 @@ export interface MessageHandlerResponse {
 function extractReactions(response: string): { text: string; reactions: string[] } {
   const reactions: string[] = [];
   
-  // Match [REACT: emoji] or [REACT:emoji] patterns
+  // Match [REACT: emoji], [REACT: :emoji_name:], or [REACT: <:name:id>]
   const reactPattern = /\[REACT:\s*([^\]]+)\]/gi;
   let match;
   
   while ((match = reactPattern.exec(response)) !== null) {
     if (match[1]) {
-      const emoji = match[1].trim();
-      if (emoji) {
-        reactions.push(emoji);
-      }
+      // Split by commas or whitespace to support multiple emojis in one tag
+      const items = match[1].split(/[,\s]+/).map(e => e.trim()).filter(Boolean);
+      reactions.push(...items);
     }
   }
   
