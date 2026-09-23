@@ -865,6 +865,19 @@ ${sections.join('\n\n')}
           orchestratorTurnJournal.markGenerated(turnId, eventId, instanceId, '', payload);
           return '';
         }
+
+        // Add emoji reactions in orchestrator mode
+        if (response.reactions && response.reactions.length > 0) {
+          for (const emoji of response.reactions) {
+            try {
+              const resolved = this.resolveEmojiReaction(emoji, message.guild ?? undefined);
+              await message.react(resolved);
+              console.log(`😀 [Orchestrator] Added reaction: ${resolved} (raw: ${emoji})`);
+            } catch (reactError) {
+              console.error(`❌ [Orchestrator] Failed to add reaction "${emoji}":`, reactError);
+            }
+          }
+        }
       }
 
       return response.text;
@@ -1055,6 +1068,52 @@ ${sections.join('\n\n')}
     this.activeGenerationKeys.delete(key);
   }
 
+    /**
+   * Resolves a raw emoji tag (name, :name:, <:name:id>, or unicode)
+   * to a valid Discord.js reaction identifier (supports Developer Dashboard Application Emojis).
+   */
+  private resolveEmojiReaction(emojiInput: string, guild?: Message['guild']): string {
+    const raw = emojiInput.trim();
+
+    // 1. If formatted as full custom emoji tag <:name:id> or <a:name:id>
+    const customMatch = raw.match(/^<a?:(\w+):(\d+)>$/);
+    if (customMatch) {
+      return `${customMatch[1]}:${customMatch[2]}`;
+    }
+
+    // 2. Strip surrounding colons if provided (e.g. ":my_emoji:" -> "my_emoji")
+    const cleanName = raw.replace(/^:|:$/g, '').toLowerCase();
+
+    // 3. Search Application Emojis (added in Developer Dashboard)
+    const appEmoji = this.client.application?.emojis.cache.find(
+      (e) => e.name?.toLowerCase() === cleanName || e.id === raw
+    );
+    if (appEmoji) {
+      return `${appEmoji.name}:${appEmoji.id}`;
+    }
+
+    // 4. Search Guild/Server Emojis
+    if (guild) {
+      const guildEmoji = guild.emojis.cache.find(
+        (e) => e.name?.toLowerCase() === cleanName || e.id === raw
+      );
+      if (guildEmoji) {
+        return `${guildEmoji.name}:${guildEmoji.id}`;
+      }
+    }
+
+    // 5. Search Client Global Emoji cache
+    const globalEmoji = this.client.emojis.cache.find(
+      (e) => e.name?.toLowerCase() === cleanName || e.id === raw
+    );
+    if (globalEmoji) {
+      return `${globalEmoji.name}:${globalEmoji.id}`;
+    }
+
+    // 6. Fallback to raw string (standard unicode emoji like 🔥)
+    return raw;
+  }
+
   /**
    * Start typing indicator for a specific channel
    * Each channel gets its own independent typing indicator
@@ -1157,10 +1216,16 @@ ${sections.join('\n\n')}
   }
 
   private setupEventHandlers(): void {
-    this.client.once(Events.ClientReady, (readyClient) => {
+    this.client.once(Events.ClientReady, async (readyClient) => {
       console.log(`Ready! Logged in as ${readyClient.user.tag}`);
+      try {
+        await readyClient.application?.emojis.fetch();
+        console.log(`😀 [CLIENT] Cached ${readyClient.application?.emojis.cache.size ?? 0} application emoji(s) from developer dashboard`);
+      } catch (err) {
+        console.warn('⚠️ [CLIENT] Failed to fetch application emojis:', err);
+      }
     });
-
+  
     // Handle process shutdown to clean up timers
     process.on('SIGINT', () => {
       console.log('\n🛑 [CLIENT] Shutting down...');
@@ -1814,8 +1879,9 @@ ${sections.join('\n\n')}
       if (response.reactions.length > 0) {
         for (const emoji of response.reactions) {
           try {
-            await message.react(emoji);
-            console.log(`😀 [CLIENT] Added reaction: ${emoji}`);
+            const resolved = this.resolveEmojiReaction(emoji, message.guild ?? undefined);
+            await message.react(resolved);
+            console.log(`😀 [CLIENT] Added reaction: ${resolved} (raw: ${emoji})`);
           } catch (reactError) {
             console.error(`❌ [CLIENT] Failed to add reaction "${emoji}":`, reactError);
           }
