@@ -1,317 +1,251 @@
 import { Database } from 'bun:sqlite';
-import { getRandomBoredomMessage as getPromptBoredomMessage } from './prompts';
+import {
+  Client,
+  TextChannel,
+  ThreadChannel,
+  NewsChannel,
+  VoiceChannel,
+  StageChannel,
+  ChannelType,
+  PermissionFlagsBits,
+  type GuildTextBasedChannel,
+} from 'discord.js';
+import { config } from '../utils/config';
+import { channelHistoryService } from './channel-history';
+import { getAIService } from './google-genai';
+import { formatDiscordResponseText } from '../utils/discord-markdown';
 
-export interface BoredomSettings {
-  userId: string;
-  guildId: string;
+interface BoredomState {
   enabled: boolean;
-  lastInteractionAt: string;
-  lastPingedAt: string | null;
-  pingCount: number;
-}
-
-export interface PendingPing {
-  userId: string;
-  guildId: string;
-  username: string;
-  channelId: string;
-  scheduledFor: Date;
-  timeoutId: ReturnType<typeof setTimeout> | null;
+  lastRunAt: string | null;
+  nextRunAt: string | null;
 }
 
 export class BoredomService {
   private db: Database;
-  private pendingPings: Map<string, PendingPing> = new Map();
-  private readonly MIN_BOREDOM_MINUTES = 10;
-  private readonly MAX_BOREDOM_MINUTES = 60;
+  private client: Client | null = null;
+  private timer: ReturnType<typeof setTimeout> | null = null;
+  private isExecuting = false;
 
   constructor() {
     this.db = new Database('boredom.db');
     this.initDatabase();
-    console.log('😴 [BOREDOM] Service initialized (10-60 min boredom timer)');
   }
 
   private initDatabase(): void {
     this.db.run(`
-      CREATE TABLE IF NOT EXISTS boredom_settings (
-        user_id TEXT NOT NULL,
-        guild_id TEXT NOT NULL,
-        enabled BOOLEAN DEFAULT 1,
-        last_interaction_at TEXT NOT NULL,
-        last_pinged_at TEXT,
-        ping_count INTEGER DEFAULT 0,
-        PRIMARY KEY (user_id, guild_id)
+      CREATE TABLE IF NOT EXISTS boredom_state (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
       )
     `);
 
-    this.db.run(`
-      CREATE INDEX IF NOT EXISTS idx_boredom_user_guild ON boredom_settings(user_id, guild_id)
-    `);
-
-    this.db.run(`
-      CREATE INDEX IF NOT EXISTS idx_boredom_guild ON boredom_settings(guild_id)
-    `);
-
-    console.log('😴 [BOREDOM] Database initialized');
-  }
-
-  /**
-   * Generate a random boredom delay between 10-60 minutes
-   */
-  private getRandomBoredomDelay(): number {
-    const minMs = this.MIN_BOREDOM_MINUTES * 60 * 1000;
-    const maxMs = this.MAX_BOREDOM_MINUTES * 60 * 1000;
-    return Math.floor(Math.random() * (maxMs - minMs + 1)) + minMs;
-  }
-
-  /**
-   * Get or create boredom settings for a user in a guild
-   */
-  getSettings(userId: string, guildId: string): BoredomSettings {
-    const result = this.db.query(
-      'SELECT * FROM boredom_settings WHERE user_id = ? AND guild_id = ?'
-    ).get(userId, guildId) as BoredomSettings | undefined;
-
-    if (result) {
-      return result;
+    // Ensure default enabled row
+    const existing = this.db.query('SELECT value FROM boredom_state WHERE key = ?').get('enabled') as { value: string } | undefined;
+    if (!existing) {
+      this.db.run('INSERT INTO boredom_state (key, value) VALUES (?, ?)', ['enabled', config.boredom.enabled ? '1' : '0']);
     }
+  }
 
-    // Create default settings (DISABLED by default - opt-in model)
-    const now = new Date().toISOString();
+  private getStateValue(key: string): string | null {
+    const row = this.db.query('SELECT value FROM boredom_state WHERE key = ?').get(key) as { value: string } | undefined;
+    return row ? row.value : null;
+  }
+
+  private setStateValue(key: string, value: string): void {
     this.db.run(
-      `INSERT INTO boredom_settings (user_id, guild_id, enabled, last_interaction_at, ping_count)
-       VALUES (?, ?, 0, ?, 0)`,
-      [userId, guildId, now]
+      `INSERT INTO boredom_state (key, value) VALUES (?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      [key, value]
     );
+  }
 
+  public getState(): BoredomState {
+    const enabledRaw = this.getStateValue('enabled');
     return {
-      userId,
-      guildId,
-      enabled: false,
-      lastInteractionAt: now,
-      lastPingedAt: null,
-      pingCount: 0,
+      enabled: enabledRaw !== null ? enabledRaw === '1' : config.boredom.enabled,
+      lastRunAt: this.getStateValue('last_run_at'),
+      nextRunAt: this.getStateValue('next_run_at'),
     };
   }
 
-  /**
-   * Check if user has opted out of boredom pings
-   */
-  isEnabled(userId: string, guildId: string): boolean {
-    const settings = this.getSettings(userId, guildId);
-    return settings.enabled;
-  }
-
-  /**
-   * Enable or disable boredom pings for a user
-   */
-  setEnabled(userId: string, guildId: string, enabled: boolean): void {
-    const settings = this.getSettings(userId, guildId);
-    
-    this.db.run(
-      `UPDATE boredom_settings 
-       SET enabled = ?
-       WHERE user_id = ? AND guild_id = ?`,
-      [enabled ? 1 : 0, userId, guildId]
-    );
-
+  public setEnabled(enabled: boolean): void {
+    this.setStateValue('enabled', enabled ? '1' : '0');
     if (enabled) {
-      console.log(`😴 [BOREDOM] Enabled for user ${userId} in guild ${guildId}`);
+      this.scheduleNext();
     } else {
-      console.log(`😴 [BOREDOM] Disabled for user ${userId} in guild ${guildId}`);
-      // Cancel any pending ping
-      this.cancelPendingPing(userId, guildId);
-    }
-  }
-
-  /**
-   * Opt out a user from boredom pings
-   */
-  optOut(userId: string, guildId: string): void {
-    this.setEnabled(userId, guildId, false);
-    console.log(`😴 [BOREDOM] User ${userId} opted out in guild ${guildId}`);
-  }
-
-  /**
-   * Opt in a user to boredom pings
-   */
-  optIn(userId: string, guildId: string): void {
-    this.setEnabled(userId, guildId, true);
-    console.log(`😴 [BOREDOM] User ${userId} opted in in guild ${guildId}`);
-  }
-
-  /**
-   * Record an interaction with a user and schedule a boredom ping
-   */
-  recordInteraction(
-    userId: string,
-    guildId: string,
-    username: string,
-    channelId: string,
-    onPing: (userId: string, guildId: string, username: string, channelId: string) => void
-  ): void {
-    const now = new Date().toISOString();
-    const settings = this.getSettings(userId, guildId);
-
-    // Update last interaction time
-    this.db.run(
-      `UPDATE boredom_settings 
-       SET last_interaction_at = ?
-       WHERE user_id = ? AND guild_id = ?`,
-      [now, userId, guildId]
-    );
-
-    // Cancel any existing pending ping
-    this.cancelPendingPing(userId, guildId);
-
-    // Only schedule if enabled
-    if (!settings.enabled) {
-      console.log(`😴 [BOREDOM] User ${username} is opted out, no ping scheduled`);
-      return;
-    }
-
-    // Schedule new boredom ping
-    const delay = this.getRandomBoredomDelay();
-    const scheduledFor = new Date(Date.now() + delay);
-
-    const timeoutId = setTimeout(() => {
-      this.executePing(userId, guildId, username, channelId, onPing);
-    }, delay);
-
-    const pingKey = `${userId}:${guildId}`;
-    this.pendingPings.set(pingKey, {
-      userId,
-      guildId,
-      username,
-      channelId,
-      scheduledFor,
-      timeoutId,
-    });
-
-    console.log(`😴 [BOREDOM] Scheduled ping for ${username} in ${Math.round(delay / 60000)} minutes (${scheduledFor.toLocaleTimeString()})`);
-  }
-
-  /**
-   * Cancel a pending ping for a user
-   */
-  private cancelPendingPing(userId: string, guildId: string): void {
-    const pingKey = `${userId}:${guildId}`;
-    const pending = this.pendingPings.get(pingKey);
-    
-    if (pending?.timeoutId) {
-      clearTimeout(pending.timeoutId);
-      this.pendingPings.delete(pingKey);
-      console.log(`😴 [BOREDOM] Cancelled pending ping for ${pending.username}`);
-    }
-  }
-
-  /**
-   * Execute a boredom ping
-   */
-  private executePing(
-    userId: string,
-    guildId: string,
-    username: string,
-    channelId: string,
-    onPing: (userId: string, guildId: string, username: string, channelId: string) => void
-  ): void {
-    const pingKey = `${userId}:${guildId}`;
-    this.pendingPings.delete(pingKey);
-
-    // Check if still enabled
-    if (!this.isEnabled(userId, guildId)) {
-      console.log(`😴 [BOREDOM] Ping cancelled - user ${username} is opted out`);
-      return;
-    }
-
-    // Update ping stats
-    const now = new Date().toISOString();
-    this.db.run(
-      `UPDATE boredom_settings 
-       SET last_pinged_at = ?, ping_count = ping_count + 1
-       WHERE user_id = ? AND guild_id = ?`,
-      [now, userId, guildId]
-    );
-
-    console.log(`😴 [BOREDOM] Executing ping for ${username}`);
-    onPing(userId, guildId, username, channelId);
-  }
-
-  /**
-   * Get boredom stats for a user
-   */
-  getStats(userId: string, guildId: string): {
-    enabled: boolean;
-    lastInteraction: string;
-    lastPinged: string | null;
-    pingCount: number;
-    hasPendingPing: boolean;
-    nextPingAt: string | null;
-  } {
-    const settings = this.getSettings(userId, guildId);
-    const pingKey = `${userId}:${guildId}`;
-    const pending = this.pendingPings.get(pingKey);
-
-    return {
-      enabled: settings.enabled,
-      lastInteraction: settings.lastInteractionAt,
-      lastPinged: settings.lastPingedAt,
-      pingCount: settings.pingCount,
-      hasPendingPing: !!pending,
-      nextPingAt: pending?.scheduledFor.toISOString() || null,
-    };
-  }
-
-  /**
-   * List all users with boredom settings in a guild
-   */
-  listGuildUsers(guildId: string): Array<{
-    userId: string;
-    enabled: boolean;
-    lastInteraction: string;
-    pingCount: number;
-  }> {
-    const results = this.db.query(
-      `SELECT user_id, enabled, last_interaction_at, ping_count
-       FROM boredom_settings
-       WHERE guild_id = ?
-       ORDER BY last_interaction_at DESC`
-    ).all(guildId) as Array<{
-      user_id: string;
-      enabled: number;
-      last_interaction_at: string;
-      ping_count: number;
-    }>;
-
-    return results.map(r => ({
-      userId: r.user_id,
-      enabled: r.enabled === 1,
-      lastInteraction: r.last_interaction_at,
-      pingCount: r.ping_count,
-    }));
-  }
-
-  /**
-   * Clean up on shutdown
-   */
-  cleanup(): void {
-    console.log('😴 [BOREDOM] Cleaning up pending pings...');
-    for (const [key, pending] of this.pendingPings) {
-      if (pending.timeoutId) {
-        clearTimeout(pending.timeoutId);
+      if (this.timer) {
+        clearTimeout(this.timer);
+        this.timer = null;
       }
+      this.setStateValue('next_run_at', '');
+      console.log('😴 [BOREDOM] Spontaneous chatter disabled.');
     }
-    this.pendingPings.clear();
-    console.log('😴 [BOREDOM] All pending pings cancelled');
+  }
+
+  public start(client: Client): void {
+    this.client = client;
+    const state = this.getState();
+
+    if (!state.enabled) {
+      console.log('😴 [BOREDOM] Spontaneous chatter is disabled by state/config.');
+      return;
+    }
+
+    const now = Date.now();
+    const lastRunTime = state.lastRunAt ? new Date(state.lastRunAt).getTime() : 0;
+    const minIntervalMs = config.boredom.minIntervalMinutes * 60 * 1000;
+
+    if (lastRunTime && now - lastRunTime < minIntervalMs) {
+      // Offline duration was less than minimum interval; schedule remaining or random delay
+      const remaining = minIntervalMs - (now - lastRunTime);
+      this.scheduleNext(remaining);
+    } else if (lastRunTime && now - lastRunTime >= minIntervalMs) {
+      // Missed an execution while offline: warm up for 2-5 minutes before first trigger
+      const jitterMs = Math.floor(Math.random() * (5 - 2 + 1) + 2) * 60 * 1000;
+      console.log(`😴 [BOREDOM] Offline longer than interval. Scheduling initial chatter in ${Math.round(jitterMs / 60000)} minutes.`);
+      this.scheduleNext(jitterMs);
+    } else {
+      this.scheduleNext();
+    }
+  }
+
+  public stop(): void {
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+    console.log('😴 [BOREDOM] Spontaneous chatter stopped.');
+  }
+
+  public scheduleNext(customDelayMs?: number): void {
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+
+    const state = this.getState();
+    if (!state.enabled) return;
+
+    let delayMs = customDelayMs;
+    if (delayMs === undefined) {
+      const minMs = config.boredom.minIntervalMinutes * 60 * 1000;
+      const maxMs = config.boredom.maxIntervalMinutes * 60 * 1000;
+      delayMs = Math.floor(Math.random() * (maxMs - minMs + 1)) + minMs;
+    }
+
+    const nextRun = new Date(Date.now() + delayMs);
+    this.setStateValue('next_run_at', nextRun.toISOString());
+
+    console.log(`😴 [BOREDOM] Next spontaneous chat scheduled in ${Math.round(delayMs / 60000)} minutes (at ${nextRun.toLocaleTimeString()})`);
+
+    this.timer = setTimeout(async () => {
+      if (this.client) {
+        await this.executeSpontaneousChat(this.client);
+      }
+    }, delayMs);
+  }
+
+  public async executeSpontaneousChat(client: Client): Promise<boolean> {
+    if (this.isExecuting) return false;
+    this.isExecuting = true;
+
+    try {
+      if (config.boredom.channelIds.length === 0) {
+        console.warn('⚠️ [BOREDOM] No channels configured in BOREDOM_CHANNELS.');
+        return false;
+      }
+
+      const validChannels: GuildTextBasedChannel[] = [];
+
+      for (const channelId of config.boredom.channelIds) {
+        try {
+          const channel = await client.channels.fetch(channelId);
+          if (!channel || !channel.isTextBased()) continue;
+
+          // Exclude DMs, only allow server guild text-based channels
+          if (!('guild' in channel) || !channel.guild) continue;
+
+          if (config.bot.nsfwOnly) {
+            const isNsfw = 'nsfw' in channel && channel.nsfw === true;
+            const parentIsNsfw = channel.isThread() && channel.parent && 'nsfw' in channel.parent && channel.parent.nsfw === true;
+            if (!isNsfw && !parentIsNsfw) continue;
+          }
+
+          const me = channel.guild.members.me;
+          if (!me) continue;
+
+          const perms = channel.permissionsFor(me);
+          if (
+            perms?.has(PermissionFlagsBits.ViewChannel) &&
+            perms?.has(PermissionFlagsBits.SendMessages) &&
+            perms?.has(PermissionFlagsBits.ReadMessageHistory)
+          ) {
+            validChannels.push(channel as GuildTextBasedChannel);
+          }
+        } catch (err) {
+          console.warn(`⚠️ [BOREDOM] Could not access channel ${channelId}:`, err);
+        }
+      }
+
+      if (validChannels.length === 0) {
+        console.warn('⚠️ [BOREDOM] No accessible or eligible channels found in BOREDOM_CHANNELS pool.');
+        return false;
+      }
+
+      const channel = validChannels[Math.floor(Math.random() * validChannels.length)]!;
+      console.log(`😴 [BOREDOM] Selected channel #${channel.name} (${channel.id}) in ${channel.guild.name}`);
+
+      const rawMessages = await channelHistoryService.fetchChannelHistory(channel, undefined, config.boredom.historyLimit);
+      const turns = channelHistoryService.convertToTurns(rawMessages, client.user?.id);
+
+      const spontaneousInstructions = [
+        'You are popping into the channel spontaneously. Read the recent chat history to see what was being talked about.',
+        'Either chime in with a quick, funny, or chaotic observation about their recent conversation, or bring up a random thought fitting your persona if chat has been quiet.',
+        'Do not ping anyone or say "hey guys", just speak naturally into the room.',
+        'Keep it short (1-3 sentences).',
+      ].join(' ');
+
+      if (config.boredom.showTyping) {
+        try {
+          await channel.sendTyping();
+          await new Promise((resolve) => setTimeout(resolve, 3000));
+        } catch {}
+      }
+
+      const aiService = getAIService();
+      const response = await aiService.createChatCompletion({
+        messages: turns,
+        systemPromptOverride: spontaneousInstructions,
+        enableSearch: false,
+        enableKnowledgeGraph: false,
+        isGifEnabled: false,
+        guildId: channel.guildId,
+      });
+
+      const formatted = formatDiscordResponseText(response);
+      if (!formatted.trim()) {
+        console.warn('⚠️ [BOREDOM] Generated empty message, skipping output.');
+        return false;
+      }
+
+      await channel.send({
+        content: formatted,
+        allowedMentions: { parse: [] },
+      });
+
+      const now = new Date().toISOString();
+      this.setStateValue('last_run_at', now);
+      console.log(`😴 [BOREDOM] Spontaneous message sent to #${channel.name}`);
+      return true;
+    } catch (error) {
+      console.error('❌ [BOREDOM] Error executing spontaneous chat:', error);
+      return false;
+    } finally {
+      this.isExecuting = false;
+      this.scheduleNext();
+    }
   }
 }
 
-// Singleton instance
 export const boredomService = new BoredomService();
-
-// Boredom messages are now loaded dynamically from prompt_storage/persona/boredom_pings.json
-// Use getRandomBoredomMessage from './prompts' instead
-
-export function getRandomBoredomMessage(userId: string): string {
-  return getPromptBoredomMessage(userId);
-}
