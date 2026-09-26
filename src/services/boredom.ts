@@ -13,6 +13,7 @@ import {
 import { config } from '../utils/config';
 import { channelHistoryService } from './channel-history';
 import { getAIService } from './google-genai';
+import { gifService } from './gif';
 import { formatDiscordResponseText } from '../utils/discord-markdown';
 
 interface BoredomState {
@@ -199,11 +200,14 @@ export class BoredomService {
       const rawMessages = await channelHistoryService.fetchChannelHistory(channel, undefined, config.boredom.historyLimit);
       const turns = channelHistoryService.convertToTurns(rawMessages, client.user?.id);
 
+      const isGifEnabled = channel.guildId ? gifService.isGifEnabled(channel.guildId) : false;
+
       const spontaneousInstructions = [
         'You are popping into the channel spontaneously. Read the recent chat history to see what was being talked about.',
         'Either chime in with a quick, funny, or chaotic observation about their recent conversation, or bring up a random thought fitting your persona if chat has been quiet.',
         'Do not ping anyone or say "hey guys", just speak naturally into the room.',
         'Keep it short (1-3 sentences).',
+        'Do not include [REACT: ...] tags or emoji reaction directives.',
       ].join(' ');
 
       if (config.boredom.showTyping) {
@@ -219,20 +223,30 @@ export class BoredomService {
         systemPromptOverride: spontaneousInstructions,
         enableSearch: false,
         enableKnowledgeGraph: false,
-        isGifEnabled: false,
+        isGifEnabled,
         guildId: channel.guildId,
       });
 
-      const formatted = formatDiscordResponseText(response);
-      if (!formatted.trim()) {
+      const { text: textWithoutGif, gifUrl } = isGifEnabled
+        ? await gifService.extractAndResolveGif(response)
+        : { text: response, gifUrl: undefined };
+
+      const formatted = formatDiscordResponseText(textWithoutGif);
+      if (!formatted.trim() && !gifUrl) {
         console.warn('⚠️ [BOREDOM] Generated empty message, skipping output.');
         return false;
       }
 
-      await channel.send({
-        content: formatted,
-        allowedMentions: { parse: [] },
-      });
+      if (formatted.trim()) {
+        await channel.send({
+          content: formatted,
+          allowedMentions: { parse: [] },
+        });
+      }
+
+      if (gifUrl) {
+        await channel.send(gifUrl);
+      }
 
       const now = new Date().toISOString();
       this.setStateValue('last_run_at', now);

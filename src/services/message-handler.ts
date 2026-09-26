@@ -165,11 +165,11 @@ export interface MessageHandlerResponse {
  * Extract reactions from AI response
  * Looks for [REACT: emoji] tags in the response
  */
-function extractReactions(response: string): { text: string; reactions: string[] } {
+ function extractReactions(response: string): { text: string; reactions: string[] } {
   const reactions: string[] = [];
   
-  // Match [REACT: emoji], [REACT: :emoji_name:], or [REACT: <:name:id>]
-  const reactPattern = /\[REACT:\s*([^\]]+)\]/gi;
+  // Match [REACT: emoji], [REACT: :emoji_name:], [REACT: <:name:id>], and full-width bracket variants
+  const reactPattern = /[\[［]REACT:\s*([^\]］]+)[\]］]/gi;
   let match;
   
   while ((match = reactPattern.exec(response)) !== null) {
