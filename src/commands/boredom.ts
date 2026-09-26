@@ -7,26 +7,25 @@ const boredomCommand: Command = {
   data: new SlashCommandBuilder()
     .setName('boredom')
     .setDescription('Manage Lumia\'s spontaneous channel chatter engine')
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
     .addSubcommand((subcommand) =>
       subcommand
         .setName('status')
-        .setDescription('View current spontaneous chatter configuration and schedule')
+        .setDescription('View current spontaneous chatter configuration and schedule (Mod Only)')
     )
     .addSubcommand((subcommand) =>
       subcommand
         .setName('enable')
-        .setDescription('Enable spontaneous channel chatter')
+        .setDescription('Enable spontaneous channel chatter (Mod Only)')
     )
     .addSubcommand((subcommand) =>
       subcommand
         .setName('disable')
-        .setDescription('Disable/pause spontaneous channel chatter')
+        .setDescription('Disable/pause spontaneous channel chatter (Mod Only)')
     )
     .addSubcommand((subcommand) =>
       subcommand
         .setName('interval')
-        .setDescription('Set minimum and maximum intervals for spontaneous chatter')
+        .setDescription('Set minimum and maximum intervals for spontaneous chatter (Mod Only)')
         .addIntegerOption((opt) =>
           opt
             .setName('min')
@@ -45,18 +44,20 @@ const boredomCommand: Command = {
     .addSubcommand((subcommand) =>
       subcommand
         .setName('trigger')
-        .setDescription('Force an immediate spontaneous chatter turn in a random configured channel')
+        .setDescription('Force an immediate spontaneous chatter turn in a random configured channel (Mod Only)')
     ) as SlashCommandBuilder,
 
   async execute(interaction: ChatInputCommandInteraction) {
     const isOwner = interaction.user.id === config.bot.ownerId;
     const isServerOwner = interaction.guild?.ownerId === interaction.user.id;
-    const hasModPerms = interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild) ||
-      interaction.memberPermissions?.has(PermissionFlagsBits.Administrator);
+    const hasAdminOrBanPerms = Boolean(
+      interaction.memberPermissions?.has(PermissionFlagsBits.BanMembers) ||
+      interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)
+    );
 
-    if (!isOwner && !isServerOwner && !hasModPerms) {
+    if (!isOwner && !isServerOwner && !hasAdminOrBanPerms) {
       await interaction.reply({
-        content: '❌ You must have `Manage Server` permissions or be the bot owner to use this command.',
+        content: '❌ You must be the bot owner or a mod to use this command.',
         flags: MessageFlags.Ephemeral,
       });
       return;
