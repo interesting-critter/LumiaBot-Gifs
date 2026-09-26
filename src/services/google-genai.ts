@@ -1501,10 +1501,16 @@ ONLY use this tool when you detect CLEAR, EXPLICIT intent to change boredom sett
   private isThoughtContent(part: {
     thought?: boolean;
     thoughtSignature?: string;
+    thought_signature?: string;
     text?: string;
     functionCall?: { name?: string };
     inlineData?: unknown;
   }): boolean {
+    // Never treat tool calls as thought content
+    if (part.functionCall) {
+      return false;
+    }
+
     // Explicitly marked as a thought summary — always internal reasoning.
     if (part.thought === true) {
       return true;
@@ -1514,8 +1520,8 @@ ONLY use this tool when you detect CLEAR, EXPLICIT intent to change boredom sett
     // payload is a thoughtSignature, and relays merge that signature onto
     // regular content parts. A signature alone is NOT a thought marker:
     // only drop the part when it carries no usable payload at all.
-    if (part.thoughtSignature) {
-      return !part.text && !part.functionCall && !part.inlineData;
+    if (part.thoughtSignature || part.thought_signature) {
+      return !part.text && !part.inlineData;
     }
 
     return false;
@@ -1611,15 +1617,28 @@ ONLY use this tool when you detect CLEAR, EXPLICIT intent to change boredom sett
           }
 
           // Add function call and results to conversation
-          currentContents.push({
-            role: 'model',
-            parts: functionCalls.map((fc: any) => ({
-              functionCall: {
-                name: fc.name,
-                args: fc.args,
-              },
-            })),
-          });
+          // Gemini 3 requires echoing the exact model turn containing thoughtSignature
+          const candidateContent = response.candidates?.[0]?.content;
+          if (candidateContent?.parts) {
+            for (const part of candidateContent.parts) {
+              if (part.functionCall && !(part as any).thoughtSignature && !(part as any).thought_signature) {
+                (part as any).thoughtSignature = 'skip_thought_signature_validator';
+              }
+            }
+            currentContents.push(candidateContent);
+          } else {
+            // Fallback if candidate content is unexpectedly undefined
+            currentContents.push({
+              role: 'model',
+              parts: functionCalls.map((fc: any) => ({
+                functionCall: {
+                  name: fc.name,
+                  args: fc.args,
+                },
+                thoughtSignature: fc.thoughtSignature || (fc as any).thought_signature || 'skip_thought_signature_validator',
+              })),
+            });
+          }
 
           currentContents.push({
             role: 'user',
