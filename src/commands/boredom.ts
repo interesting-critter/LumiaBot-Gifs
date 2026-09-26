@@ -25,6 +25,25 @@ const boredomCommand: Command = {
     )
     .addSubcommand((subcommand) =>
       subcommand
+        .setName('interval')
+        .setDescription('Set minimum and maximum intervals for spontaneous chatter')
+        .addIntegerOption((opt) =>
+          opt
+            .setName('min')
+            .setDescription('Minimum interval in minutes')
+            .setRequired(true)
+            .setMinValue(1)
+        )
+        .addIntegerOption((opt) =>
+          opt
+            .setName('max')
+            .setDescription('Maximum interval in minutes')
+            .setRequired(true)
+            .setMinValue(1)
+        )
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
         .setName('trigger')
         .setDescription('Force an immediate spontaneous chatter turn in a random configured channel')
     ) as SlashCommandBuilder,
@@ -65,13 +84,38 @@ const boredomCommand: Command = {
           content: `😴 **Spontaneous Chatter System Status**
 
 **Status:** ${statusText}
-**Interval Range:** ${config.boredom.minIntervalMinutes} – ${config.boredom.maxIntervalMinutes} minutes
+**Interval Range:** ${state.minIntervalMinutes} – ${state.maxIntervalMinutes} minutes
 **Show Typing Indicator:** ${config.boredom.showTyping ? 'Yes' : 'No (stealth)'}
 **Context History Limit:** ${config.boredom.historyLimit} messages
 **Configured Channels:** ${channelsFormatted}
 
 **Last Run:** ${lastRunFormatted}
 **Next Scheduled Run:** ${nextRunFormatted}`,
+          flags: MessageFlags.Ephemeral,
+        });
+        break;
+      }
+
+      case 'interval': {
+        const min = interaction.options.getInteger('min', true);
+        const max = interaction.options.getInteger('max', true);
+
+        if (min > max) {
+          await interaction.reply({
+            content: '❌ Minimum interval cannot be greater than maximum interval.',
+            flags: MessageFlags.Ephemeral,
+          });
+          return;
+        }
+
+        boredomService.setIntervals(min, max);
+        const state = boredomService.getState();
+        const nextRunFormatted = state.nextRunAt && state.enabled
+          ? `<t:${Math.floor(new Date(state.nextRunAt).getTime() / 1000)}:R>`
+          : 'Not scheduled';
+
+        await interaction.reply({
+          content: `⏱️ Spontaneous chatter interval updated to **${min} – ${max} minutes**!\nNext run scheduled for: ${nextRunFormatted}`,
           flags: MessageFlags.Ephemeral,
         });
         break;

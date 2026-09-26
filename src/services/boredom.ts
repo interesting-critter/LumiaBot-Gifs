@@ -18,6 +18,8 @@ import { formatDiscordResponseText } from '../utils/discord-markdown';
 
 interface BoredomState {
   enabled: boolean;
+  minIntervalMinutes: number;
+  maxIntervalMinutes: number;
   lastRunAt: string | null;
   nextRunAt: string | null;
 }
@@ -63,11 +65,28 @@ export class BoredomService {
 
   public getState(): BoredomState {
     const enabledRaw = this.getStateValue('enabled');
+    const minRaw = this.getStateValue('min_interval_minutes');
+    const maxRaw = this.getStateValue('max_interval_minutes');
+
     return {
       enabled: enabledRaw === '1',
+      minIntervalMinutes: minRaw ? parseInt(minRaw, 10) : config.boredom.minIntervalMinutes,
+      maxIntervalMinutes: maxRaw ? parseInt(maxRaw, 10) : config.boredom.maxIntervalMinutes,
       lastRunAt: this.getStateValue('last_run_at'),
       nextRunAt: this.getStateValue('next_run_at'),
     };
+  }
+
+  public setIntervals(minMinutes: number, maxMinutes: number): void {
+    this.setStateValue('min_interval_minutes', minMinutes.toString());
+    this.setStateValue('max_interval_minutes', maxMinutes.toString());
+    console.log(`😴 [BOREDOM] Updated interval: ${minMinutes} - ${maxMinutes} minutes.`);
+
+    // Reschedule next execution if currently enabled
+    const state = this.getState();
+    if (state.enabled) {
+      this.scheduleNext();
+    }
   }
 
   public setEnabled(enabled: boolean): void {
@@ -95,7 +114,7 @@ export class BoredomService {
 
     const now = Date.now();
     const lastRunTime = state.lastRunAt ? new Date(state.lastRunAt).getTime() : 0;
-    const minIntervalMs = config.boredom.minIntervalMinutes * 60 * 1000;
+    const minIntervalMs = state.minIntervalMinutes * 60 * 1000;
 
     if (lastRunTime && now - lastRunTime < minIntervalMs) {
       // Offline duration was less than minimum interval; schedule remaining or random delay
@@ -130,8 +149,8 @@ export class BoredomService {
 
     let delayMs = customDelayMs;
     if (delayMs === undefined) {
-      const minMs = config.boredom.minIntervalMinutes * 60 * 1000;
-      const maxMs = config.boredom.maxIntervalMinutes * 60 * 1000;
+      const minMs = state.minIntervalMinutes * 60 * 1000;
+      const maxMs = state.maxIntervalMinutes * 60 * 1000;
       delayMs = Math.floor(Math.random() * (maxMs - minMs + 1)) + minMs;
     }
 
