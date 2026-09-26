@@ -131,8 +131,8 @@ export const config = {
     reconnectIntervalMs: parseInt(process.env.ORCHESTRATOR_RECONNECT_INTERVAL || '5000'),
     maxReconnectAttempts: parseInt(process.env.ORCHESTRATOR_MAX_RECONNECT || '10'),
   },
+};
   boredom: {
-    enabled: parseBoolean(process.env.BOREDOM_ENABLED, true),
     channelIds: (process.env.BOREDOM_CHANNELS || '')
       .split(',')
       .map((id) => id.trim())
@@ -142,7 +142,6 @@ export const config = {
     showTyping: parseBoolean(process.env.BOREDOM_SHOW_TYPING, false),
     historyLimit: parseInt(process.env.BOREDOM_HISTORY_LIMIT || '15', 10),
   },
-};
 
 /**
  * Check if the current model is a Gemini 3 model

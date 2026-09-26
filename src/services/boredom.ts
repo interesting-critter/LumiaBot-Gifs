@@ -40,10 +40,10 @@ export class BoredomService {
       )
     `);
 
-    // Ensure default enabled row
+    // Default to disabled on first run until toggled via /boredom enable
     const existing = this.db.query('SELECT value FROM boredom_state WHERE key = ?').get('enabled') as { value: string } | undefined;
     if (!existing) {
-      this.db.run('INSERT INTO boredom_state (key, value) VALUES (?, ?)', ['enabled', config.boredom.enabled ? '1' : '0']);
+      this.db.run('INSERT INTO boredom_state (key, value) VALUES (?, ?)', ['enabled', '0']);
     }
   }
 
@@ -63,7 +63,7 @@ export class BoredomService {
   public getState(): BoredomState {
     const enabledRaw = this.getStateValue('enabled');
     return {
-      enabled: enabledRaw !== null ? enabledRaw === '1' : config.boredom.enabled,
+      enabled: enabledRaw === '1',
       lastRunAt: this.getStateValue('last_run_at'),
       nextRunAt: this.getStateValue('next_run_at'),
     };
@@ -88,7 +88,7 @@ export class BoredomService {
     const state = this.getState();
 
     if (!state.enabled) {
-      console.log('😴 [BOREDOM] Spontaneous chatter is disabled by state/config.');
+      console.log('😴 [BOREDOM] Spontaneous chatter is currently disabled (use /boredom enable).');
       return;
     }
 
