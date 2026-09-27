@@ -188,7 +188,7 @@ const command: Command = {
             `**${doc.id}**. **${doc.title}** (${doc.topic}) - Priority: ${doc.priority}`
           ).join('\n');
 
-          // Split into chunks if too long for Discord message limits
+          // Split into chunks if too long
           const chunks = [];
           let currentChunk = '📚 **Knowledge Base Documents:**\n\n';
           
@@ -207,6 +207,7 @@ const command: Command = {
             flags: MessageFlags.Ephemeral,
           });
 
+          // Send additional chunks if needed
           for (let i = 1; i < chunks.length; i++) {
             await interaction.followUp({
               content: chunks[i],
@@ -374,14 +375,10 @@ const command: Command = {
       }
     } catch (error) {
       console.error('Knowledge command error:', error);
-      const replyFn = interaction.replied || interaction.deferred
-        ? interaction.followUp
-        : interaction.reply;
-
-      await replyFn.call(interaction, {
-        content: '❌ An error occurred while processing your command.',
-        flags: MessageFlags.Ephemeral,
-      });
+      await interaction.reply({
+          content: '❌ An error occurred while processing your command.',
+          flags: MessageFlags.Ephemeral,
+        });
     }
   },
 };
