@@ -49,6 +49,23 @@ export function escapeDiscordMarkdown(text: string): string {
   return escaped;
 }
 
+const REACTION_TAG_REGEX = /[\[［]REACT:\s*[^\]］]+[\]］]/gi;
+const UNHANDLED_GIF_TAG_REGEX = /<gif\s*>[\s\S]*?<\/gif\s*>|<(?:gif[_-]?query|tenor)\s*>[\s\S]*?<\/(?:gif[_-]?query|tenor)\s*>|\[gif\][\s\S]*?\[\/gif\]/gi;
+
+/**
+ * Remove [REACT: ...] tags (including full-width bracket variants) from model output.
+ */
+export function stripReactionTags(text: string): string {
+  return text.replace(REACTION_TAG_REGEX, '').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+/**
+ * Strip leftover raw <gif> tags if GIF generation is disabled or extraction failed.
+ */
+export function stripUnhandledGifTags(text: string): string {
+  return text.replace(UNHANDLED_GIF_TAG_REGEX, '').replace(/\n{3,}/g, '\n\n').trim();
+}
+
 function escapeDiscordHeaders(text: string): string {
   const lines = text.split('\n');
   let inFence = false;
@@ -69,8 +86,24 @@ function escapeDiscordHeaders(text: string): string {
   }).join('\n');
 }
 
+/**
+ * Replaces spaces inside ±...± with non-breaking spaces and glues characters
+ * with word joiners (\u2060) so Discord doesn't split kaomojis across lines.
+ */
+function protectKaomojis(text: string): string {
+  const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+
+  return text.replace(/±(.*?)±/gs, (_, content: string) => {
+    const withNbsp = content.replace(/ /g, '\u00A0');
+    const graphemes = Array.from(segmenter.segment(withNbsp), (s) => s.segment);
+    return graphemes.join('\u2060');
+  });
+}
+
 export function formatDiscordResponseText(text: string, maxLength = 1950): string {
-  const formatted = escapeDiscordHeaders(text);
+  const cleaned = stripUnhandledGifTags(stripReactionTags(text));
+  const protectedText = protectKaomojis(cleaned);
+  const formatted = escapeDiscordHeaders(protectedText);
 
   return formatted.length > maxLength
     ? `${formatted.slice(0, maxLength)}... (message truncated)`

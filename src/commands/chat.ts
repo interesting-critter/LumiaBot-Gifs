@@ -1,6 +1,8 @@
 import { SlashCommandBuilder, ChatInputCommandInteraction } from 'discord.js';
 import { getAIService } from '../services/google-genai';
 import { getErrorMessage } from '../services/prompts';
+import { gifService } from '../services/gif';
+import { formatDiscordResponseText } from '../utils/discord-markdown';
 import type { Command } from '../bot/client';
 
 const command: Command = {
@@ -62,6 +64,9 @@ const command: Command = {
     await interaction.deferReply();
 
     try {
+      const guildId = interaction.guildId || 'dm';
+      const isGifEnabled = gifService.isGifEnabled(guildId);
+
       const aiService = getAIService();
       const response = await aiService.createChatCompletion({
         messages: [
@@ -75,16 +80,22 @@ const command: Command = {
         videos: videoUrls,
         userId: interaction.user.id,
         username: interaction.user.username,
-        guildId: interaction.guildId || 'dm',
+        guildId,
         isNsfwChannel,
+        isGifEnabled,
       });
 
-      // Discord has a 2000 character limit for messages
-      const truncatedResponse = response.length > 1900 
-        ? response.slice(0, 1900) + '... (message truncated)' 
-        : response;
+      const { text: textWithoutGif, gifUrl } = isGifEnabled
+        ? await gifService.extractAndResolveGif(response)
+        : { text: response, gifUrl: undefined };
 
-      await interaction.editReply(truncatedResponse);
+      const formatted = formatDiscordResponseText(textWithoutGif);
+
+      await interaction.editReply(formatted || '...');
+
+      if (gifUrl) {
+        await interaction.followUp({ content: gifUrl });
+      }
     } catch (error) {
       console.error('Chat command error:', error);
       await interaction.editReply(getErrorMessage('generic_error'));

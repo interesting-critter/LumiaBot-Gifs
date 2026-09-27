@@ -1,7 +1,7 @@
 import { AttachmentBuilder, Client, Collection, GatewayIntentBits, Events, Message, TextChannel, ThreadChannel, NewsChannel, VoiceChannel, StageChannel, DMChannel, GuildMember, StickerFormatType, userMention, type Channel } from 'discord.js';
 import { config } from '../utils/config';
 import { shouldTriggerBot, extractMessageContent, handleMessage, extractTriggerKeywords } from '../services/message-handler';
-import { boredomService, getRandomBoredomMessage } from '../services/boredom';
+import { boredomService } from '../services/boredom';
 import { channelHistoryService } from '../services/channel-history';
 import { getBotCouncilProfile, getErrorMessage, getTriggerKeywords } from '../services/prompts';
 import { userActivityService } from '../services/user-activity';
@@ -113,53 +113,6 @@ function extractCustomEmojiUrls(content: string, logPrefix: string, silent: bool
   }
 
   return urls;
-}
-
-// Patterns for detecting boredom opt-in/opt-out intent
-// OPT-IN MODEL: Users are disabled by default and must EXPLICITLY request boredom pings
-// These patterns are STRICT - they require explicit mentions of wanting pings when bored
-const BOREDOM_OPT_OUT_PATTERNS = [
-  /\b(?:don't|stop|quit|no\s+more)\s+(?:ping|bother|annoy|message)\s+me\b/i,
-  /\b(?:leave\s+me\s+alone|go\s+away|shut\s+up)\b/i,
-  /\b(?:disable|turn\s+off)\s+(?:boredom|ping)s?\b/i,
-  /\bopt\s*out\s+(?:of\s+)?(?:boredom|ping)s?\b/i,
-];
-
-// STRICT OPT-IN PATTERNS - Must explicitly mention "when you're bored" or similar
-const BOREDOM_OPT_IN_PATTERNS = [
-  // Must include "when you're bored" or equivalent
-  /\b(?:ping|message|@|at)\s+me\s+when\s+(?:you(?:'re?|are)\s+)?bored\b/i,
-  /\b(?:let\s+me\s+know|tell\s+me|reach\s+out|talk\s+to\s+me)\s+when\s+(?:you(?:'re?|are)\s+)?bored\b/i,
-  /\bkeep\s+me\s+company\s+when\s+(?:you(?:'re?|are)\s+)?bored\b/i,
-  // Explicit opt-in commands
-  /\b(?:enable|turn\s+on)\s+(?:boredom\s+)?pings?\b/i,
-  /\bopt\s*in\s+(?:to\s+)?(?:boredom|ping)s?\b/i,
-];
-
-/**
- * Detect if user wants to opt out of boredom pings
- */
-function detectBoredomOptOut(content: string): boolean {
-  for (const pattern of BOREDOM_OPT_OUT_PATTERNS) {
-    if (pattern.test(content)) {
-      console.log(`😴 [BOREDOM] Opt-out pattern matched: ${pattern.source}`);
-      return true;
-    }
-  }
-  return false;
-}
-
-/**
- * Detect if user wants to opt in to boredom pings
- */
-function detectBoredomOptIn(content: string): boolean {
-  for (const pattern of BOREDOM_OPT_IN_PATTERNS) {
-    if (pattern.test(content)) {
-      console.log(`😴 [BOREDOM] Opt-in pattern matched: ${pattern.source}`);
-      return true;
-    }
-  }
-  return false;
 }
 
 /**
@@ -1224,18 +1177,19 @@ ${sections.join('\n\n')}
       } catch (err) {
         console.warn('⚠️ [CLIENT] Failed to fetch application emojis:', err);
       }
+      boredomService.start(this.client);
     });
   
     // Handle process shutdown to clean up timers
     process.on('SIGINT', () => {
       console.log('\n🛑 [CLIENT] Shutting down...');
-      boredomService.cleanup();
+      boredomService.stop();
       this.destroy().then(() => process.exit(0));
     });
 
     process.on('SIGTERM', () => {
       console.log('\n🛑 [CLIENT] Shutting down...');
-      boredomService.cleanup();
+      boredomService.stop();
       this.destroy().then(() => process.exit(0));
     });
 
@@ -1461,8 +1415,6 @@ ${sections.join('\n\n')}
       
       // Trigger if: has keyword/mention OR is reply to Lumia OR is reply with mention
       const shouldTrigger = hasTrigger || isReplyToLumia || (replyContext?.isReply && hasTrigger);
-      
-      let boredomAction: 'opted-in' | 'opted-out' | undefined;
 
       // NSFW-only mode: the bot may only respond in channels marked NSFW.
       // Reuses the same age-gating used for NSFW image generation, so DMs and
@@ -1487,7 +1439,7 @@ ${sections.join('\n\n')}
 
         const currentTask = previousTask
           .catch(() => {}) // don't let a previous failure break the chain
-          .then(() => this.processTriggeredMessage(message, botId, hasTrigger, replyContext, boredomAction));
+          .then(() => this.processTriggeredMessage(message, botId, hasTrigger, replyContext));
 
         this.channelProcessingQueue.set(channelId, currentTask);
 
@@ -1519,22 +1471,8 @@ ${sections.join('\n\n')}
         videos: { url: string; mimeType?: string }[];
       };
     } | undefined,
-    boredomAction: 'opted-in' | 'opted-out' | undefined,
   ): Promise<void> {
     const generationKey = `root:${message.id}`;
-
-    // Check for boredom opt-in/opt-out intent (but let LLM respond naturally)
-    if (detectBoredomOptOut(message.content)) {
-      const guildId = message.guildId || 'dm';
-      boredomService.optOut(message.author.id, guildId);
-      boredomAction = 'opted-out';
-      console.log(`😴 [BOREDOM] User opted out - letting LLM respond naturally`);
-    } else if (detectBoredomOptIn(message.content)) {
-      const guildId = message.guildId || 'dm';
-      boredomService.optIn(message.author.id, guildId);
-      boredomAction = 'opted-in';
-      console.log(`😴 [BOREDOM] User opted in - letting LLM respond naturally`);
-    }
 
     // Check if channel supports typing indicator
     const canType = (
@@ -1799,7 +1737,6 @@ ${sections.join('\n\n')}
           originalTimestamp: replyContext.originalTimestamp,
           originalAuthor: replyContext.originalAuthor,
         } : undefined,
-        boredomAction,
         channelMessages: channelTurns,
         getUserListeningActivity,
         resolveUserMention,
@@ -1887,22 +1824,6 @@ ${sections.join('\n\n')}
           }
         }
       }
-
-      // Record this interaction for boredom system
-      const guildId = message.guildId || 'dm';
-      const channelId = message.channelId;
-
-      boredomService.recordInteraction(
-        message.author.id,
-        guildId,
-        message.author.username,
-        channelId,
-        (userId, guildId, username, channelId) => {
-          // This callback is called when boredom timer fires
-          this.sendBoredomPing(userId, guildId, channelId);
-        }
-      );
-
     } catch (error) {
       // Clear typing indicator on error too
       this.stopTyping(message.channelId);
@@ -1919,31 +1840,6 @@ ${sections.join('\n\n')}
       }
     } finally {
       this.endGeneration(generationKey);
-    }
-  }
-
-  /**
-   * Send a boredom ping to a user
-   */
-  private async sendBoredomPing(userId: string, guildId: string, channelId: string): Promise<void> {
-    try {
-      const channel = await this.client.channels.fetch(channelId);
-      if (!channel || !channel.isTextBased()) {
-        console.log(`😴 [BOREDOM] Channel ${channelId} not found or not text-based`);
-        return;
-      }
-
-      // NSFW-only mode: never proactively ping outside an NSFW channel.
-      if (config.bot.nsfwOnly && !isDiscordNsfwChannel(channel)) {
-        console.log(`🔞 [BOREDOM] NSFW-only mode: skipping ping in non-NSFW channel ${channelId}`);
-        return;
-      }
-
-      const message = getRandomBoredomMessage(userId);
-      await (channel as TextChannel).send(message);
-      console.log(`😴 [BOREDOM] Sent boredom ping to ${userId} in channel ${channelId}`);
-    } catch (error) {
-      console.error(`❌ [BOREDOM] Failed to send boredom ping:`, error);
     }
   }
 
@@ -2127,7 +2023,7 @@ ${sections.join('\n\n')}
 
   async destroy(): Promise<void> {
     this.stopAllTyping();
-    boredomService.cleanup();
+    boredomService.stop();
     if (this.orchestrator) {
       this.orchestrator.disconnect();
     }

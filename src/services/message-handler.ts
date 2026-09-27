@@ -134,7 +134,6 @@ export interface MessageHandlerOptions {
     originalTimestamp?: string;
     originalAuthor?: string;
   };
-  boredomAction?: 'opted-in' | 'opted-out'; // If user just changed their boredom settings
   channelMessages?: ChatMessage[]; // Channel history converted to chat turns
   orchestratorContextNote?: string;
   currentMessageSpeaker?: {
@@ -166,11 +165,11 @@ export interface MessageHandlerResponse {
  * Extract reactions from AI response
  * Looks for [REACT: emoji] tags in the response
  */
-function extractReactions(response: string): { text: string; reactions: string[] } {
+ function extractReactions(response: string): { text: string; reactions: string[] } {
   const reactions: string[] = [];
   
-  // Match [REACT: emoji], [REACT: :emoji_name:], or [REACT: <:name:id>]
-  const reactPattern = /\[REACT:\s*([^\]]+)\]/gi;
+  // Match [REACT: emoji], [REACT: :emoji_name:], [REACT: <:name:id>], and full-width bracket variants
+  const reactPattern = /[\[［]REACT:\s*([^\]］]+)[\]］]/gi;
   let match;
   
   while ((match = reactPattern.exec(response)) !== null) {
@@ -252,7 +251,7 @@ async function processVisionContent(
  * @returns The bot's response with potential reactions
  */
 export async function handleMessage(options: MessageHandlerOptions): Promise<MessageHandlerResponse> {
-    const { content, enableSearch, enableKnowledgeGraph, imageUrls, videoUrls, textAttachments, pageContents, userId, username, guildId, mentionedUsers, replyContext, boredomAction, channelMessages, orchestratorContextNote, currentMessageSpeaker, getUserListeningActivity, resolveUserMention, isNsfwChannel, allowNsfwImageGeneration, orchestratorEventId, orchestratorTurnId, requestFollowUp, requestCollectiveKnowledge } = options;
+    const { content, enableSearch, enableKnowledgeGraph, imageUrls, videoUrls, textAttachments, pageContents, userId, username, guildId, mentionedUsers, replyContext, channelMessages, orchestratorContextNote, currentMessageSpeaker, getUserListeningActivity, resolveUserMention, isNsfwChannel, allowNsfwImageGeneration, orchestratorEventId, orchestratorTurnId, requestFollowUp, requestCollectiveKnowledge } = options;
 
   try {
     // Parse message for pronouns and mentions BEFORE processing
@@ -380,7 +379,6 @@ export async function handleMessage(options: MessageHandlerOptions): Promise<Mes
       guildId,
       mentionedUsers,
       replyContext,
-      boredomAction,
       orchestratorContextNote,
       conversationSummary: conversationSummary || undefined,
       getUserListeningActivity,
