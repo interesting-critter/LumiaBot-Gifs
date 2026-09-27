@@ -46,3 +46,12 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 # Bot definitions - these are private and should not be committed
 prompt_storage/
 
+# Database & Vector stores
+data/lancedb/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# HuggingFace model cache (if placed in project root)
+.cache/
