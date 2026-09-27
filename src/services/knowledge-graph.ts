@@ -52,11 +52,11 @@ export class KnowledgeGraphService {
   constructor() {
     this.db = new Database('knowledge_graph.db');
     this.initDatabase();
-    console.log('📚 [KNOWLEDGE GRAPH] Service initialized with persistent storage');
+    console.log('📚 [KNOWLEDGE GRAPH] Service initialized with FTS5 persistent storage');
   }
 
   private initDatabase(): void {
-    // Create documents table
+    // 1. Create main documents table
     this.db.run(`
       CREATE TABLE IF NOT EXISTS knowledge_documents (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -74,24 +74,65 @@ export class KnowledgeGraphService {
       )
     `);
 
-    // Create indexes for efficient querying
+    // 2. Standard indexes
+    this.db.run(`CREATE INDEX IF NOT EXISTS idx_knowledge_topic ON knowledge_documents(topic)`);
+    this.db.run(`CREATE INDEX IF NOT EXISTS idx_knowledge_type ON knowledge_documents(type)`);
+    this.db.run(`CREATE INDEX IF NOT EXISTS idx_knowledge_priority ON knowledge_documents(priority DESC)`);
+    this.db.run(`CREATE INDEX IF NOT EXISTS idx_knowledge_usage ON knowledge_documents(usage_count DESC)`);
+
+    // 3. FTS5 External Content Virtual Table with Porter Stemming & Unicode
     this.db.run(`
-      CREATE INDEX IF NOT EXISTS idx_knowledge_topic ON knowledge_documents(topic)
+      CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(
+        title,
+        content,
+        keywords,
+        topic,
+        content='knowledge_documents',
+        content_rowid='id',
+        tokenize='porter unicode61'
+      )
+    `);
+
+    // 4. Synchronization triggers between knowledge_documents and knowledge_fts
+    this.db.run(`
+      CREATE TRIGGER IF NOT EXISTS knowledge_ai AFTER INSERT ON knowledge_documents BEGIN
+        INSERT INTO knowledge_fts(rowid, title, content, keywords, topic)
+        VALUES (new.id, new.title, new.content, new.keywords, new.topic);
+      END;
     `);
 
     this.db.run(`
-      CREATE INDEX IF NOT EXISTS idx_knowledge_type ON knowledge_documents(type)
+      CREATE TRIGGER IF NOT EXISTS knowledge_ad AFTER DELETE ON knowledge_documents BEGIN
+        INSERT INTO knowledge_fts(knowledge_fts, rowid, title, content, keywords, topic)
+        VALUES('delete', old.id, old.title, old.content, old.keywords, old.topic);
+      END;
     `);
 
+    // Only re-index when searchable content changes (avoids I/O churn when usage_count updates)
+    this.db.run(`DROP TRIGGER IF EXISTS knowledge_au`);
     this.db.run(`
-      CREATE INDEX IF NOT EXISTS idx_knowledge_priority ON knowledge_documents(priority DESC)
+      CREATE TRIGGER knowledge_au AFTER UPDATE OF title, content, keywords, topic ON knowledge_documents BEGIN
+        INSERT INTO knowledge_fts(knowledge_fts, rowid, title, content, keywords, topic)
+        VALUES('delete', old.id, old.title, old.content, old.keywords, old.topic);
+        INSERT INTO knowledge_fts(rowid, title, content, keywords, topic)
+        VALUES (new.id, new.title, new.content, new.keywords, new.topic);
+      END;
     `);
 
-    this.db.run(`
-      CREATE INDEX IF NOT EXISTS idx_knowledge_usage ON knowledge_documents(usage_count DESC)
-    `);
+    // 5. Automatically populate or rebuild FTS index if documents exist but FTS is empty
+    try {
+      const docCount = (this.db.query('SELECT COUNT(*) as count FROM knowledge_documents').get() as { count: number }).count;
+      const ftsCount = (this.db.query('SELECT COUNT(*) as count FROM knowledge_fts').get() as { count: number }).count;
 
-    console.log('📚 [KNOWLEDGE GRAPH] Database initialized');
+      if (docCount > 0 && ftsCount === 0) {
+        this.db.run(`INSERT INTO knowledge_fts(knowledge_fts) VALUES('rebuild')`);
+        console.log(`📚 [KNOWLEDGE GRAPH] Rebuilt FTS5 index for ${docCount} existing documents`);
+      }
+    } catch (error) {
+      console.warn('⚠️ [KNOWLEDGE GRAPH] Could not verify FTS5 rebuild status:', error);
+    }
+
+    console.log('📚 [KNOWLEDGE GRAPH] Database and FTS5 engine initialized');
   }
 
   /**
@@ -211,87 +252,107 @@ export class KnowledgeGraphService {
   }
 
   /**
-   * Search documents by keywords
-   * Uses fuzzy matching and relevance scoring
+   * Search documents using SQLite FTS5 Full-Text Search with BM25 ranking
    */
   searchByKeywords(query: KnowledgeQuery): KnowledgeSearchResult[] {
     const { query: searchQuery, topics, maxResults = 5, minPriority = 1 } = query;
-    
-    // Extract keywords from query
-    const queryKeywords = searchQuery.toLowerCase()
-      .split(/\s+/)
-      .filter(k => k.length > 2); // Only words longer than 2 chars
 
-    if (queryKeywords.length === 0) {
+    if (!searchQuery || !searchQuery.trim()) {
       return [];
     }
 
-    // Build query
-    let sql = `SELECT * FROM knowledge_documents WHERE priority >= ?`;
-    const params: any[] = [minPriority];
+    // Extract alphanumeric tokens (supports unicode letters & numbers, strips FTS operators)
+    const tokens = searchQuery
+      .replace(/[^\p{L}\p{N}_]+/gu, ' ')
+      .trim()
+      .split(/\s+/)
+      .filter(t => t.length >= 2);
+
+    if (tokens.length === 0) {
+      const singleChar = searchQuery.replace(/[^\p{L}\p{N}_]+/gu, '').trim();
+      if (singleChar.length > 0) {
+        tokens.push(singleChar);
+      } else {
+        return [];
+      }
+    }
+
+    // Construct a safe FTS5 query: phrase match (if multi-word) + prefix wildcard matching per token
+    const matchParts: string[] = [];
+    if (tokens.length > 1) {
+      matchParts.push(`"${tokens.join(' ')}"`);
+    }
+    for (const token of tokens) {
+      matchParts.push(`"${token}"*`);
+    }
+    const ftsQuery = matchParts.join(' OR ');
+
+    // Column weights: title=5.0, content=1.0, keywords=5.0, topic=2.0
+    let sql = `
+      SELECT 
+        d.*,
+        bm25(knowledge_fts, 5.0, 1.0, 5.0, 2.0) AS bm25_rank
+      FROM knowledge_fts
+      JOIN knowledge_documents d ON d.id = knowledge_fts.rowid
+      WHERE knowledge_fts MATCH ?
+        AND d.priority >= ?
+    `;
+    const params: any[] = [ftsQuery, minPriority];
 
     if (topics && topics.length > 0) {
-      sql += ` AND topic IN (${topics.map(() => '?').join(',')})`;
+      sql += ` AND d.topic IN (${topics.map(() => '?').join(',')})`;
       params.push(...topics);
     }
 
-    sql += ` ORDER BY priority DESC`;
+    // SQLite FTS5 bm25 returns negative numbers where more negative = higher relevance
+    sql += ` ORDER BY bm25_rank ASC LIMIT ?`;
+    params.push(Math.max(maxResults * 4, 25));
 
-    const results = this.db.query(sql).all(...params) as any[];
+    let rows: any[];
+    try {
+      rows = this.db.query(sql).all(...params) as any[];
+    } catch (error) {
+      console.warn('⚠️ [KNOWLEDGE GRAPH] FTS5 search query error:', error);
+      return [];
+    }
 
-    // Score and filter results
-    const scored: KnowledgeSearchResult[] = results.map(doc => {
-      const keywords: string[] = JSON.parse(doc.keywords);
-      
-      // Calculate relevance score
-      let score = 0;
+    const queryTerms = tokens.map(t => t.toLowerCase());
+
+    // Score and format results
+    const scored: KnowledgeSearchResult[] = rows.map(row => {
+      const doc = this.mapRowToDocument(row);
+      const keywords: string[] = doc.keywords || [];
+
+      // Convert negative BM25 score to positive relevance score
+      const rawBm25 = Math.abs(Number(row.bm25_rank) || 0);
+
+      // Add priority and usage boosts
+      const score = rawBm25 + (doc.priority * 0.5) + Math.log10(doc.usageCount + 1);
+
+      // Identify matched keywords for compatibility
       const matchedKeywords: string[] = [];
-
-      for (const queryKw of queryKeywords) {
-        // Exact match on keyword
-        if (keywords.includes(queryKw)) {
-          score += 10;
-          matchedKeywords.push(queryKw);
-          continue;
-        }
-
-        // Partial match on keyword
+      for (const qTerm of queryTerms) {
         for (const kw of keywords) {
-          if (kw.includes(queryKw) || queryKw.includes(kw)) {
-            score += 5;
+          if (kw.includes(qTerm) || qTerm.includes(kw)) {
             matchedKeywords.push(kw);
-            break;
           }
         }
-
-        // Match in title
-        if (doc.title.toLowerCase().includes(queryKw)) {
-          score += 3;
-        }
-
-        // Match in content
-        if (doc.content.toLowerCase().includes(queryKw)) {
-          score += 1;
+        if (doc.title.toLowerCase().includes(qTerm)) {
+          matchedKeywords.push(qTerm);
         }
       }
 
-      // Boost by priority
-      score += doc.priority * 0.5;
-
-      // Boost by usage count (logarithmic)
-      score += Math.log10(doc.usage_count + 1);
-
       return {
-        document: this.mapRowToDocument(doc),
-        relevanceScore: score,
-        matchedKeywords: [...new Set(matchedKeywords)] // Remove duplicates
+        document: doc,
+        relevanceScore: Math.round(score * 10) / 10,
+        matchedKeywords: [...new Set(matchedKeywords)]
       };
     });
 
-    // Sort by relevance and take top results
+    // Sort by final combined score descending
     scored.sort((a, b) => b.relevanceScore - a.relevanceScore);
 
-    return scored.slice(0, maxResults).filter(s => s.relevanceScore > 0);
+    return scored.slice(0, maxResults);
   }
 
   /**
@@ -458,8 +519,6 @@ ${sections.join('\n\n')}
 
   /**
    * Format search results for system prompt
-   * Creates context that Lumia can naturally reference
-   * Formatted to encourage chaotic, non-robotic responses
    */
   private formatKnowledgeContext(results: KnowledgeSearchResult[]): string {
     const sections = results.map((result) => {
@@ -491,13 +550,13 @@ ${sections.join('\n\n')}
 
   /**
    * Clear all documents from the knowledge base
-   * Use with caution - this deletes EVERYTHING!
    */
   clearAll(): { deletedCount: number } {
     const stats = this.getStats();
     const count = stats.totalDocuments;
     
     this.db.run('DELETE FROM knowledge_documents');
+    this.db.run("INSERT INTO knowledge_fts(knowledge_fts) VALUES('delete-all')");
     console.log(`📚 [KNOWLEDGE GRAPH] Cleared all ${count} documents from knowledge base`);
     
     return { deletedCount: count };
@@ -595,7 +654,7 @@ ${sections.join('\n\n')}
       topic: row.topic,
       title: row.title,
       content: row.content,
-      keywords: JSON.parse(row.keywords),
+      keywords: JSON.parse(row.keywords || '[]'),
       type: row.type,
       url: row.url,
       priority: row.priority,
@@ -607,38 +666,39 @@ ${sections.join('\n\n')}
   }
 
   /**
-   * Bulk import documents from a JSON array
+   * Bulk import documents from an array in a single transaction
    */
   bulkImport(documents: Array<Omit<KnowledgeDocument, 'id' | 'usageCount' | 'createdAt' | 'updatedAt'>>): void {
     const now = new Date().toISOString();
     
-    const insert = this.db.query(`
+    const insert = this.db.prepare(`
       INSERT INTO knowledge_documents 
       (topic, title, content, keywords, type, url, priority, usage_count, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
     `);
 
-    for (const doc of documents) {
-      insert.run(
-        doc.topic,
-        doc.title,
-        doc.content,
-        JSON.stringify(doc.keywords.map(k => k.toLowerCase())),
-        doc.type,
-        doc.url || null,
-        doc.priority,
-        now,
-        now
-      );
-    }
+    const runBulk = this.db.transaction((docs: typeof documents) => {
+      for (const doc of docs) {
+        insert.run(
+          doc.topic,
+          doc.title,
+          doc.content,
+          JSON.stringify(doc.keywords.map(k => k.toLowerCase())),
+          doc.type,
+          doc.url || null,
+          doc.priority,
+          now,
+          now
+        );
+      }
+    });
 
+    runBulk(documents);
     console.log(`📚 [KNOWLEDGE GRAPH] Bulk imported ${documents.length} documents`);
   }
 
   /**
-   * Sync knowledge documents from the knowledge_documents/ directory on disk.
-   * New documents (by title+topic) are inserted; existing documents with changed content are updated.
-   * This is safe to call on every startup.
+   * Sync knowledge documents from markdown files
    */
   async syncFromFiles(dirPath: string = './knowledge_documents'): Promise<void> {
     const resolvedPath = resolve(dirPath);
@@ -660,14 +720,12 @@ ${sections.join('\n\n')}
     let unchanged = 0;
 
     for (const doc of docs) {
-      // Look for an existing document with the same title and topic
       const existing = this.db.query(
         'SELECT id, content, keywords, type, url, priority FROM knowledge_documents WHERE LOWER(title) = LOWER(?) AND LOWER(topic) = LOWER(?)'
       ).get(doc.title, doc.topic) as any | null;
 
       if (existing) {
-        // Check if content or metadata changed
-        const existingKeywords = JSON.parse(existing.keywords) as string[];
+        const existingKeywords = JSON.parse(existing.keywords || '[]') as string[];
         const newKeywords = doc.keywords.map(k => k.toLowerCase());
         const contentChanged = existing.content !== doc.content;
         const keywordsChanged = JSON.stringify(existingKeywords.sort()) !== JSON.stringify(newKeywords.sort());
@@ -688,7 +746,6 @@ ${sections.join('\n\n')}
           unchanged++;
         }
       } else {
-        // New document — insert it
         this.storeDocument({
           topic: doc.topic,
           title: doc.title,
