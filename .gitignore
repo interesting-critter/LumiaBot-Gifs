@@ -46,3 +46,4 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 # Bot definitions - these are private and should not be committed
 prompt_storage/
 
+./data/lancedb
