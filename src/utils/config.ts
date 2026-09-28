@@ -141,6 +141,32 @@ export const config = {
     showTyping: parseBoolean(process.env.BOREDOM_SHOW_TYPING, false),
     historyLimit: parseInt(process.env.BOREDOM_HISTORY_LIMIT || '15', 10),
   },
+  rateLimit: {
+    seconds: parseInt(process.env.RATE_LIMIT_SECONDS || '60', 10),
+    exemptRoles: (process.env.RATE_LIMIT_EXEMPT_ROLES || '')
+      .split(',')
+      .map((r) => r.trim())
+      .filter(Boolean),
+    emoji: process.env.RATE_LIMIT_EMOJI || 'rate_limited',
+  },
+  dashboard: {
+    enabled: process.env.DASHBOARD_ENABLED !== 'false',
+    // Default is loopback-only. Set to 0.0.0.0 to reach the dashboard from other
+    // devices on your LAN (requires DASHBOARD_PASSWORD, enforced at startup).
+    host: process.env.DASHBOARD_HOST || '127.0.0.1',
+    // Separate from PORT so it never collides with the orchestrator websocket
+    // (ORCHESTRATOR_URL defaults to ws://localhost:3000).
+    port: parseInt(process.env.DASHBOARD_PORT || '3001', 10),
+    password: process.env.DASHBOARD_PASSWORD || '',
+    username: process.env.DASHBOARD_USERNAME || 'admin',
+    // Rolling window sizes for the dashboard readouts.
+    logWindowHours: parseInt(process.env.DASHBOARD_LOG_WINDOW_HOURS || '12', 10),
+    usageWindowHours: parseInt(process.env.DASHBOARD_USAGE_WINDOW_HOURS || '24', 10),
+    // Your provider's requests-per-day ceiling, used to render usage bars.
+    dailyRequestLimit: parseInt(process.env.LLM_DAILY_REQUEST_LIMIT || '0', 10),
+    // Max interactions retained in the in-memory prompt/response log.
+    logMaxEntries: parseInt(process.env.DASHBOARD_LOG_MAX_ENTRIES || '500', 10),
+  },
 };
 
 /**

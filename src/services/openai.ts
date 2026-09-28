@@ -32,6 +32,7 @@ import {
   getSfwGuidelines,
   getNsfwGuidelines
 } from './prompts';
+import { apiUsageService } from './api-usage';
 
 // Moonshot pricing (per million tokens)
 const COST_INPUT_PER_M  = 0.90;  // cache miss / regular input
@@ -47,6 +48,17 @@ function logUsageCost(usage: { prompt_tokens?: number; completion_tokens?: numbe
   console.log(
     `💰 [AI] Usage — input: ${uncached} (cached: ${cached}) | output: ${output} | est. cost: $${cost.toFixed(6)}`
   );
+}
+
+/**
+ * Record an outbound LLM request against the rolling requests-per-day counter.
+ *
+ * Every request that can consume provider quota must be counted, including
+ * multi-round tool-call follow-ups and retries, so this is called at each
+ * individual HTTP dispatch rather than once per chat turn.
+ */
+function recordApiCall(kind: string, model: string): void {
+  apiUsageService.recordCall(kind, model);
 }
 
 /**
@@ -481,6 +493,7 @@ export class OpenAIService {
           Object.assign(requestParams, this.rawBodyParams);
         }
 
+        recordApiCall('openai', this.model);
         const completion = await this.client.chat.completions.create(requestParams);
         logUsageCost((completion as any).usage);
 
@@ -2137,6 +2150,7 @@ ONLY use this tool when you detect CLEAR, EXPLICIT intent to change boredom sett
 
           // Use runTools to automatically handle the function calling loop
           // Note: runTools is available in the beta namespace of the OpenAI SDK
+          recordApiCall('openai-tools', this.model);
           const runner = this.client.beta.chat.completions.runTools(runToolsParams);
 
           // Log multi-step tool call progress for observability
@@ -2411,6 +2425,7 @@ ONLY use this tool when you detect CLEAR, EXPLICIT intent to change boredom sett
         Object.assign(streamParams, this.rawBodyParams);
       }
 
+      recordApiCall('openai-stream', this.model);
       const stream = await this.client.chat.completions.create(streamParams as OpenAI.ChatCompletionCreateParamsStreaming);
 
       let accumulatedContent = '';

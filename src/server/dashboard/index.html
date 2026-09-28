@@ -1,0 +1,1140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="robots" content="noindex, nofollow">
+<title>LumiaBot Dashboard</title>
+<style>
+  :root {
+    --bg: #0e1116;
+    --surface: #171b22;
+    --surface-2: #1f242d;
+    --border: #2a313c;
+    --text: #e6e9ef;
+    --muted: #98a2b3;
+    --accent: #ff69b4;
+    --accent-dim: #b34a85;
+    --ok: #3fb950;
+    --warn: #d29922;
+    --bad: #f85149;
+    --info: #58a6ff;
+    --radius: 14px;
+    --tabbar-h: 62px;
+  }
+
+  * { box-sizing: border-box; }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+  }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    font-size: 15px;
+    line-height: 1.5;
+    -webkit-tap-highlight-color: transparent;
+    overscroll-behavior-y: contain;
+  }
+
+  /* ---------- Header ---------- */
+  header {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    background: rgba(14, 17, 22, 0.94);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--border);
+    padding: calc(env(safe-area-inset-top) + 12px) 16px 12px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  header h1 {
+    margin: 0;
+    font-size: 17px;
+    font-weight: 650;
+    letter-spacing: -0.01em;
+  }
+  header .spacer { flex: 1; }
+  .pill {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 4px 9px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--surface-2);
+    color: var(--muted);
+    white-space: nowrap;
+  }
+  .pill.on { color: var(--ok); border-color: rgba(63, 185, 80, 0.4); }
+  .pill.off { color: var(--bad); border-color: rgba(248, 81, 73, 0.4); }
+
+  /* ---------- Layout ---------- */
+  main {
+    padding: 14px 12px calc(var(--tabbar-h) + env(safe-area-inset-bottom) + 20px);
+    max-width: 760px;
+    margin: 0 auto;
+  }
+  .view { display: none; }
+  .view.active { display: block; }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px;
+    margin-bottom: 12px;
+  }
+  .card h2 {
+    margin: 0 0 10px;
+    font-size: 13px;
+    font-weight: 650;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+  }
+
+  /* ---------- Stat grid ---------- */
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 10px;
+    margin-bottom: 12px;
+  }
+  .stat {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px 14px;
+  }
+  .stat .label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted);
+    font-weight: 600;
+  }
+  .stat .value {
+    font-size: 24px;
+    font-weight: 700;
+    margin-top: 3px;
+    letter-spacing: -0.02em;
+    font-variant-numeric: tabular-nums;
+  }
+  .stat .sub {
+    font-size: 12px;
+    color: var(--muted);
+    margin-top: 2px;
+  }
+  .stat .value.ok { color: var(--ok); }
+  .stat .value.warn { color: var(--warn); }
+  .stat .value.bad { color: var(--bad); }
+  .stat .value.accent { color: var(--accent); }
+
+  /* ---------- Usage bar ---------- */
+  .bar {
+    height: 9px;
+    background: var(--surface-2);
+    border-radius: 999px;
+    overflow: hidden;
+    margin: 10px 0 6px;
+  }
+  .bar > span {
+    display: block;
+    height: 100%;
+    background: linear-gradient(90deg, var(--accent-dim), var(--accent));
+    border-radius: 999px;
+    transition: width 0.3s ease;
+  }
+  .bar.warn > span { background: linear-gradient(90deg, #9a6f16, var(--warn)); }
+  .bar.bad > span { background: linear-gradient(90deg, #a12b25, var(--bad)); }
+
+  /* ---------- Forms / inputs ---------- */
+  input[type="text"], input[type="search"], input[type="password"], textarea, select {
+    width: 100%;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 10px;
+    padding: 11px 12px;
+    /* 16px minimum prevents iOS Safari from zooming on focus */
+    font-size: 16px;
+    font-family: inherit;
+    touch-action: manipulation;
+  }
+  textarea { resize: vertical; min-height: 76px; line-height: 1.45; }
+  input:focus, textarea:focus, select:focus {
+    outline: none;
+    border-color: var(--accent-dim);
+  }
+  input::placeholder, textarea::placeholder { color: #5c6675; }
+
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .row > * { flex: 1 1 auto; }
+  .row.tight { gap: 6px; }
+
+  button {
+    background: var(--surface-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 11px 14px;
+    font-size: 15px;
+    font-weight: 600;
+    font-family: inherit;
+    cursor: pointer;
+    touch-action: manipulation;
+    min-height: 44px;
+  }
+  button:active { transform: scale(0.98); }
+  button.primary {
+    background: var(--accent-dim);
+    border-color: var(--accent-dim);
+    color: #fff;
+  }
+  button.danger { color: var(--bad); border-color: rgba(248, 81, 73, 0.35); }
+  button.ghost { background: transparent; }
+  button.small { padding: 7px 11px; font-size: 13px; min-height: 36px; flex: 0 0 auto; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  /* ---------- Log entries ---------- */
+  .entry {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin-bottom: 10px;
+    overflow: hidden;
+  }
+  .entry > summary {
+    padding: 12px 14px;
+    cursor: pointer;
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+  .entry > summary::-webkit-details-marker { display: none; }
+  .entry[open] > summary { border-bottom: 1px solid var(--border); }
+  .entry-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .tag {
+    font-size: 10.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 2px 7px;
+    border-radius: 5px;
+    background: var(--surface-2);
+    color: var(--muted);
+  }
+  .tag.mention { color: var(--info); }
+  .tag.keyword { color: var(--accent); }
+  .tag.reply { color: #a371f7; }
+  .tag.orchestrator { color: #56d4dd; }
+  .tag.boredom { color: var(--warn); }
+  .tag.err { color: var(--bad); }
+  .entry-preview {
+    font-size: 14px;
+    overflow-wrap: anywhere;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .entry-body { padding: 12px 14px; }
+  .bubble {
+    background: var(--surface-2);
+    border-radius: 10px;
+    padding: 10px 12px;
+    margin-bottom: 10px;
+    font-size: 14px;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .bubble:last-child { margin-bottom: 0; }
+  .bubble .who {
+    font-size: 10.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted);
+    margin-bottom: 5px;
+  }
+  .bubble.err { border-left: 3px solid var(--bad); }
+  .kv {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 5px 0;
+    font-size: 13px;
+    border-bottom: 1px solid var(--border);
+  }
+  .kv:last-child { border-bottom: none; }
+  .kv .k { color: var(--muted); flex: 0 0 auto; }
+  .kv .v { text-align: right; overflow-wrap: anywhere; }
+
+  /* ---------- Memory ---------- */
+  .mem-user {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin-bottom: 10px;
+    overflow: hidden;
+  }
+  .mem-head {
+    padding: 12px 14px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .avatar {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: var(--surface-2);
+    color: var(--accent);
+    display: grid;
+    place-items: center;
+    font-weight: 700;
+    font-size: 15px;
+    flex: 0 0 auto;
+  }
+  .mem-id { flex: 1; min-width: 0; }
+  .mem-name { font-weight: 650; overflow-wrap: anywhere; }
+  .mem-sub { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+  .mem-body { padding: 0 14px 14px; border-top: 1px solid var(--border); padding-top: 12px; }
+  .mem-entry {
+    background: var(--surface-2);
+    border-radius: 10px;
+    padding: 10px 12px;
+    margin-bottom: 8px;
+    font-size: 14px;
+    overflow-wrap: anywhere;
+  }
+  .mem-entry .meta {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    font-size: 11px;
+    color: var(--muted);
+    margin-bottom: 5px;
+    flex-wrap: wrap;
+  }
+  .mem-entry .content { white-space: pre-wrap; }
+  .empty {
+    text-align: center;
+    color: var(--muted);
+    padding: 34px 16px;
+    font-size: 14px;
+  }
+
+  /* ---------- Tab bar ---------- */
+  nav.tabbar {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 30;
+    display: flex;
+    background: rgba(23, 27, 34, 0.97);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border-top: 1px solid var(--border);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  nav.tabbar button {
+    flex: 1;
+    background: none;
+    border: none;
+    border-radius: 0;
+    min-height: var(--tabbar-h);
+    padding: 6px 2px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    color: var(--muted);
+    font-size: 10.5px;
+    font-weight: 600;
+  }
+  nav.tabbar button .ico { font-size: 19px; line-height: 1; }
+  nav.tabbar button.active { color: var(--accent); }
+  nav.tabbar button:active { transform: none; }
+
+  /* ---------- Toast ---------- */
+  #toast {
+    position: fixed;
+    left: 50%;
+    transform: translateX(-50%) translateY(20px);
+    bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom) + 16px);
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 11px 16px;
+    border-radius: 10px;
+    font-size: 14px;
+    font-weight: 600;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s, transform 0.2s;
+    z-index: 50;
+    max-width: calc(100vw - 32px);
+    text-align: center;
+  }
+  #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  #toast.bad { border-color: rgba(248, 81, 73, 0.5); color: var(--bad); }
+  #toast.ok { border-color: rgba(63, 185, 80, 0.5); color: var(--ok); }
+
+  .hint { font-size: 12px; color: var(--muted); margin-top: 8px; }
+  label.field { display: block; margin-bottom: 10px; }
+  label.field > span {
+    display: block;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--muted);
+    margin-bottom: 5px;
+  }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .sronly {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+  }
+  @media (min-width: 640px) {
+    .grid2 { grid-template-columns: 1fr 1fr 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>LumiaBot</h1>
+  <div class="spacer"></div>
+  <span class="pill" id="conn-pill">…</span>
+</header>
+
+<main>
+  <!-- ============ OVERVIEW ============ -->
+  <section class="view active" id="view-overview">
+    <div class="stats" id="api-stats"></div>
+
+    <div class="card">
+      <h2>Requests per day</h2>
+      <div id="usage-block"><div class="empty">Loading…</div></div>
+    </div>
+
+    <div class="card">
+      <h2>Activity window</h2>
+      <div id="log-summary"></div>
+    </div>
+
+    <div class="card">
+      <h2>Bot</h2>
+      <div id="bot-block"></div>
+    </div>
+
+    <div class="card">
+      <h2>Orchestrator</h2>
+      <div id="orch-block"></div>
+    </div>
+  </section>
+
+  <!-- ============ LOG ============ -->
+  <section class="view" id="view-log">
+    <div class="card">
+      <input type="search" id="log-q" placeholder="Search prompts and responses…" aria-label="Search activity log">
+      <div class="row tight" style="margin-top:10px">
+        <select id="log-source" aria-label="Filter by trigger source">
+          <option value="">All triggers</option>
+          <option value="mention">Mentions</option>
+          <option value="keyword">Keywords</option>
+          <option value="reply">Replies</option>
+          <option value="orchestrator">Orchestrator</option>
+          <option value="boredom">Boredom</option>
+        </select>
+        <select id="log-limit" aria-label="Number of entries">
+          <option value="25">25</option>
+          <option value="50" selected>50</option>
+          <option value="100">100</option>
+          <option value="250">250</option>
+        </select>
+      </div>
+      <div class="row tight" style="margin-top:10px">
+        <button class="small ghost" id="log-refresh">Refresh</button>
+        <button class="small danger ghost" id="log-clear">Clear log</button>
+      </div>
+      <div class="hint" id="log-hint"></div>
+    </div>
+    <div id="log-list"></div>
+  </section>
+
+  <!-- ============ MEMORY ============ -->
+  <section class="view" id="view-memory">
+    <div class="stats" id="mem-stats"></div>
+    <div class="card">
+      <input type="search" id="mem-q" placeholder="Search users…" aria-label="Search users">
+      <div class="row tight" style="margin-top:10px">
+        <button class="small ghost" id="mem-refresh">Refresh</button>
+      </div>
+    </div>
+    <div id="mem-list"></div>
+  </section>
+
+  <!-- ============ SETTINGS ============ -->
+  <section class="view" id="view-settings">
+    <div class="card">
+      <h2>Auto refresh</h2>
+      <div class="row tight">
+        <button class="small ghost" id="refresh-toggle">Off</button>
+        <select id="refresh-interval" aria-label="Refresh interval">
+          <option value="5000">Every 5s</option>
+          <option value="10000" selected>Every 10s</option>
+          <option value="30000">Every 30s</option>
+          <option value="60000">Every 1m</option>
+        </select>
+      </div>
+      <div class="hint">Applies to the Overview tab. Log and Memory load on demand.</div>
+    </div>
+
+    <div class="card">
+      <h2>Add a memory manually</h2>
+      <label class="field">
+        <span>User ID</span>
+        <input type="text" id="add-userid" inputmode="numeric" placeholder="944783522059673691">
+      </label>
+      <label class="field">
+        <span>Username (only needed for unknown users)</span>
+        <input type="text" id="add-username" placeholder="prolix_oc">
+      </label>
+      <div class="grid2">
+        <label class="field">
+          <span>Type</span>
+          <select id="add-kind">
+            <option value="opinion">Opinion</option>
+            <option value="third_party">Third-party</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>&nbsp;</span>
+          <button class="primary" id="add-submit" style="width:100%">Add</button>
+        </label>
+      </div>
+      <label class="field">
+        <span>Memory text</span>
+        <textarea id="add-content" placeholder="Likes late-night coding sessions and colder weather."></textarea>
+      </label>
+      <div class="hint" id="add-hint"></div>
+    </div>
+
+    <div class="card">
+      <h2>Maintenance</h2>
+      <div class="row tight">
+        <button class="small danger ghost" id="reset-usage">Reset API counter</button>
+      </div>
+      <div class="hint">Clears the recorded LLM call history. Cannot be undone.</div>
+    </div>
+
+    <div class="card">
+      <h2>Storage</h2>
+      <div id="storage-block"></div>
+    </div>
+  </section>
+</main>
+
+<nav class="tabbar" role="tablist">
+  <button data-view="overview" class="active" role="tab"><span class="ico">◎</span>Overview</button>
+  <button data-view="log" role="tab"><span class="ico">≡</span>Log</button>
+  <button data-view="memory" role="tab"><span class="ico">◈</span>Memory</button>
+  <button data-view="settings" role="tab"><span class="ico">⚙</span>Setup</button>
+</nav>
+
+<div id="toast" role="status" aria-live="polite"></div>
+
+<script>
+(function () {
+  'use strict';
+
+  // ---- Utilities ---------------------------------------------------------
+
+  // All server data is user-controlled (prompts, responses, usernames), so
+  // every interpolation goes through this before touching innerHTML.
+  function esc(value) {
+    if (value === null || value === undefined) return '';
+    return String(value)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  var toastTimer = null;
+  function toast(message, kind) {
+    var el = document.getElementById('toast');
+    el.textContent = message;
+    el.className = 'show' + (kind ? ' ' + kind : '');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { el.className = ''; }, 2600);
+  }
+
+  function api(path, options) {
+    return fetch(path, options).then(function (res) {
+      var isJson = (res.headers.get('content-type') || '').indexOf('application/json') >= 0;
+      return (isJson ? res.json() : res.text()).then(function (data) {
+        if (!res.ok) {
+          var msg = (data && data.error) ? data.error : ('HTTP ' + res.status);
+          throw new Error(msg);
+        }
+        return data;
+      });
+    });
+  }
+
+  function timeAgo(iso) {
+    if (!iso) return '—';
+    var seconds = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+    if (seconds < 60) return seconds + 's ago';
+    if (seconds < 3600) return Math.floor(seconds / 60) + 'm ago';
+    if (seconds < 86400) return Math.floor(seconds / 3600) + 'h ago';
+    return Math.floor(seconds / 86400) + 'd ago';
+  }
+
+  function clockTime(iso) {
+    if (!iso) return '—';
+    return new Date(iso).toLocaleString(undefined, {
+      month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit'
+    });
+  }
+
+  function duration(ms) {
+    if (!ms) return '—';
+    if (ms < 1000) return ms + 'ms';
+    return (ms / 1000).toFixed(1) + 's';
+  }
+
+  function initials(name) {
+    var clean = String(name || '?').replace(/[^a-zA-Z0-9 ]/g, ' ').trim();
+    if (!clean) return '?';
+    var parts = clean.split(/\s+/);
+    if (parts.length >= 2) {
+      return (parts[0][0] + parts[1][0]).toUpperCase();
+    }
+    return clean.slice(0, 2).toUpperCase();
+  }
+
+  function kv(key, value) {
+    return '<div class="kv"><span class="k">' + esc(key) + '</span><span class="v">' + esc(value) + '</span></div>';
+  }
+
+  // ---- State -------------------------------------------------------------
+
+  var state = { view: 'overview', autoRefresh: false, timer: null, memCache: {} };
+
+  // ---- Navigation --------------------------------------------------------
+
+  function switchView(name) {
+    state.view = name;
+    Array.prototype.forEach.call(document.querySelectorAll('.view'), function (v) {
+      v.classList.toggle('active', v.id === 'view-' + name);
+    });
+    Array.prototype.forEach.call(document.querySelectorAll('nav.tabbar button'), function (b) {
+      b.classList.toggle('active', b.dataset.view === name);
+    });
+    window.scrollTo(0, 0);
+    if (name === 'log') loadLog();
+    if (name === 'memory') loadMemories();
+    if (name === 'overview') loadOverview();
+  }
+
+  Array.prototype.forEach.call(document.querySelectorAll('nav.tabbar button'), function (btn) {
+    btn.addEventListener('click', function () { switchView(btn.dataset.view); });
+  });
+
+  // ---- Overview ----------------------------------------------------------
+
+  function renderUsage(stats) {
+    var block = document.getElementById('usage-block');
+
+    if (!stats.dailyLimit) {
+      block.innerHTML =
+        '<div class="bar"><span style="width:' + Math.min(100, stats.callsInWindow * 4) + '%"></span></div>' +
+        '<div class="hint" style="margin-top:0">' +
+          esc(stats.callsInWindow) + ' LLM calls in the last ' + esc(stats.windowHours) + 'h. ' +
+          'Set <code>LLM_DAILY_REQUEST_LIMIT</code> to see a limit bar.' +
+        '</div>';
+      return;
+    }
+
+    var pct = stats.usedPercent || 0;
+    var cls = pct >= 90 ? 'bad' : (pct >= 70 ? 'warn' : '');
+
+    block.innerHTML =
+      '<div class="bar ' + cls + '"><span style="width:' + Math.min(100, pct) + '%"></span></div>' +
+      '<div class="kv"><span class="k">Used</span><span class="v">' + esc(stats.callsInWindow) + ' / ' + esc(stats.dailyLimit) + ' (' + esc(pct) + '%)</span></div>' +
+      '<div class="kv"><span class="k">Remaining</span><span class="v">' + esc(stats.remaining) + '</span></div>' +
+      kv('Oldest call in window', clockTime(stats.windowStart)) +
+      kv('Next slot frees at', clockTime(stats.resetsAt)) +
+      kv('Peak hour', stats.peakHour ? (stats.peakHour.calls + ' calls at ' + clockTime(stats.peakHour.hour)) : '—');
+  }
+
+  function renderApiStats(usage, log) {
+    var limit = usage.dailyLimit || 0;
+    var pct = usage.usedPercent;
+    var cls = 'accent';
+    if (limit && pct !== null) cls = pct >= 90 ? 'bad' : (pct >= 70 ? 'warn' : 'ok');
+
+    var hours = Math.floor(log.windowHours);
+    document.getElementById('api-stats').innerHTML =
+      '<div class="stat"><div class="label">LLM calls</div>' +
+        '<div class="value ' + cls + '">' + esc(usage.callsInWindow) + '</div>' +
+        '<div class="sub">rolling ' + esc(usage.windowHours) + 'h' + (limit ? ' of ' + esc(limit) : '') + '</div></div>' +
+      '<div class="stat"><div class="label">Activations</div>' +
+        '<div class="value">' + esc(log.total) + '</div>' +
+        '<div class="sub">rolling ' + esc(hours) + 'h</div></div>' +
+      '<div class="stat"><div class="label">Avg response</div>' +
+        '<div class="value">' + esc(duration(log.avgDurationMs)) + '</div>' +
+        '<div class="sub">per activation</div></div>' +
+      '<div class="stat"><div class="label">Errors</div>' +
+        '<div class="value ' + (log.errors ? 'bad' : 'ok') + '">' + esc(log.errors) + '</div>' +
+        '<div class="sub">in window</div></div>';
+  }
+
+  function renderOverview(data, usage) {
+    var pill = document.getElementById('conn-pill');
+    pill.textContent = data.bot.ready ? 'online' : 'connecting';
+    pill.className = 'pill ' + (data.bot.ready ? 'on' : 'off');
+
+    renderApiStats(usage, data.log);
+    renderUsage(usage);
+
+    var bySource = Object.keys(data.log.bySource).map(function (k) {
+      return k + ': ' + data.log.bySource[k];
+    }).join('  ·  ');
+
+    document.getElementById('log-summary').innerHTML =
+      kv('Window', 'last ' + data.log.windowHours + 'h') +
+      kv('Unique users', data.log.uniqueUsers) +
+      kv('Triggers', bySource || '—') +
+      kv('Oldest entry', clockTime(data.log.windowStart)) +
+      kv('Newest entry', timeAgo(data.log.windowEnd)) +
+      (data.log.topUsers.length
+        ? '<div class="kv"><span class="k">Most active</span><span class="v">' +
+            esc(data.log.topUsers.slice(0, 3).map(function (u) { return u.username + ' (' + u.count + ')'; }).join(', ')) +
+          '</span></div>'
+        : '');
+
+    document.getElementById('bot-block').innerHTML =
+      kv('Name', data.bot.name) +
+      kv('Discord user', data.bot.tag || data.bot.id || '—') +
+      kv('Guilds', data.bot.guilds) +
+      kv('Cached channels', data.bot.channels) +
+      kv('Model', data.ai.model) +
+      kv('Provider', data.ai.baseUrl || 'default') +
+      kv('Gemini native', data.ai.geminiNative ? 'yes' : 'no') +
+      kv('Vision model', data.ai.visionSecondary ? 'enabled' : 'off') +
+      kv('Uptime', duration(data.uptimeSeconds * 1000));
+
+    document.getElementById('orch-block').innerHTML =
+      kv('Enabled', data.orchestrator.enabled ? 'yes' : 'no') +
+      (data.orchestrator.enabled
+        ? kv('Connected', data.orchestrator.isConnected ? 'yes' : 'no') +
+          kv('Pending guilds', data.orchestrator.pendingGuildCount)
+        : '');
+
+    var rate = data.rateLimit;
+    document.getElementById('storage-block').innerHTML =
+      kv('Rate limit', rate.seconds + 's / ' + rate.maxRequests + ' request') +
+      kv('Rate limit emoji', rate.emoji) +
+      kv('Exempt roles', rate.exemptRoles.length ? rate.exemptRoles.join(', ') : 'none') +
+      kv('Owner exempt', rate.ownerExempt ? 'yes' : 'no') +
+      kv('Knowledge mode', data.knowledge.sourceMode);
+  }
+
+  function loadOverview() {
+    return Promise.all([
+      api('/api/status'),
+      api('/api/usage').then(function (d) { return d.stats; })
+    ]).then(function (res) {
+      renderOverview(res[0], res[1]);
+    }).catch(function (err) {
+      toast(err.message, 'bad');
+      var pill = document.getElementById('conn-pill');
+      pill.textContent = 'error';
+      pill.className = 'pill off';
+    });
+  }
+
+  // ---- Activity log ------------------------------------------------------
+
+  function entryHtml(entry) {
+    var tags = '<span class="tag ' + esc(entry.source) + '">' + esc(entry.source) + '</span>';
+    if (entry.error) tags += ' <span class="tag err">error</span>';
+    if (entry.imageCount) tags += ' <span class="tag">' + esc(entry.imageCount) + 'img</span>';
+    if (entry.videoCount) tags += ' <span class="tag">' + esc(entry.videoCount) + 'vid</span>';
+    if (entry.searchEnabled) tags += ' <span class="tag">web</span>';
+    if (entry.knowledgeEnabled) tags += ' <span class="tag">kb</span>';
+
+    var where = [entry.guildName, entry.channelName].filter(Boolean).join(' / ') || 'direct message';
+    var who = entry.username || (entry.userId ? 'user ' + entry.userId : 'system');
+
+    var body =
+      '<div class="bubble"><div class="who">Prompt — ' + esc(who) + '</div>' + esc(entry.prompt) + '</div>' +
+      '<div class="bubble"><div class="who">Response</div>' + esc(entry.response || '(empty)') + '</div>';
+
+    if (entry.error) {
+      body += '<div class="bubble err"><div class="who">Error</div>' + esc(entry.error) + '</div>';
+    }
+    if (entry.gifUrl) {
+      body += '<div class="bubble"><div class="who">GIF</div>' + esc(entry.gifUrl) + '</div>';
+    }
+    if (entry.reactions && entry.reactions.length) {
+      body += '<div class="bubble"><div class="who">Reactions</div>' + esc(entry.reactions.join(' ')) + '</div>';
+    }
+
+    body +=
+      kv('When', clockTime(entry.timestamp) + ' (' + timeAgo(entry.timestamp) + ')') +
+      kv('Took', duration(entry.durationMs)) +
+      kv('Where', where) +
+      (entry.userId ? kv('User ID', entry.userId) : '') +
+      (entry.channelId ? kv('Channel ID', entry.channelId) : '') +
+      (entry.attachmentCount ? kv('Attachments', entry.attachmentCount) : '');
+
+    return '<details class="entry">' +
+        '<summary>' +
+          '<div class="entry-meta">' + tags +
+            '<span>' + esc(who) + '</span><span>·</span><span>' + esc(timeAgo(entry.timestamp)) + '</span>' +
+            '<span>·</span><span>' + esc(duration(entry.durationMs)) + '</span>' +
+          '</div>' +
+          '<div class="entry-preview">' + esc(entry.prompt || '(no prompt)') + '</div>' +
+        '</summary>' +
+        '<div class="entry-body">' + body + '</div>' +
+      '</details>';
+  }
+
+  function loadLog() {
+    var params = new URLSearchParams();
+    var q = document.getElementById('log-q').value.trim();
+    var source = document.getElementById('log-source').value;
+    var limit = document.getElementById('log-limit').value;
+    if (q) params.set('q', q);
+    if (source) params.set('source', source);
+    params.set('limit', limit);
+
+    return api('/api/log?' + params.toString()).then(function (data) {
+      var list = document.getElementById('log-list');
+      document.getElementById('log-hint').textContent =
+        data.entries.length + ' entr' + (data.entries.length === 1 ? 'y' : 'ies') +
+        ' shown · ' + data.summary.total + ' in the ' + data.summary.windowHours + 'h window';
+
+      list.innerHTML = data.entries.length
+        ? data.entries.map(entryHtml).join('')
+        : '<div class="empty">No activity yet. Mention the bot or use a trigger keyword.</div>';
+    }).catch(function (err) {
+      toast(err.message, 'bad');
+    });
+  }
+
+  // ---- Memories ----------------------------------------------------------
+
+  function entryRowHtml(entry) {
+    return '<div class="mem-entry" data-entry-id="' + esc(entry.id) + '">' +
+        '<div class="meta">' +
+          '<span class="tag ' + (entry.kind === 'opinion' ? 'mention' : 'orchestrator') + '">' + esc(entry.kind === 'opinion' ? 'opinion' : 'third-party') + '</span>' +
+          '<span>' + esc(clockTime(entry.createdAt)) + '</span>' +
+          (entry.source ? '<span>· ' + esc(entry.source) + '</span>' : '') +
+        '</div>' +
+        '<div class="content">' + esc(entry.content) + '</div>' +
+        '<div class="row tight" style="margin-top:9px">' +
+          '<button class="small ghost" data-act="edit-entry" data-id="' + esc(entry.id) + '">Edit</button>' +
+          '<button class="small ghost danger" data-act="del-entry" data-id="' + esc(entry.id) + '">Delete</button>' +
+        '</div>' +
+      '</div>';
+  }
+
+  function userCardHtml(user) {
+    return '<div class="mem-user" data-user-id="' + esc(user.userId) + '">' +
+      '<div class="mem-head" data-act="toggle-user">' +
+        '<div class="avatar">' + esc(initials(user.username)) + '</div>' +
+        '<div class="mem-id">' +
+          '<div class="mem-name">' + esc(user.username) + '</div>' +
+          '<div class="mem-sub">' + esc(user.sentiment) + ' · ' + esc(user.opinionCount) + ' opinion' +
+            (user.opinionCount === 1 ? '' : 's') + ' · ' + esc(user.thirdPartyCount) + ' third-party · ' + esc(timeAgo(user.updatedAt)) + '</div>' +
+        '</div>' +
+      '</div>' +
+      '<div class="mem-body" hidden></div>' +
+    '</div>';
+  }
+
+  function loadMemories() {
+    var q = document.getElementById('mem-q').value.trim();
+    var params = new URLSearchParams();
+    if (q) params.set('q', q);
+
+    return api('/api/memories?' + params.toString()).then(function (data) {
+      var stats = data.stats;
+      document.getElementById('mem-stats').innerHTML =
+        '<div class="stat"><div class="label">Users</div><div class="value">' + esc(stats.users) + '</div></div>' +
+        '<div class="stat"><div class="label">Memories</div><div class="value accent">' + esc(stats.entries) + '</div></div>' +
+        '<div class="stat"><div class="label">Opinions</div><div class="value">' + esc(stats.opinionEntries) + '</div></div>' +
+        '<div class="stat"><div class="label">Third-party</div><div class="value">' + esc(stats.thirdPartyEntries) + '</div></div>';
+
+      document.getElementById('mem-list').innerHTML = data.users.length
+        ? data.users.map(userCardHtml).join('')
+        : '<div class="empty">No stored memories' + (q ? ' matching "' + esc(q) + '"' : ' yet') + '.</div>';
+    }).catch(function (err) {
+      toast(err.message, 'bad');
+    });
+  }
+
+  function openUser(card) {
+    var body = card.querySelector('.mem-body');
+    if (!body.hidden) {
+      body.hidden = true;
+      return;
+    }
+
+    var userId = card.dataset.userId;
+    body.hidden = false;
+    body.innerHTML = '<div class="empty">Loading…</div>';
+
+    api('/api/memories/' + encodeURIComponent(userId)).then(function (data) {
+      var m = data.memory;
+      state.memCache[userId] = m;
+
+      var profile =
+        '<div class="grid2">' +
+          '<label class="field"><span>Username</span><input type="text" id="p-user-' + esc(userId) + '" value="' + esc(m.username) + '"></label>' +
+          '<label class="field"><span>Pronouns</span><input type="text" id="p-pro-' + esc(userId) + '" value="' + esc(m.pronouns || '') + '"></label>' +
+        '</div>' +
+        '<div class="grid2">' +
+          '<label class="field"><span>Sentiment</span><select id="p-sen-' + esc(userId) + '">' +
+            ['positive', 'negative', 'neutral', 'mixed'].map(function (s) {
+              return '<option value="' + s + '"' + (m.sentiment === s ? ' selected' : '') + '>' + s + '</option>';
+            }).join('') +
+          '</select></label>' +
+          '<label class="field"><span>&nbsp;</span><button class="primary small" data-act="save-profile" data-id="' + esc(userId) + '" style="width:100%">Save profile</button></label>' +
+        '</div>';
+
+      var entries = m.entries.length
+        ? m.entries.map(entryRowHtml).join('')
+        : '<div class="hint">No individual memories stored.</div>';
+
+      var adder =
+        '<div class="grid2" style="margin-top:6px">' +
+          '<label class="field"><span>New memory type</span><select id="n-kind-' + esc(userId) + '">' +
+            '<option value="opinion">Opinion</option><option value="third_party">Third-party</option>' +
+          '</select></label>' +
+          '<label class="field"><span>&nbsp;</span><button class="primary small" data-act="add-entry" data-id="' + esc(userId) + '" style="width:100%">Add memory</button></label>' +
+        '</div>' +
+        '<label class="field"><span>Memory text</span><textarea id="n-text-' + esc(userId) + '" placeholder="What should the bot remember?"></textarea></label>';
+
+      body.innerHTML = profile + '<h2 style="margin:14px 0 8px">Memories (' + esc(m.entries.length) + ')</h2>' + entries + adder +
+        '<div class="row tight" style="margin-top:12px">' +
+          '<button class="small ghost danger" data-act="del-user" data-id="' + esc(userId) + '">Delete this user entirely</button>' +
+        '</div>';
+    }).catch(function (err) {
+      body.innerHTML = '<div class="empty">' + esc(err.message) + '</div>';
+    });
+  }
+
+  // ---- Delegated actions (memory tab) ------------------------------------
+
+  document.getElementById('mem-list').addEventListener('click', function (ev) {
+    var btn = ev.target.closest('button[data-act]');
+    var head = ev.target.closest('[data-act="toggle-user"]');
+
+    if (head && !btn) {
+      openUser(head.closest('.mem-user'));
+      return;
+    }
+    if (!btn) return;
+
+    var act = btn.dataset.act;
+    var id = btn.dataset.id;
+
+    if (act === 'toggle-user') {
+      openUser(btn.closest('.mem-user'));
+      return;
+    }
+
+    if (act === 'edit-entry') {
+      var row = btn.closest('.mem-entry');
+      var contentEl = row.querySelector('.content');
+      if (row.querySelector('textarea')) return;
+
+      var ta = document.createElement('textarea');
+      ta.value = contentEl.textContent;
+      contentEl.replaceWith(ta);
+      btn.textContent = 'Save';
+      btn.className = 'small ghost';
+      btn.onclick = function () {
+        api('/api/memories/entries/' + id, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content: ta.value })
+        }).then(function () {
+          toast('Memory updated', 'ok');
+          loadMemories();
+        }).catch(function (err) { toast(err.message, 'bad'); });
+      };
+      ta.focus();
+      return;
+    }
+
+    if (act === 'del-entry') {
+      if (!confirm('Delete this memory?')) return;
+      api('/api/memories/entries/' + id, { method: 'DELETE' })
+        .then(function () { toast('Memory deleted', 'ok'); loadMemories(); })
+        .catch(function (err) { toast(err.message, 'bad'); });
+      return;
+    }
+
+    if (act === 'save-profile') {
+      var uid = id;
+      var payload = {
+        username: document.getElementById('p-user-' + uid).value,
+        pronouns: document.getElementById('p-pro-' + uid).value.trim() || null,
+        sentiment: document.getElementById('p-sen-' + uid).value
+      };
+      api('/api/memories/' + uid, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      }).then(function () {
+        toast('Profile saved', 'ok');
+        loadMemories();
+      }).catch(function (err) { toast(err.message, 'bad'); });
+      return;
+    }
+
+    if (act === 'add-entry') {
+      var text = document.getElementById('n-text-' + id).value.trim();
+      var kind = document.getElementById('n-kind-' + id).value;
+      if (!text) { toast('Enter the memory text first', 'bad'); return; }
+      api('/api/memories/' + id, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ kind: kind, content: text })
+      }).then(function () {
+        toast('Memory added', 'ok');
+        loadMemories();
+      }).catch(function (err) { toast(err.message, 'bad'); });
+      return;
+    }
+
+    if (act === 'del-user') {
+      if (!confirm('Delete ALL memories for this user? This cannot be undone.')) return;
+      api('/api/memories/' + id, { method: 'DELETE' })
+        .then(function () { toast('User memories deleted', 'ok'); loadMemories(); })
+        .catch(function (err) { toast(err.message, 'bad'); });
+    }
+  });
+
+  // ---- Controls ----------------------------------------------------------
+
+  var searchTimer = null;
+  document.getElementById('log-q').addEventListener('input', function () {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(loadLog, 300);
+  });
+  document.getElementById('log-source').addEventListener('change', loadLog);
+  document.getElementById('log-limit').addEventListener('change', loadLog);
+  document.getElementById('log-refresh').addEventListener('click', loadLog);
+  document.getElementById('log-clear').addEventListener('click', function () {
+    if (!confirm('Clear the entire activity log?')) return;
+    api('/api/log', { method: 'DELETE' })
+      .then(function () { toast('Log cleared', 'ok'); loadLog(); })
+      .catch(function (err) { toast(err.message, 'bad'); });
+  });
+
+  var memTimer = null;
+  document.getElementById('mem-q').addEventListener('input', function () {
+    clearTimeout(memTimer);
+    memTimer = setTimeout(loadMemories, 300);
+  });
+  document.getElementById('mem-refresh').addEventListener('click', loadMemories);
+
+  document.getElementById('add-submit').addEventListener('click', function () {
+    var userId = document.getElementById('add-userid').value.trim();
+    var username = document.getElementById('add-username').value.trim();
+    var kind = document.getElementById('add-kind').value;
+    var content = document.getElementById('add-content').value.trim();
+
+    if (!userId) { toast('A user ID is required', 'bad'); return; }
+    if (!content) { toast('Memory text is required', 'bad'); return; }
+
+    api('/api/memories/' + encodeURIComponent(userId), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kind: kind, content: content, username: username || undefined })
+    }).then(function () {
+      toast('Memory added', 'ok');
+      document.getElementById('add-content').value = '';
+      document.getElementById('add-username').value = '';
+      loadMemories();
+    }).catch(function (err) { toast(err.message, 'bad'); });
+  });
+
+  document.getElementById('reset-usage').addEventListener('click', function () {
+    if (!confirm('Reset the recorded LLM call counter?')) return;
+    api('/api/usage/reset', { method: 'POST' })
+      .then(function () { toast('API counter reset', 'ok'); loadOverview(); })
+      .catch(function (err) { toast(err.message, 'bad'); });
+  });
+
+  document.getElementById('refresh-toggle').addEventListener('click', function () {
+    state.autoRefresh = !state.autoRefresh;
+    this.textContent = state.autoRefresh ? 'On' : 'Off';
+    this.className = 'small ' + (state.autoRefresh ? 'primary ghost' : 'ghost');
+    if (state.autoRefresh) {
+      scheduleRefresh();
+      loadOverview();
+    } else {
+      clearInterval(state.timer);
+    }
+  });
+
+  document.getElementById('refresh-interval').addEventListener('change', function () {
+    if (state.autoRefresh) scheduleRefresh();
+  });
+
+  function scheduleRefresh() {
+    clearInterval(state.timer);
+    state.timer = setInterval(function () {
+      if (state.view === 'overview') loadOverview();
+    }, Number(document.getElementById('refresh-interval').value));
+  }
+
+  // ---- Boot --------------------------------------------------------------
+
+  loadOverview();
+
+  // Pause auto-refresh when the tab is hidden so a backgrounded phone does not
+  // keep hammering the endpoint.
+  document.addEventListener('visibilitychange', function () {
+    if (state.autoRefresh) {
+      if (document.hidden) {
+        clearInterval(state.timer);
+      } else {
+        scheduleRefresh();
+        loadOverview();
+      }
+    }
+  });
+})();
+</script>
+</body>
+</html>

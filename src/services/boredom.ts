@@ -15,6 +15,7 @@ import { channelHistoryService } from './channel-history';
 import { getAIService } from './google-genai';
 import { gifService } from './gif';
 import { formatDiscordResponseText } from '../utils/discord-markdown';
+import { dashboardLoggerService } from './dashboard-logger';
 
 interface BoredomState {
   enabled: boolean;
@@ -216,6 +217,8 @@ export class BoredomService {
       const channel = validChannels[Math.floor(Math.random() * validChannels.length)]!;
       console.log(`😴 [BOREDOM] Selected channel #${channel.name} (${channel.id}) in ${channel.guild.name}`);
 
+      const turnStartedAt = Date.now();
+
       const rawMessages = await channelHistoryService.fetchChannelHistory(channel, undefined, config.boredom.historyLimit);
       const turns = channelHistoryService.convertToTurns(rawMessages, client.user?.id);
 
@@ -270,6 +273,21 @@ export class BoredomService {
       const now = new Date().toISOString();
       this.setStateValue('last_run_at', now);
       console.log(`😴 [BOREDOM] Spontaneous message sent to #${channel.name}`);
+
+      dashboardLoggerService.log({
+        source: 'boredom',
+        prompt: '[spontaneous chatter — no user prompt]',
+        response: formatted,
+        durationMs: Date.now() - turnStartedAt,
+        channelId: channel.id,
+        channelName: channel.name,
+        guildId: channel.guildId || undefined,
+        guildName: channel.guild?.name,
+        gifUrl,
+        searchEnabled: false,
+        knowledgeEnabled: false,
+      });
+
       return true;
     } catch (error) {
       console.error('❌ [BOREDOM] Error executing spontaneous chat:', error);

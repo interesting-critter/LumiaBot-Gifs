@@ -11,6 +11,7 @@ import { conversationHistoryService } from './conversation-history';
 import { guildMemoryService } from './guild-memory';
 import { userActivityService, type MusicActivity } from './user-activity';
 import { lrclibService } from './lrclib';
+import { apiUsageService } from './api-usage';
 import type { ResolveUserMention } from './user-mention-resolver';
 import { isNsfwImagePrompt, swarmUIService, type GeneratedImageAttachment } from './swarmui';
 import {
@@ -31,6 +32,15 @@ import {
   getSfwGuidelines,
   getNsfwGuidelines
 } from './prompts';
+
+/**
+ * Record an outbound Gemini request against the rolling requests-per-day counter.
+ * Counts multi-round tool-call follow-ups and retries individually, since each
+ * one is a separate billable request against the provider quota.
+ */
+function recordApiCall(kind: string, model: string): void {
+  apiUsageService.recordCall(kind, model);
+}
 
 /**
  * Music-related keywords for smart detection
@@ -1589,6 +1599,7 @@ ONLY use this tool when you detect CLEAR, EXPLICIT intent to change boredom sett
         console.log(`🔄 [Google GenAI] Generation attempt ${attempt}/${maxRetries}`);
 
         // Make the request
+        recordApiCall('gemini', this.model);
         let response = await this.client.models.generateContent({
           model: this.model,
           contents: currentContents,
@@ -1655,6 +1666,7 @@ ONLY use this tool when you detect CLEAR, EXPLICIT intent to change boredom sett
           console.log(`🔧 [Google GenAI] Sending function results back to model (round ${toolRound})...`);
 
           // Re-request from model
+          recordApiCall('gemini-tools', this.model);
           response = await this.client.models.generateContent({
             model: this.model,
             contents: currentContents,
@@ -1839,6 +1851,7 @@ ONLY use this tool when you detect CLEAR, EXPLICIT intent to change boredom sett
       console.log(`🎭 [Google GenAI] System instruction: ${systemPrompt.substring(0, 50)}... (${systemPrompt.length} chars)`);
       console.log(`🧠 [Google GenAI] Thinking disabled via native thinkingConfig`);
 
+      recordApiCall('gemini-stream', this.model);
       const stream = await this.client.models.generateContentStream({
         model: this.model,
         contents,

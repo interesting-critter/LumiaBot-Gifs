@@ -4,6 +4,7 @@ import { loadBotDefinition } from './utils/bot-definition';
 import { setTemplateVariables } from './services/prompts';
 import { initBalance } from './services/moonshot';
 import { knowledgeGraphService } from './services/knowledge-graph';
+import { startDashboardServer, type DashboardServer } from './server/dashboard';
 import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -28,6 +29,8 @@ async function loadCommands() {
 }
 
 async function main() {
+  let dashboard: DashboardServer | null = null;
+
   try {
     // Validate environment configuration
     validateConfig();
@@ -64,6 +67,9 @@ async function main() {
     await bot.login();
     console.log('Bot started successfully');
 
+    // Start the mobile dashboard (observability + memory management)
+    dashboard = startDashboardServer();
+
     // Note: Guild updates are now handled by the onConnect callback in the orchestrator
     // This ensures guilds are sent immediately after the WebSocket connection is established
 
@@ -92,12 +98,14 @@ async function main() {
     // Handle graceful shutdown
     process.on('SIGINT', async () => {
       console.log('\nShutting down gracefully...');
+      dashboard?.stop(true);
       await bot.destroy();
       process.exit(0);
     });
 
     process.on('SIGTERM', async () => {
       console.log('\nShutting down gracefully...');
+      dashboard?.stop(true);
       await bot.destroy();
       process.exit(0);
     });
