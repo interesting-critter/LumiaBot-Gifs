@@ -265,9 +265,10 @@ from `PORT` so it never collides with the orchestrator websocket.
 
 **Tabs**
 
-- **Overview** — LLM request count, activation count, average response time, and
-  error count for the rolling window; a requests-per-day usage bar; bot, guild,
-  and orchestrator status; current rate-limit settings.
+- **Overview** — The active model (switchable, see below), LLM request count,
+  activation count, average response time, and error count for the rolling window;
+  a requests-per-day usage bar; bot, guild, and orchestrator status; current
+  rate-limit settings.
 - **Log** — Every activation within the rolling window (default 12h) with the
   exact prompt, the response, the trigger type (mention / keyword / reply /
   orchestrator / boredom), timestamps, and how long the turn took. Searchable
@@ -277,6 +278,34 @@ from `PORT` so it never collides with the orchestrator websocket.
   pronouns, sentiment) are editable too.
 - **Setup** — Auto-refresh toggle, a manual "add memory" form, the API counter
   reset, and a storage/settings summary.
+
+### Switching models live
+
+List the models you want to be able to switch between:
+
+```env
+DASHBOARD_MODEL_OPTIONS=gpt-4o,kimi-k2-thinking,gemini-3-flash
+```
+
+A **Model** card then appears on the Overview tab. Pick one and hit Apply; the
+change takes effect on the very next message with no restart. The selection is
+persisted to `dashboard_settings.db`, so you can leave `OPENAI_MODEL` commented
+out and drive the model entirely from the dashboard.
+
+The switcher only accepts models from `DASHBOARD_MODEL_OPTIONS`, so a typo is
+rejected with an error instead of silently wedging the bot on a bad model. If
+you leave the list empty the card is read-only and the model stays fixed by the
+environment.
+
+Notes on how the switch propagates:
+
+- Provider routing updates too — selecting a Gemini model switches the bot from
+  the OpenAI client to Google GenAI (provided `GEMINI_API_KEY` is set), and
+  thinking/reasoning configuration follows the new model.
+- "Revert to env model" clears the override and restores whatever
+  `OPENAI_MODEL` resolves to. If `OPENAI_MODEL` is unset, that is the built-in
+  `gpt-4o-mini` default, which the UI flags in amber so a revert is never a
+  surprise.
 
 **Configuration**
 
@@ -289,6 +318,7 @@ DASHBOARD_USERNAME=admin
 DASHBOARD_LOG_WINDOW_HOURS=12
 DASHBOARD_USAGE_WINDOW_HOURS=24
 LLM_DAILY_REQUEST_LIMIT=500   # your provider's requests-per-day ceiling
+DASHBOARD_MODEL_OPTIONS=gpt-4o,kimi-k2-thinking   # enables the live model switcher
 ```
 
 **Security note:** the dashboard serves full prompts, responses, and stored

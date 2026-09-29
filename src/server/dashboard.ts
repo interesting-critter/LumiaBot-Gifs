@@ -4,6 +4,7 @@ import { dashboardLoggerService, type InteractionSource } from '../services/dash
 import { apiUsageService } from '../services/api-usage';
 import { userMemoryService, type MemoryEntryKind, type UserOpinion } from '../services/user-memory';
 import { rateLimiterService } from '../services/rate-limiter';
+import { modelSelectorService } from '../services/model-selector';
 import { bot } from '../bot/client';
 
 const UI_PATH = join(import.meta.dir, 'dashboard', 'index.html');
@@ -141,7 +142,8 @@ function buildStatusPayload() {
       ownerExempt: true,
     },
     ai: {
-      model: config.openai.modelAlias || config.openai.model,
+      model: modelSelectorService.getActiveModel(),
+      modelSource: modelSelectorService.getState().source,
       baseUrl: config.openai.baseUrl || null,
       geminiNative: config.gemini.enabled,
       visionSecondary: config.vision.enabled,
@@ -230,6 +232,28 @@ export function startDashboardServer(): DashboardServer | null {
 
       if (path === '/api/guilds' && method === 'GET') {
         return json({ guilds: buildGuildsPayload() });
+      }
+
+      // ---- Model switching ---------------------------------------------
+      if (path === '/api/models' && method === 'GET') {
+        return json({ model: modelSelectorService.getState() });
+      }
+
+      if (path === '/api/models' && method === 'POST') {
+        const body = await readJsonBody(request);
+        if (!body) return fail('Expected a JSON body', 400);
+        const model = asString(body.model);
+        if (model === undefined) return fail('Missing "model"', 400);
+
+        try {
+          return json({ ok: true, model: modelSelectorService.setModel(model) });
+        } catch (error) {
+          return fail(error instanceof Error ? error.message : String(error), 400);
+        }
+      }
+
+      if (path === '/api/models/reset' && method === 'POST') {
+        return json({ ok: true, model: modelSelectorService.reset() });
       }
 
       // ---- LLM usage ---------------------------------------------------

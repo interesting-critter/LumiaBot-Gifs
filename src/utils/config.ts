@@ -166,6 +166,12 @@ export const config = {
     dailyRequestLimit: parseInt(process.env.LLM_DAILY_REQUEST_LIMIT || '0', 10),
     // Max interactions retained in the in-memory prompt/response log.
     logMaxEntries: parseInt(process.env.DASHBOARD_LOG_MAX_ENTRIES || '500', 10),
+    // Models the dashboard is allowed to switch between. Empty means the
+    // switcher stays hidden and the model is fixed by the environment.
+    modelOptions: (process.env.DASHBOARD_MODEL_OPTIONS || '')
+      .split(',')
+      .map((m) => m.trim())
+      .filter(Boolean),
   },
 };
 

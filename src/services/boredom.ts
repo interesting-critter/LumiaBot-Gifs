@@ -219,7 +219,10 @@ export class BoredomService {
 
       const turnStartedAt = Date.now();
 
-      const rawMessages = await channelHistoryService.fetchChannelHistory(channel, undefined, config.boredom.historyLimit);
+      // fetchChannelHistory takes only (channel, beforeMessageId) and applies
+      // its own CHANNEL_MAX_HISTORY limit, so the previous third argument was
+      // silently ignored. config.boredom.historyLimit has never affected this.
+      const rawMessages = await channelHistoryService.fetchChannelHistory(channel);
       const turns = channelHistoryService.convertToTurns(rawMessages, client.user?.id);
 
       const isGifEnabled = channel.guildId ? gifService.isGifEnabled(channel.guildId) : false;

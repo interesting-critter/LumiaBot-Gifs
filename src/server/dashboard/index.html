@@ -432,6 +432,11 @@
     <div class="stats" id="api-stats"></div>
 
     <div class="card">
+      <h2>Model</h2>
+      <div id="model-block"><div class="empty">Loading…</div></div>
+    </div>
+
+    <div class="card">
       <h2>Requests per day</h2>
       <div id="usage-block"><div class="empty">Loading…</div></div>
     </div>
@@ -500,10 +505,10 @@
       <div class="row tight">
         <button class="small ghost" id="refresh-toggle">Off</button>
         <select id="refresh-interval" aria-label="Refresh interval">
-          <option value="5000">Every 5s</option>
-          <option value="10000" selected>Every 10s</option>
           <option value="30000">Every 30s</option>
-          <option value="60000">Every 1m</option>
+          <option value="60000" selected>Every 1m</option>
+          <option value="300000">Every 5m</option>
+          <option value="600000">Every 10m</option>
         </select>
       </div>
       <div class="hint">Applies to the Overview tab. Log and Memory load on demand.</div>
@@ -712,6 +717,68 @@
         '<div class="sub">in window</div></div>';
   }
 
+  function renderModel(model) {
+    var block = document.getElementById('model-block');
+
+    if (!model.canChange) {
+      block.innerHTML =
+        kv('Active', model.active) +
+        kv('Source', model.source === 'dashboard' ? 'dashboard selection' : 'environment') +
+        '<div class="hint" style="margin-top:8px">Set <code>DASHBOARD_MODEL_OPTIONS</code> to a ' +
+        'comma-separated list of models to switch between from here.</div>';
+      return;
+    }
+
+    var badge = model.source === 'dashboard'
+      ? '<span class="tag keyword">dashboard</span>'
+      : '<span class="tag">env</span>';
+
+    var options = model.options.map(function (name) {
+      return '<option value="' + esc(name) + '"' + (name === model.active ? ' selected' : '') + '>' + esc(name) + '</option>';
+    }).join('');
+
+    var envLine = model.environmentModel
+      ? ('env model: ' + model.environmentModel)
+      : '<span style="color:var(--warn)">no OPENAI_MODEL set — revert falls back to ' +
+        esc(model.fallbackModel) + ' (built-in default)</span>';
+
+    block.innerHTML =
+      '<div class="row tight">' +
+        '<select id="model-select" aria-label="Active model">' + options + '</select>' +
+        '<button class="primary small" id="model-apply">Apply</button>' +
+      '</div>' +
+      '<div style="margin-top:10px">' +
+        kv('Active', model.active + '  ' + badge) +
+        '<div class="kv"><span class="k">Reset reverts to</span><span class="v">' + envLine + '</span></div>' +
+        (model.changedAt ? kv('Last changed', timeAgo(model.changedAt)) : '') +
+      '</div>' +
+      (model.source === 'dashboard'
+        ? '<div class="row tight" style="margin-top:10px"><button class="small ghost" id="model-reset">Revert to env model</button></div>'
+        : '');
+  }
+
+  function applyModel() {
+    var select = document.getElementById('model-select');
+    if (!select) return;
+    var chosen = select.value;
+    var apply = document.getElementById('model-apply');
+    if (apply) apply.disabled = true;
+    if (select.disabled) select.disabled = true;
+
+    api('/api/models', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: chosen })
+    }).then(function () {
+      toast('Model switched to ' + chosen, 'ok');
+      loadOverview();
+    }).catch(function (err) {
+      toast(err.message, 'bad');
+      // Re-sync the control with the server's actual state.
+      loadOverview();
+    });
+  }
+
   function renderOverview(data, usage) {
     var pill = document.getElementById('conn-pill');
     pill.textContent = data.bot.ready ? 'online' : 'connecting';
@@ -741,8 +808,7 @@
       kv('Discord user', data.bot.tag || data.bot.id || '—') +
       kv('Guilds', data.bot.guilds) +
       kv('Cached channels', data.bot.channels) +
-      kv('Model', data.ai.model) +
-      kv('Provider', data.ai.baseUrl || 'default') +
+      kv('Endpoint', data.ai.baseUrl || 'default') +
       kv('Gemini native', data.ai.geminiNative ? 'yes' : 'no') +
       kv('Vision model', data.ai.visionSecondary ? 'enabled' : 'off') +
       kv('Uptime', duration(data.uptimeSeconds * 1000));
@@ -766,8 +832,10 @@
   function loadOverview() {
     return Promise.all([
       api('/api/status'),
-      api('/api/usage').then(function (d) { return d.stats; })
+      api('/api/usage').then(function (d) { return d.stats; }),
+      api('/api/models').then(function (d) { return d.model; })
     ]).then(function (res) {
+      renderModel(res[2]);
       renderOverview(res[0], res[1]);
     }).catch(function (err) {
       toast(err.message, 'bad');
@@ -1093,6 +1161,22 @@
     api('/api/usage/reset', { method: 'POST' })
       .then(function () { toast('API counter reset', 'ok'); loadOverview(); })
       .catch(function (err) { toast(err.message, 'bad'); });
+  });
+
+  // Model switcher. Delegated because renderModel() replaces these nodes on
+  // every overview refresh.
+  document.addEventListener('click', function (ev) {
+    var id = ev.target && ev.target.id;
+    if (id === 'model-apply') {
+      applyModel();
+      return;
+    }
+    if (id === 'model-reset') {
+      if (!confirm('Revert to the model configured in the environment?')) return;
+      api('/api/models/reset', { method: 'POST' })
+        .then(function (res) { toast('Reverted to ' + res.model.active, 'ok'); loadOverview(); })
+        .catch(function (err) { toast(err.message, 'bad'); });
+    }
   });
 
   document.getElementById('refresh-toggle').addEventListener('click', function () {
