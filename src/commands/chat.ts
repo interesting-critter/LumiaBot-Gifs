@@ -3,6 +3,7 @@ import { getAIService } from '../services/google-genai';
 import { getErrorMessage } from '../services/prompts';
 import { gifService } from '../services/gif';
 import { formatDiscordResponseText } from '../utils/discord-markdown';
+import { buildAllowedMentions } from '../utils/permissions';
 import type { Command } from '../bot/client';
 
 const command: Command = {
@@ -91,14 +92,19 @@ const command: Command = {
 
       const formatted = formatDiscordResponseText(textWithoutGif);
 
-      await interaction.editReply(formatted || '...');
+      // Model output is attacker-influenceable: the prompt can carry a
+      // web-search result or a quoted message containing `@everyone`, and
+      // `editReply` with no allowedMentions falls back to discord.js's default
+      // of parsing mentions. `parse: []` is the hardened form the mention
+      // path already uses.
+      await interaction.editReply({ content: formatted || '...', allowedMentions: buildAllowedMentions() });
 
       if (gifUrl) {
-        await interaction.followUp({ content: gifUrl });
+        await interaction.followUp({ content: gifUrl, allowedMentions: buildAllowedMentions() });
       }
     } catch (error) {
       console.error('Chat command error:', error);
-      await interaction.editReply(getErrorMessage('generic_error'));
+      await interaction.editReply({ content: getErrorMessage('generic_error'), allowedMentions: buildAllowedMentions() });
     }
   },
 };

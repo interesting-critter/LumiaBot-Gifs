@@ -1,5 +1,6 @@
 import { Database } from 'bun:sqlite';
 import { config } from '../utils/config';
+import { dbPath } from '../utils/paths';
 
 export interface ModelState {
   /** The model actually in effect right now. */
@@ -47,7 +48,11 @@ export class ModelSelectorService {
   private changedAt: string | null = null;
 
   constructor() {
-    this.db = new Database('dashboard_settings.db');
+    // Absolute path from utils/paths, matching `rate-limiter.ts`. A
+    // CWD-relative filename meant the two services opened *different* database
+    // files whenever the process did not start in the repo root: `/ratelimit set`
+    // would write one file and the dashboard would read another.
+    this.db = new Database(dbPath('dashboard_settings.db'));
     this.envModel = config.openai.modelAlias || config.openai.model;
     this.initDatabase();
     this.loadOverride();

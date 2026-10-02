@@ -145,7 +145,9 @@ const command: Command = {
           const keywordsStr = interaction.options.getString('keywords', true);
           const type = interaction.options.getString('type', true) as 'document' | 'link' | 'snippet';
           const url = interaction.options.getString('url') || undefined;
-          const priority = interaction.options.getInteger('priority') || 5;
+          // `?? 5`, not `|| 5`: the option's minimum is 1, but `||` would also
+          // rewrite an explicit 0 to the default if the bound is ever lowered.
+          const priority = interaction.options.getInteger('priority') ?? 5;
 
           const keywords = keywordsStr.split(',').map(k => k.trim()).filter(k => k.length > 0);
 

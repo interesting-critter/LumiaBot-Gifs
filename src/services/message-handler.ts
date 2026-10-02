@@ -1,5 +1,5 @@
 import { getAIService, getVisionService } from './google-genai';
-import { parseMessage, storeParsedInformation } from './message-parser';
+import { parseMessage, storeParsedInformation, type ParsedMessage } from './message-parser';
 import { conversationHistoryService } from './conversation-history';
 import { channelHistoryService } from './channel-history';
 import { getTriggerKeywords, getErrorMessage } from './prompts';
@@ -12,18 +12,102 @@ import type { MusicActivity } from './user-activity';
 import type { ResolveUserMention } from './user-mention-resolver';
 import type { GeneratedImageAttachment } from './swarmui';
 
-// Keywords that trigger the bot (case insensitive)
-// Loaded dynamically from prompt_storage/config/triggers.json
-let TRIGGER_KEYWORDS: string[] = [];
-
-// Initialize trigger keywords
-function initializeTriggers(): void {
-  const triggers = getTriggerKeywords();
-  TRIGGER_KEYWORDS = triggers.botMention;
+/**
+ * Compiled trigger patterns.
+ *
+ * `wholeWord` is reused for both the "did this trigger the bot" test and the
+ * "which keyword matched" scan, so the two can never disagree.
+ * `stripLeading` removes a trigger keyword from the front of a message.
+ */
+interface TriggerPatterns {
+  /** The exact array the patterns were compiled from; also the cache key. */
+  source: readonly string[];
+  keywords: string[];
+  wholeWord: RegExp[];
+  stripLeading: RegExp[];
 }
 
-// Load triggers on module initialization
-initializeTriggers();
+const EMPTY_TRIGGER_PATTERNS: TriggerPatterns = {
+  source: [],
+  keywords: [],
+  wholeWord: [],
+  stripLeading: [],
+};
+
+let TRIGGER_PATTERNS: TriggerPatterns = EMPTY_TRIGGER_PATTERNS;
+
+const MARKDOWN_LINK_PATTERN = /\[([^\]]*)\]\(https?:\/\/[^\s)]+\)/gi;
+const BARE_URL_PATTERN = /https?:\/\/[^\s<>"'\)\]]+/gi;
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Compile the keyword list once.
+ *
+ * These patterns used to be rebuilt with `new RegExp(...)` inside the
+ * per-keyword loop, for every keyword, on every message, in every guild — a
+ * per-message allocation burst on the hottest path in the bot.
+ */
+function compileTriggers(keywords: readonly string[]): TriggerPatterns {
+  const usable = keywords.filter(
+    (keyword): keyword is string => typeof keyword === 'string' && keyword.trim() !== ''
+  );
+  return {
+    source: keywords,
+    keywords: usable,
+    wholeWord: usable.map((keyword) => new RegExp(`\\b${escapeRegExp(keyword)}\\b`, 'i')),
+    stripLeading: usable.map((keyword) => new RegExp(`^${escapeRegExp(keyword)}[,!]?\\s*`, 'i')),
+  };
+}
+
+/**
+ * Keep the compiled patterns in step with `prompt_storage/config/triggers.json`.
+ *
+ * `getTriggerKeywords()` reads through the prompt cache, so it returns the
+ * *same array object* until something clears that cache (the dashboard does,
+ * via `reloadBotDefinition()` → `reloadPrompts()` → `clearCache()`, when an
+ * operator saves new triggers). Comparing by reference therefore costs one
+ * `Map.get` in the common case and recompiles exactly when the list changed —
+ * and a stale pattern cache cannot win a comparison, because the cache key *is*
+ * the list the patterns were compiled from.
+ *
+ * The old code read the keyword list once at module load and never again, so
+ * editing triggers.json on the dashboard had no effect until a restart.
+ */
+function ensureTriggersFresh(): TriggerPatterns {
+  const keywords = getTriggerKeywords().botMention;
+  if (!Array.isArray(keywords)) {
+    return TRIGGER_PATTERNS;
+  }
+  if (TRIGGER_PATTERNS.source !== keywords) {
+    TRIGGER_PATTERNS = compileTriggers(keywords);
+    console.log(`🎯 [HANDLER] Compiled ${TRIGGER_PATTERNS.wholeWord.length} trigger pattern(s)`);
+  }
+  return TRIGGER_PATTERNS;
+}
+
+/** Force a trigger re-read and recompile (exported for in-process reloads). */
+export function reloadTriggers(): void {
+  TRIGGER_PATTERNS = EMPTY_TRIGGER_PATTERNS;
+  ensureTriggersFresh();
+}
+
+/** Bot mention patterns, compiled per bot id and cached (the id never changes). */
+const MENTION_PATTERNS = new Map<string, { single: RegExp; global: RegExp }>();
+
+function mentionPatterns(botId: string): { single: RegExp; global: RegExp } {
+  const cached = MENTION_PATTERNS.get(botId);
+  if (cached) return cached;
+  // botId is a Discord snowflake (digits), so interpolating it is safe.
+  const compiled = {
+    single: new RegExp(`<@!?${botId}>`),
+    global: new RegExp(`<@!?${botId}>`, 'g'),
+  };
+  MENTION_PATTERNS.set(botId, compiled);
+  return compiled;
+}
 
 /**
  * Strip URLs from text so that words inside links don't trigger the bot.
@@ -31,9 +115,9 @@ initializeTriggers();
  */
 function stripUrls(text: string): string {
   // Remove markdown links entirely: [link text](url)
-  let stripped = text.replace(/\[([^\]]*)\]\(https?:\/\/[^\s)]+\)/gi, '$1');
+  let stripped = text.replace(MARKDOWN_LINK_PATTERN, '$1');
   // Remove bare URLs
-  stripped = stripped.replace(/https?:\/\/[^\s<>"'\)\]]+/gi, '');
+  stripped = stripped.replace(BARE_URL_PATTERN, '');
   return stripped;
 }
 
@@ -41,13 +125,13 @@ function stripUrls(text: string): string {
  * Check if a message should trigger the bot response
  * @param content - The message content
  * @param botId - The bot's user ID
- * @param botMention - The bot's mention string
  * @returns boolean indicating if bot should respond
  */
 export function shouldTriggerBot(content: string, botId: string): boolean {
+  ensureTriggersFresh();
+
   // Check if bot is mentioned (against original content, before URL stripping)
-  const mentionPattern = new RegExp(`<@!?${botId}>`);
-  if (mentionPattern.test(content)) {
+  if (mentionPatterns(botId).single.test(content)) {
     return true;
   }
 
@@ -55,17 +139,7 @@ export function shouldTriggerBot(content: string, botId: string): boolean {
   const lowerContent = stripUrls(content).toLowerCase().trim();
 
   // Check for trigger keywords (only match whole words/phrases)
-  for (const keyword of TRIGGER_KEYWORDS) {
-    // Escape special regex characters in keyword
-    const escapedKeyword = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    // Create pattern that matches the keyword as a whole word/phrase
-    const pattern = new RegExp(`\\b${escapedKeyword}\\b`, 'i');
-    if (pattern.test(lowerContent)) {
-      return true;
-    }
-  }
-
-  return false;
+  return TRIGGER_PATTERNS.wholeWord.some((pattern) => pattern.test(lowerContent));
 }
 
 /**
@@ -74,17 +148,18 @@ export function shouldTriggerBot(content: string, botId: string): boolean {
  * @returns Array of matched trigger keywords
  */
 export function extractTriggerKeywords(content: string): string[] {
+  ensureTriggersFresh();
+
   // Strip URLs so trigger words inside links are ignored
   const lowerContent = stripUrls(content).toLowerCase().trim();
   const matched: string[] = [];
 
-  for (const keyword of TRIGGER_KEYWORDS) {
-    const escapedKeyword = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const pattern = new RegExp(`\\b${escapedKeyword}\\b`, 'i');
-    if (pattern.test(lowerContent)) {
+  TRIGGER_PATTERNS.wholeWord.forEach((pattern, index) => {
+    const keyword = TRIGGER_PATTERNS.keywords[index];
+    if (keyword !== undefined && pattern.test(lowerContent)) {
       matched.push(keyword);
     }
-  }
+  });
 
   return matched;
 }
@@ -92,27 +167,25 @@ export function extractTriggerKeywords(content: string): string[] {
 /**
  * Extract the message content without the bot mention
  * @param content - The message content
- * @param botId - The bot's user ID
  * @returns The cleaned message content
  */
 export function extractMessageContent(content: string, botId: string): string {
+  ensureTriggersFresh();
+
   let cleaned = content;
-  
+
   // Remove bot mentions
-  const mentionPattern = new RegExp(`<@!?${botId}>`, 'g');
-  cleaned = cleaned.replace(mentionPattern, '').trim();
-  
+  cleaned = cleaned.replace(mentionPatterns(botId).global, '').trim();
+
   // Remove trigger keywords from the beginning of the message
   const lowerCleaned = cleaned.toLowerCase();
-  for (const keyword of TRIGGER_KEYWORDS) {
-    const escapedKeyword = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const pattern = new RegExp(`^${escapedKeyword}[,!]?\\s*`, 'i');
+  for (const pattern of TRIGGER_PATTERNS.stripLeading) {
     if (pattern.test(lowerCleaned)) {
       cleaned = cleaned.replace(pattern, '').trim();
       break; // Only remove the first matching keyword
     }
   }
-  
+
   return cleaned;
 }
 
@@ -193,6 +266,63 @@ export interface MessageHandlerResponse {
   const cleanedText = text.replace(/\n{3,}/g, '\n\n').trim();
   
   return { text: cleanedText, reactions };
+}
+
+/**
+ * How long a collective-knowledge prefetch may delay the main LLM call.
+ *
+ * The orchestrator's own `requestCollectiveKnowledge` resolves `empty` after a
+ * hard 10s timeout, and that await sat directly in the request path: a
+ * connected-but-slow or wedged orchestrator made **every** message turn stall
+ * 10 seconds before the main model was even called, and the empty result was
+ * injected into the system prompt anyway. Collective knowledge is a
+ * nice-to-have enrichment, so it now gets a small budget and is simply dropped
+ * when it does not arrive in time. The model can still query it later through
+ * the tool, which has its own timeout.
+ */
+export const COLLECTIVE_KNOWLEDGE_PREFETCH_BUDGET_MS = 2500;
+
+/**
+ * Fetch collective knowledge within a time budget, never throwing.
+ *
+ * Returns `undefined` — meaning "inject nothing" — when the request is slow,
+ * rejects, or resolves to an empty/whitespace result. An empty
+ * `<collective-knowledge>` block is pure token cost: it tells the model that
+ * nothing was found, which is worse than saying nothing at all.
+ *
+ * Exported for tests: this is the only part of the turn that has timing
+ * behaviour, and it is pure with respect to Discord.
+ */
+export async function prefetchCollectiveKnowledge(
+  request: (query: string) => Promise<string>,
+  query: string,
+  budgetMs: number = COLLECTIVE_KNOWLEDGE_PREFETCH_BUDGET_MS
+): Promise<string | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  // The request keeps running after the budget expires (it cannot be
+  // cancelled), so it is given its own no-op handler. Without this, a late
+  // rejection from the abandoned promise is an unhandled rejection that can
+  // take the process down.
+  const pending = request(query);
+  pending.catch(() => {});
+
+  const timeout = new Promise<undefined>((resolve) => {
+    timer = setTimeout(() => resolve(undefined), budgetMs);
+  });
+
+  try {
+    const result = await Promise.race([pending, timeout]);
+    const trimmed = typeof result === 'string' ? result.trim() : '';
+    return trimmed.length > 0 ? trimmed : undefined;
+  } catch (error) {
+    // Never let a prefetch failure reach the caller's generic error handler:
+    // the user asked a question, and the answer does not depend on this.
+    console.warn(`📚 [HANDLER] Collective knowledge prefetch failed: ${error instanceof Error ? error.message : String(error)}`);
+    return undefined;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 /**
@@ -299,20 +429,24 @@ export async function handleMessage(options: MessageHandlerOptions): Promise<Mes
     let fullPromptForLog: string | undefined;
 
   try {
+    // Parsed here (cheap, side-effect free) but only *stored* after the model
+    // call succeeds — see below.
+    let parsedInfo: ParsedMessage | null = null;
+
     // Parse message for pronouns and mentions BEFORE processing
     if (userId && username) {
       const userMap = mentionedUsers || new Map<string, string>();
-      const parsed = parseMessage(content, userMap, username);
+      // `guildId` is threaded here so the mentions carry their scope, and again
+      // at store time below. Every read of user memory is guild-scoped, so an
+      // unthreaded parse/store silently writes to a bucket nothing ever reads.
+      parsedInfo = parseMessage(content, userMap, username, guildId);
 
-      // Store extracted information
-      storeParsedInformation(userId, username, parsed);
-
-      if (parsed.pronouns) {
-        console.log(`📝 [HANDLER] Stored pronouns for ${username}: ${parsed.pronouns}`);
+      if (parsedInfo.pronouns) {
+        console.log(`📝 [HANDLER] Detected pronouns for ${username}: ${parsedInfo.pronouns}`);
       }
 
-      if (parsed.hasMentions) {
-        console.log(`📝 [HANDLER] Stored ${parsed.mentions.length} third-party reference(s)`);
+      if (parsedInfo.hasMentions) {
+        console.log(`📝 [HANDLER] Parsed ${parsedInfo.mentions.length} third-party reference(s)`);
       }
     }
 
@@ -379,7 +513,15 @@ export async function handleMessage(options: MessageHandlerOptions): Promise<Mes
     let collectiveKnowledgeContext: string | undefined;
     if (shouldQueryCollectiveKnowledge && requestCollectiveKnowledge) {
       console.log('📚 [HANDLER] Prefetching collective knowledge from orchestrator');
-      collectiveKnowledgeContext = await requestCollectiveKnowledge(processedContent);
+      // Bounded, failure-isolated, and empty results are dropped instead of
+      // being injected as a content-free <collective-knowledge> block.
+      collectiveKnowledgeContext = await prefetchCollectiveKnowledge(
+        requestCollectiveKnowledge,
+        processedContent
+      );
+      if (!collectiveKnowledgeContext) {
+        console.log('📚 [HANDLER] No collective knowledge available in budget; continuing without it');
+      }
     }
 
     // Add user message to conversation history (use processed content if vision was used)
@@ -442,6 +584,24 @@ export async function handleMessage(options: MessageHandlerOptions): Promise<Mes
       onImageGenerated: (image: GeneratedImageAttachment) => generatedImages.push(image),
       onFullPrompt: (fullPrompt: string) => { fullPromptForLog = fullPrompt; },
     });
+
+    // Memory writes happen only now, after the model actually produced a reply.
+    //
+    // They used to run before the call, so a failed generation still committed
+    // them: a turn that ended in "Something went wrong" would store the user's
+    // pronouns and burn one of the 15 third-party context slots, evicting a
+    // genuine older memory in exchange for a turn that never happened.
+    if (parsedInfo && userId && username) {
+      storeParsedInformation(userId, username, parsedInfo, guildId);
+
+      if (parsedInfo.pronouns) {
+        console.log(`📝 [HANDLER] Stored pronouns for ${username}: ${parsedInfo.pronouns}`);
+      }
+
+      if (parsedInfo.hasMentions) {
+        console.log(`📝 [HANDLER] Stored ${parsedInfo.mentions.length} third-party reference(s)`);
+      }
+    }
 
     // 1. Extract and resolve GIF if present (and remove <gif> tags from the text)
     const { text: textWithoutGif, gifUrl } = isGifEnabled

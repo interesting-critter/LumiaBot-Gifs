@@ -1,5 +1,7 @@
-import { SlashCommandBuilder, ChatInputCommandInteraction, EmbedBuilder } from 'discord.js';
+import { SlashCommandBuilder, ChatInputCommandInteraction, EmbedBuilder, MessageFlags } from 'discord.js';
 import { searxngService } from '../services/searxng';
+import { rateLimiterService } from '../services/rate-limiter';
+import { buildAllowedMentions } from '../utils/permissions';
 import type { Command } from '../bot/client';
 
 const command: Command = {
@@ -38,6 +40,19 @@ const command: Command = {
     ) as SlashCommandBuilder,
 
   async execute(interaction: ChatInputCommandInteraction) {
+    // Without this, `/search` is an unthrottled open proxy to the operator's
+    // self-hosted SearXNG: any member of any guild the bot is in could drive
+    // unlimited arbitrary queries at it, and the operator pays for the
+    // infrastructure and eats the rate limiting. Same limiter the mention
+    // path uses, so a user cannot dodge it by switching to a slash command.
+    if (rateLimiterService.isRateLimited(interaction.user.id, interaction.member)) {
+      await interaction.reply({
+        content: '⏱️ You are searching too quickly. Give it a moment before your next search!',
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
     const query = interaction.options.getString('query', true);
     const category = interaction.options.getString('category') || undefined;
     const timeRange = interaction.options.getString('timerange') || undefined;
@@ -51,7 +66,7 @@ const command: Command = {
       });
 
       if (!results.results || results.results.length === 0) {
-        await interaction.editReply('No results found for your search query.');
+        await interaction.editReply({ content: 'No results found for your search query.', allowedMentions: buildAllowedMentions() });
         return;
       }
 
@@ -83,10 +98,12 @@ const command: Command = {
         });
       }
 
-      await interaction.editReply({ embeds: [embed] });
+      // Result titles, snippets and queries come from the open web, so the
+      // reply must not let Discord parse a mention out of them.
+      await interaction.editReply({ embeds: [embed], allowedMentions: buildAllowedMentions() });
     } catch (error) {
       console.error('Search command error:', error);
-      await interaction.editReply('*hisses softly* My intel-gathering paws slipped! The data vaults are being stubborn... Give me another chance to steal that forbidden knowledge? (◕︵◕)');
+      await interaction.editReply({ content: '*hisses softly* My intel-gathering paws slipped! The data vaults are being stubborn... Give me another chance to steal that forbidden knowledge? (◕︵◕)', allowedMentions: buildAllowedMentions() });
     }
   },
 };

@@ -1,5 +1,11 @@
 import { Database } from 'bun:sqlite';
-import { importMarkdownDirectory } from '../utils/markdown-parser';
+import {
+  importMarkdownDirectory,
+  MarkdownImportError,
+  type ParsedMarkdownDocument,
+} from '../utils/markdown-parser';
+import { dbPath, KNOWLEDGE_DOCUMENTS_DIR } from '../utils/paths';
+import { escapeLikeWildcards } from '../utils/sql-escape';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 
@@ -49,10 +55,45 @@ export interface CollectiveKnowledgeCandidate extends KnowledgeCandidate {
 export class KnowledgeGraphService {
   private db: Database;
 
-  constructor() {
-    this.db = new Database('knowledge_graph.db');
+  /**
+   * Cached answer for {@link hasDocuments}, invalidated on every write.
+   *
+   * `hasDocuments()` is called up to six times per message (once per AI service
+   * plus the orchestrator's prefetch), and each call used to be a full
+   * `COUNT(*)` over the documents table.
+   */
+  private hasDocumentsCache: { value: boolean; expiresAt: number } | null = null;
+
+  /**
+   * Upper bound on rows pulled out of SQLite per search before JS scoring runs.
+   * The keyword predicate runs in SQL, so the database narrows first.
+   */
+  private static readonly MAX_SEARCH_CANDIDATES = 200;
+
+  /** How long a `hasDocuments()` answer stays valid, in ms. */
+  private static readonly HAS_DOCUMENTS_TTL_MS = 5_000;
+
+  constructor(databasePath: string = dbPath('knowledge_graph.db')) {
+    // Absolute path from utils/paths: a CWD-relative filename silently creates a
+    // brand-new empty database when the bot is started from another directory.
+    this.db = new Database(databasePath);
+    this.applyPragmas();
     this.initDatabase();
     console.log('📚 [KNOWLEDGE GRAPH] Service initialized with persistent storage');
+  }
+
+  private applyPragmas(): void {
+    try {
+      this.db.run('PRAGMA journal_mode = WAL');
+      this.db.run('PRAGMA busy_timeout = 5000');
+    } catch (error) {
+      console.warn('📚 [KNOWLEDGE GRAPH] Could not enable WAL/busy_timeout:', error);
+    }
+  }
+
+  /** Drop the cached `hasDocuments()` answer; called by every writer. */
+  private invalidateDocumentCache(): void {
+    this.hasDocumentsCache = null;
   }
 
   private initDatabase(): void {
@@ -117,6 +158,7 @@ export class KnowledgeGraphService {
       ]
     );
 
+    this.invalidateDocumentCache();
     console.log(`📚 [KNOWLEDGE GRAPH] Stored document: "${doc.title}" (${doc.topic})`);
   }
 
@@ -167,6 +209,7 @@ export class KnowledgeGraphService {
       values
     );
 
+    this.invalidateDocumentCache();
     console.log(`📚 [KNOWLEDGE GRAPH] Updated document ${id}`);
   }
 
@@ -216,48 +259,89 @@ export class KnowledgeGraphService {
    */
   searchByKeywords(query: KnowledgeQuery): KnowledgeSearchResult[] {
     const { query: searchQuery, topics, maxResults = 5, minPriority = 1 } = query;
-    
-    // Extract keywords from query
-    const queryKeywords = searchQuery.toLowerCase()
+
+    // Extract keywords from query.
+    //
+    // The token-length filter runs on the RAW token, before escaping: it exists
+    // to drop short stop-words, and escaping grows a token (`a%` → `a\%`), so
+    // filtering afterwards would let 2-character junk like `%_` through and
+    // reject legitimate 3-character keywords whose escape made them look long.
+    //
+    // Escaping itself is not optional here. Every clause below declares
+    // `ESCAPE '\'`, which turns `%`, `_` and `\` back into match-literal
+    // characters — without it a query word containing `%` matched every document
+    // in the table, and a word containing `\` ate the `%` that followed it in the
+    // bind list. Shared with the other LIKE callers; see utils/sql-escape.ts.
+    const queryKeywords = [...new Set(searchQuery.toLowerCase()
       .split(/\s+/)
-      .filter(k => k.length > 2); // Only words longer than 2 chars
+      .filter(k => k.length > 2) // Only words longer than 2 chars
+      .map(escapeLikeWildcards))];
 
     if (queryKeywords.length === 0) {
       return [];
     }
 
-    // Build query
-    let sql = `SELECT * FROM knowledge_documents WHERE priority >= ?`;
-    const params: any[] = [minPriority];
+    /*
+     * Keyword matching is pushed into SQL so the database — not JavaScript —
+     * decides which rows are candidates, and the hard LIMIT below applies to
+     * that narrowed set. The previous implementation ran `SELECT *` over every
+     * document with no LIMIT, then scored all of them in JS with a JSON.parse
+     * per row; this path is on the hot route (the `search_knowledge_base` tool
+     * and the per-message `requestCollectiveKnowledge` prefetch).
+     *
+     * LIKE is used rather than FTS because the keyword list is a JSON blob in a
+     * TEXT column; the OR-with-LIMIT shape still bounds the work.
+     */
+    const matchClauses = queryKeywords
+      .map(() => `(keywords LIKE ? ESCAPE '\\' OR LOWER(content) LIKE ? ESCAPE '\\' OR LOWER(title) LIKE ? ESCAPE '\\')`)
+      .join(' OR ');
+
+    const matchParams: string[] = [];
+    for (const kw of queryKeywords) {
+      matchParams.push(`%${kw}%`, `%${kw}%`, `%${kw}%`);
+    }
+
+    let sql = `SELECT * FROM knowledge_documents WHERE priority >= ? AND (${matchClauses})`;
+    const params: any[] = [minPriority, ...matchParams];
 
     if (topics && topics.length > 0) {
       sql += ` AND topic IN (${topics.map(() => '?').join(',')})`;
       params.push(...topics);
     }
 
-    sql += ` ORDER BY priority DESC`;
+    sql += ` ORDER BY priority DESC LIMIT ?`;
+    params.push(KnowledgeGraphService.MAX_SEARCH_CANDIDATES);
 
     const results = this.db.query(sql).all(...params) as any[];
 
     // Score and filter results
     const scored: KnowledgeSearchResult[] = results.map(doc => {
-      const keywords: string[] = JSON.parse(doc.keywords);
-      
+      let keywords: string[] = [];
+      try {
+        keywords = JSON.parse(doc.keywords);
+      } catch {
+        keywords = [];
+      }
+
       // Calculate relevance score
       let score = 0;
       const matchedKeywords: string[] = [];
+      const titleLower = doc.title.toLowerCase();
+      const contentLower = doc.content.toLowerCase();
 
       for (const queryKw of queryKeywords) {
+        const rawKw = queryKw.replace(/\\(.)/g, '$1');
+
         // Exact match on keyword
-        if (keywords.includes(queryKw)) {
+        if (keywords.includes(rawKw)) {
           score += 10;
-          matchedKeywords.push(queryKw);
+          matchedKeywords.push(rawKw);
           continue;
         }
 
         // Partial match on keyword
         for (const kw of keywords) {
-          if (kw.includes(queryKw) || queryKw.includes(kw)) {
+          if (kw.includes(rawKw) || rawKw.includes(kw)) {
             score += 5;
             matchedKeywords.push(kw);
             break;
@@ -265,21 +349,29 @@ export class KnowledgeGraphService {
         }
 
         // Match in title
-        if (doc.title.toLowerCase().includes(queryKw)) {
+        if (titleLower.includes(rawKw)) {
           score += 3;
         }
 
         // Match in content
-        if (doc.content.toLowerCase().includes(queryKw)) {
+        if (contentLower.includes(rawKw)) {
           score += 1;
         }
       }
 
-      // Boost by priority
-      score += doc.priority * 0.5;
-
-      // Boost by usage count (logarithmic)
-      score += Math.log10(doc.usage_count + 1);
+      /*
+       * The priority and usage boosts are only meaningful for a document that
+       * actually matched. Applied unconditionally they guaranteed
+       * `relevanceScore >= 0.5` for every row, so a garbage query
+       * ("zzzz nonexistent term") returned the whole table with
+       * `matchedKeywords: []` — and `queryKnowledgeBase` then incremented
+       * `usage_count` on those non-matches, permanently reordering
+       * `getStats().mostUsed`.
+       */
+      if (matchedKeywords.length > 0) {
+        score += doc.priority * 0.5;
+        score += Math.log10(doc.usage_count + 1);
+      }
 
       return {
         document: this.mapRowToDocument(doc),
@@ -291,7 +383,14 @@ export class KnowledgeGraphService {
     // Sort by relevance and take top results
     scored.sort((a, b) => b.relevanceScore - a.relevanceScore);
 
-    return scored.slice(0, maxResults).filter(s => s.relevanceScore > 0);
+    /*
+     * Keep only genuine matches. A document that matched nothing scores exactly
+     * 0 now that the priority/usage boosts are gated on `matchedKeywords`, so
+     * `relevanceScore > 0` is a real match signal again — it also keeps title-
+     * and content-only matches, which are legitimate but contribute nothing to
+     * `matchedKeywords` (that field lists keyword-column hits).
+     */
+    return scored.filter(s => s.matchedKeywords.length > 0 || s.relevanceScore > 0).slice(0, maxResults);
   }
 
   /**
@@ -486,6 +585,7 @@ ${sections.join('\n\n')}
    */
   deleteDocument(id: number): void {
     this.db.run('DELETE FROM knowledge_documents WHERE id = ?', [id]);
+    this.invalidateDocumentCache();
     console.log(`📚 [KNOWLEDGE GRAPH] Deleted document ${id}`);
   }
 
@@ -498,6 +598,7 @@ ${sections.join('\n\n')}
     const count = stats.totalDocuments;
     
     this.db.run('DELETE FROM knowledge_documents');
+    this.invalidateDocumentCache();
     console.log(`📚 [KNOWLEDGE GRAPH] Cleared all ${count} documents from knowledge base`);
     
     return { deletedCount: count };
@@ -512,6 +613,7 @@ ${sections.join('\n\n')}
     ).get(topic) as { count: number };
     
     this.db.run('DELETE FROM knowledge_documents WHERE topic = ?', [topic]);
+    this.invalidateDocumentCache();
     console.log(`📚 [KNOWLEDGE GRAPH] Deleted ${beforeCount.count} documents from topic "${topic}"`);
     
     return { deletedCount: beforeCount.count };
@@ -553,12 +655,32 @@ ${sections.join('\n\n')}
     };
   }
 
+  /**
+   * Whether the knowledge base holds any document.
+   *
+   * Cached for a few seconds and invalidated on every write. This is asked up
+   * to six times per turn across the two AI services and the orchestrator
+   * prefetch, and each call used to be a full `COUNT(*)`.
+   */
   hasDocuments(): boolean {
-    const result = this.db.query(
-      'SELECT COUNT(*) as count FROM knowledge_documents'
-    ).get() as { count: number };
+    const now = Date.now();
+    const cached = this.hasDocumentsCache;
 
-    return result.count > 0;
+    if (cached && cached.expiresAt > now) {
+      return cached.value;
+    }
+
+    const result = this.db.query(
+      'SELECT 1 AS present FROM knowledge_documents LIMIT 1'
+    ).get() as { present: number } | undefined;
+
+    const value = result !== null && result !== undefined;
+    this.hasDocumentsCache = {
+      value,
+      expiresAt: now + KnowledgeGraphService.HAS_DOCUMENTS_TTL_MS,
+    };
+
+    return value;
   }
 
   getToolSummary(limit: number = 8): string {
@@ -632,6 +754,7 @@ ${sections.join('\n\n')}
       );
     }
 
+    this.invalidateDocumentCache();
     console.log(`📚 [KNOWLEDGE GRAPH] Bulk imported ${documents.length} documents`);
   }
 
@@ -639,8 +762,35 @@ ${sections.join('\n\n')}
    * Sync knowledge documents from the knowledge_documents/ directory on disk.
    * New documents (by title+topic) are inserted; existing documents with changed content are updated.
    * This is safe to call on every startup.
+   *
+   * CONTRACT: this sync is ADDITIVE ONLY. Documents whose `.md` file was
+   * deleted or renamed are **not** removed from the database — the table is also
+   * the destination for `/knowledge add`, the dashboard editor, and
+   * `import-to-db.ts`, none of which have a file on disk, so pruning "anything
+   * not in the directory" would silently delete operator-authored knowledge.
+   * Deleting a synced document is an explicit `deleteDocument` /
+   * `deleteByTopic` / `clearAll` (or a `DROP TABLE` reset). The consequence is
+   * that the knowledge base can drift ahead of the directory in the sense that
+   * removed files linger; that is deliberate, not an oversight.
+   *
+   * FAILURE REPORTING (deliberately NOT a hard throw)
+   * --------------------------------------------------
+   * The directory walk runs `strict: true`, so an unreadable file or directory
+   * raises {@link MarkdownImportError} instead of silently shortening the list.
+   * That error is then caught and logged, and whatever *did* parse is still
+   * synced, because this runs on the boot path: one unreadable document must not
+   * stop the bot from starting, and the table is additive, so syncing the
+   * readable subset is still the right outcome.
+   *
+   * A throw here would also have been useless as a signal — the caller of
+   * `syncFromFiles` is the boot sequence, which has nobody to tell. What was
+   * actually wrong before was silence: an unreadable file landed in the parser's
+   * failure list, the count dropped to 39, and the operator saw
+   * `✅ File sync complete: 39 unchanged`, indistinguishable from a complete
+   * tree. The failure list is therefore printed at `error` level, naming every
+   * path, and says outright that the knowledge base is incomplete.
    */
-  async syncFromFiles(dirPath: string = './knowledge_documents'): Promise<void> {
+  async syncFromFiles(dirPath: string = KNOWLEDGE_DOCUMENTS_DIR): Promise<void> {
     const resolvedPath = resolve(dirPath);
 
     if (!existsSync(resolvedPath)) {
@@ -648,7 +798,24 @@ ${sections.join('\n\n')}
       return;
     }
 
-    const docs = await importMarkdownDirectory(resolvedPath);
+    let docs: ParsedMarkdownDocument[];
+    let unreadableCount = 0;
+    try {
+      docs = await importMarkdownDirectory(resolvedPath, { strict: true });
+    } catch (error) {
+      if (!(error instanceof MarkdownImportError)) throw error;
+
+      // Partial tree: name every unreadable path, then carry on with what parsed.
+      unreadableCount = error.failures.length;
+      console.error(
+        `🚨 [KNOWLEDGE GRAPH] PARTIAL FILE SYNC — ${unreadableCount} path(s) could not be read, ` +
+          `so the knowledge base is INCOMPLETE. Any document under those paths was NOT synced.`,
+      );
+      for (const failure of error.failures) {
+        console.error(`🚨 [KNOWLEDGE GRAPH]   unreadable: ${failure}`);
+      }
+      docs = error.documents;
+    }
 
     if (docs.length === 0) {
       console.log('📚 [KNOWLEDGE GRAPH] No markdown documents found to sync');
@@ -702,7 +869,23 @@ ${sections.join('\n\n')}
       }
     }
 
-    console.log(`📚 [KNOWLEDGE GRAPH] File sync complete: ${added} added, ${updated} updated, ${unchanged} unchanged (${docs.length} files scanned)`);
+    this.invalidateDocumentCache();
+    // "Complete" is only true when every path in the tree was readable. On a
+    // partial tree the word would be a lie, and this log line is exactly what an
+    // operator stares at to decide whether the sync worked.
+    const partialSuffix = unreadableCount > 0
+      ? ` — ⚠️ PARTIAL: ${unreadableCount} path(s) unreadable, see the errors above`
+      : '';
+    console.log(`📚 [KNOWLEDGE GRAPH] File sync ${unreadableCount > 0 ? 'partial' : 'complete'}: ${added} added, ${updated} updated, ${unchanged} unchanged (${docs.length} files scanned)${partialSuffix}`);
+  }
+
+  /** Close the underlying handle. Used by tests and maintenance scripts. */
+  close(): void {
+    try {
+      this.db.close();
+    } catch (error) {
+      console.warn('📚 [KNOWLEDGE GRAPH] Failed to close database:', error);
+    }
   }
 
   /**

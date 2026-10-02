@@ -1,13 +1,13 @@
 import { Database } from 'bun:sqlite';
-import { join } from 'node:path';
-import { existsSync, mkdirSync } from 'node:fs';
+import { dbPath } from '../utils/paths';
 
-const dataDir = join(import.meta.dir, '..', '..', 'data');
-if (!existsSync(dataDir)) {
-  mkdirSync(dataDir, { recursive: true });
-}
-
-const db = new Database(join(dataDir, 'gif_settings.db'));
+/**
+ * Anchored to `DATA_DIR` rather than a CWD-relative `'data'`, so a guild's GIF
+ * toggle cannot silently reset just because the process was started from a
+ * different directory. `dbPath` also owns creating the directory, which removes
+ * the `mkdirSync` that used to run as an import-time side effect of this module.
+ */
+const db = new Database(dbPath('gif_settings.db'));
 
 // Initialize settings table
 db.run(`
@@ -17,6 +17,48 @@ db.run(`
     updated_at TEXT NOT NULL
   )
 `);
+
+/**
+ * Hosts we will accept a scraped GIF URL from.
+ *
+ * `resolveGif` regex-scrapes an `<img src="...gif">` out of the Tenor search
+ * page and returns whatever host it finds. That page is not a trust boundary:
+ * the URL is ultimately chosen by regex, so a page that manages to influence it
+ * (or a Tenor markup change that picks up a third-party URL) can point the bot at
+ * an arbitrary origin — which then gets `HEAD`ed here and, more importantly,
+ * handed to Discord as a media embed. Wildcards cover Tenor's own regional CDN
+ * hosts, which are siblings rather than sub-domains of `tenor.com`.
+ */
+const GIF_ALLOWED_HOSTS = [
+  '*.tenor.com',
+  'tenor.com',
+  '*.tenorcdn.com',
+  'tenorcdn.com',
+  '*.giphy.com',
+  'giphy.com',
+  '*.giphycdn.com',
+  'giphycdn.com',
+] as const;
+
+/** True when `rawUrl`'s host is on the Tenor/Giphy allowlist. */
+function isAllowedGifHost(rawUrl: string): boolean {
+  let hostname: string;
+  try {
+    hostname = new URL(rawUrl).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  if (hostname === '') return false;
+
+  return GIF_ALLOWED_HOSTS.some((allowed) => {
+    if (allowed.startsWith('*.')) {
+      const base = allowed.slice(2);
+      // Dot boundary, so `evil-tenor.com` cannot pass as `tenor.com`.
+      return hostname.endsWith(`.${base}`) && hostname.length > base.length + 1;
+    }
+    return hostname === allowed || hostname.endsWith(`.${allowed}`);
+  });
+}
 
 const gifDirectivePatterns = [
   /(?:^|\n)[ \t]*```(?:xml|html)?[ \t]*\n[ \t]*<gif\s*>\s*([^<>\r\n]+?)\s*<\/gif\s*>[ \t]*\n[ \t]*```[ \t]*$/i,
@@ -74,14 +116,28 @@ export class GifService {
         // Group 1 is a required capture, so this never drops anything; it only
         // narrows the type for noUncheckedIndexedAccess.
         .filter((candidate): candidate is string => Boolean(candidate))
+        // Scrape-time allowlist: a candidate from an unknown host is dropped
+        // before any request is made, so it can neither be probed nor returned.
+        .filter((candidate) => {
+          if (isAllowedGifHost(candidate)) return true;
+          console.warn(`🎬 [GIF] Ignoring off-allowlist candidate: ${candidate.slice(0, 120)}`);
+          return false;
+        })
         .slice(0, 4)
         .sort(() => Math.random() - 0.5);
 
       for (const candidate of candidates) {
         try {
-          const checkRes = await fetch(candidate, { method: 'HEAD', signal: AbortSignal.timeout(3000) });
+          const checkRes = await fetch(candidate, {
+            method: 'HEAD',
+            signal: AbortSignal.timeout(3000),
+            redirect: 'manual',
+          });
           if (checkRes.ok && checkRes.headers.get('content-type')?.includes('image/gif')) {
-            return candidate;
+            // Re-check the host we actually ended up on. `manual` means no hop is
+            // followed silently, but a same-host redirect chain could still be
+            // constructed; verifying at return time costs nothing.
+            if (isAllowedGifHost(candidate)) return candidate;
           }
         } catch {
           // Try next candidate

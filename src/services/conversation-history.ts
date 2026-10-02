@@ -1,5 +1,6 @@
 import { Database } from 'bun:sqlite';
 import { config } from '../utils/config';
+import { dbPath } from '../utils/paths';
 import type { ChatMessage } from './openai';
 
 export interface ConversationEntry {
@@ -19,11 +20,23 @@ export class ConversationHistoryService {
   private db: Database;
   private maxHistoryLength: number;
 
-  constructor() {
-    this.db = new Database('conversations.db');
+  constructor(databasePath: string = dbPath('conversations.db')) {
+    // Absolute path from utils/paths: a CWD-relative filename silently creates a
+    // brand-new empty database when the bot is started from another directory.
+    this.db = new Database(databasePath);
     this.maxHistoryLength = config.conversation.maxHistoryLength;
+    this.applyPragmas();
     this.initDatabase();
     console.log(`💬 [CONVERSATION] History service initialized (${this.maxHistoryLength} messages max, persistent storage)`);
+  }
+
+  private applyPragmas(): void {
+    try {
+      this.db.run('PRAGMA journal_mode = WAL');
+      this.db.run('PRAGMA busy_timeout = 5000');
+    } catch (error) {
+      console.warn('💬 [CONVERSATION] Could not enable WAL/busy_timeout:', error);
+    }
   }
 
   private initDatabase(): void {
@@ -96,15 +109,23 @@ export class ConversationHistoryService {
       'SELECT COUNT(*) as count FROM conversation_messages WHERE user_id = ? AND guild_id = ?'
     ).get(userId, guildId) as { count: number };
 
-    // Trim to max length (rolling window) - delete oldest messages
+    // Trim to max length (rolling window) - delete oldest messages.
+    //
+    // `timestamp` is `new Date().toISOString()`, i.e. millisecond resolution, and
+    // handleMessage inserts the user's message and the assistant's reply in
+    // adjacent awaits — so identical timestamps are reachable. Ordering by
+    // timestamp alone lets SQLite pick an arbitrary row among the ties, which can
+    // delete the assistant reply while keeping the user message and permanently
+    // lopside the history. `id ASC` is the tiebreaker that makes the oldest-N
+    // selection deterministic.
     if (countResult.count > this.maxHistoryLength) {
       const toDelete = countResult.count - this.maxHistoryLength;
       this.db.run(
-        `DELETE FROM conversation_messages 
+        `DELETE FROM conversation_messages
          WHERE id IN (
-           SELECT id FROM conversation_messages 
+           SELECT id FROM conversation_messages
            WHERE user_id = ? AND guild_id = ?
-           ORDER BY timestamp ASC 
+           ORDER BY timestamp ASC, id ASC
            LIMIT ?
          )`,
         [userId, guildId, toDelete]
@@ -119,11 +140,13 @@ export class ConversationHistoryService {
    * Get conversation history as ChatMessage array for OpenAI (guild-specific)
    */
   getHistory(userId: string, guildId: string): ChatMessage[] {
+    // `id ASC` is a tiebreaker: timestamps have millisecond resolution and the
+    // user message and its reply can land in the same millisecond.
     const results = this.db.query(
       `SELECT role, content, username, timestamp
        FROM conversation_messages
        WHERE user_id = ? AND guild_id = ?
-       ORDER BY timestamp ASC`
+       ORDER BY timestamp ASC, id ASC`
     ).all(userId, guildId) as Array<{ role: 'user' | 'assistant'; content: string; username: string; timestamp: string }>;
 
     // Convert to ChatMessage format with username attribution on user messages
@@ -143,7 +166,7 @@ export class ConversationHistoryService {
       `SELECT user_id, username, role, content, timestamp 
        FROM conversation_messages 
        WHERE user_id = ? AND guild_id = ?
-       ORDER BY timestamp ASC`
+       ORDER BY timestamp ASC, id ASC`
     ).all(userId, guildId) as Array<{ user_id: string; username: string; role: 'user' | 'assistant'; content: string; timestamp: string }>;
 
     if (results.length === 0) {
@@ -263,22 +286,55 @@ export class ConversationHistoryService {
 
   /**
    * List all active conversations (admin view)
+   *
+   * `limit` is optional and defaults to *unlimited*, which is the behaviour
+   * this method always had. Callers that only render a page should pass one:
+   * the `GROUP BY` below has to walk every row in the table regardless, but
+   * without a `LIMIT` it also materialises one object per distinct
+   * (user, guild, username) triple, so an established bot hands the caller
+   * thousands of rows to look at the first hundred of. `total` is the true
+   * number of groups, so a caller can say "showing 100 of 4212" rather than
+   * silently truncating.
+   *
+   * Note `total` costs a second aggregate pass over the same rows, so it is
+   * only computed when a `limit` was actually requested.
    */
-  listActiveConversations(): Array<{ userId: string; guildId: string; username: string; messageCount: number; lastActivity: string }> {
+  listActiveConversations(limit?: number): { conversations: Array<{ userId: string; guildId: string; username: string; messageCount: number; lastActivity: string }>; total: number } {
+    const capped =
+      typeof limit === 'number' && Number.isFinite(limit)
+        ? Math.max(1, Math.floor(limit))
+        : null;
+
+    // The LIMIT is inlined rather than bound because SQLite will not accept a
+    // parameter in that position on every version, and `capped` is a clamped
+    // integer built above — there is no string in this concatenation.
     const results = this.db.query(
       `SELECT user_id, guild_id, username, COUNT(*) as count, MAX(timestamp) as last_activity
-       FROM conversation_messages 
+       FROM conversation_messages
        GROUP BY user_id, guild_id, username
-       ORDER BY last_activity DESC`
+       ORDER BY last_activity DESC${capped === null ? '' : ` LIMIT ${capped}`}`
     ).all() as Array<{ user_id: string; guild_id: string; username: string; count: number; last_activity: string }>;
 
-    return results.map(r => ({
+    const conversations = results.map(r => ({
       userId: r.user_id,
       guildId: r.guild_id,
       username: r.username,
       messageCount: r.count,
       lastActivity: r.last_activity,
     }));
+
+    if (capped === null) {
+      return { conversations, total: conversations.length };
+    }
+
+    const counted = this.db.query(
+      `SELECT COUNT(*) as total FROM (
+         SELECT 1 FROM conversation_messages
+         GROUP BY user_id, guild_id, username
+       )`
+    ).get() as { total: number };
+
+    return { conversations, total: counted.total };
   }
 
   /**
@@ -291,7 +347,7 @@ export class ConversationHistoryService {
       `SELECT role, content
        FROM conversation_messages
        WHERE user_id = ? AND guild_id = ?
-       ORDER BY timestamp ASC`
+       ORDER BY timestamp ASC, id ASC`
     ).all(userId, guildId) as Array<{ role: 'user' | 'assistant'; content: string }>;
 
     if (results.length === 0) {

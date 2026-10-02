@@ -44,6 +44,25 @@ interface SubsonicEnvelope {
   'subsonic-response'?: SubsonicResponseBody;
 }
 
+/**
+ * Wall-clock ceiling for the data endpoints.
+ *
+ * `getNowPlaying`, `getCoverArtBuffer` and `getLyrics` are all reachable from the
+ * LLM tool loop. `ping()` already had a 4s timeout, but the three methods that
+ * actually return user-visible data had none, so a hung Navidrome pinned a
+ * conversation turn — and the per-channel serialization queue behind it —
+ * indefinitely. This host is operator-configured, so there is no SSRF angle and
+ * no need for `safeFetch`; a plain timeout is the whole fix.
+ */
+const REQUEST_TIMEOUT_MS = 10_000;
+
+/**
+ * Ceiling for cover-art downloads. Discord's own attachment limit is far below
+ * this; an image larger than it can never be attached successfully, so
+ * buffering it only costs memory and guarantees a throw at send time.
+ */
+const MAX_COVER_ART_BYTES = 4 * 1024 * 1024;
+
 /** Result of a Navidrome liveness probe. See `NavidromeService.ping`. */
 export interface NavidromeHealth {
   configured: boolean;
@@ -173,7 +192,10 @@ export class NavidromeService {
     const params = this.getAuthParams();
     const url = `${this.baseUrl}/rest/getNowPlaying.view?${params.toString()}`;
 
-    const res = await fetch(url);
+    // Bounded: this is reachable from the LLM tool loop, so an unbounded hang
+    // pins a whole conversation turn (and the per-channel serialization queue)
+    // with no way out. Previously only `ping()` had a timeout.
+    const res = await fetch(url, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
     if (!res.ok) {
       throw new Error(`Navidrome HTTP error: ${res.status} ${res.statusText}`);
     }
@@ -211,11 +233,53 @@ export class NavidromeService {
       const params = this.getAuthParams();
       const url = `${this.baseUrl}/rest/getCoverArt.view?${params.toString()}&id=${encodeURIComponent(coverArtId)}`;
 
-      const res = await fetch(url);
+      const res = await fetch(url, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
       if (!res.ok) return null;
 
-      const arrayBuffer = await res.arrayBuffer();
-      return Buffer.from(arrayBuffer);
+      // Discord attachment buffers are capped well below the 8 MB component
+      // limit that upload would need; fetching a bigger one just guarantees the
+      // send throws after we have already buffered it in memory. Cap during the
+      // stream rather than calling `arrayBuffer()` and measuring afterwards.
+      const declared = Number(res.headers.get('content-length'));
+      if (Number.isFinite(declared) && declared > MAX_COVER_ART_BYTES) {
+        console.warn(`⚠️  [NAVIDROME] Cover art ${coverArtId} is ${declared} bytes, over the cap — skipping`);
+        await res.body?.cancel().catch(() => {});
+        return null;
+      }
+
+      if (!res.body) return null;
+
+      const reader = res.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let total = 0;
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (!value) continue;
+          total += value.byteLength;
+          if (total > MAX_COVER_ART_BYTES) {
+            await reader.cancel().catch(() => {});
+            console.warn(`⚠️  [NAVIDROME] Cover art ${coverArtId} exceeded ${MAX_COVER_ART_BYTES} bytes mid-stream — skipping`);
+            return null;
+          }
+          chunks.push(value);
+        }
+      } finally {
+        try {
+          reader.releaseLock();
+        } catch {
+          // Already released by cancel().
+        }
+      }
+
+      const out = new Uint8Array(total);
+      let offset = 0;
+      for (const chunk of chunks) {
+        out.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+      return Buffer.from(out.buffer);
     } catch (err) {
       console.error('❌ [NAVIDROME] Failed to fetch cover art buffer:', err);
       return null;
@@ -233,7 +297,7 @@ export class NavidromeService {
       params.set('title', title);
 
       const url = `${this.baseUrl}/rest/getLyrics.view?${params.toString()}`;
-      const res = await fetch(url);
+      const res = await fetch(url, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
       if (!res.ok) return null;
 
       const json = (await res.json()) as SubsonicEnvelope;

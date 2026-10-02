@@ -17,6 +17,9 @@ import type { ResolvedUserMention, ResolveUserMention } from '../services/user-m
 import type { GeneratedImageAttachment } from '../services/swarmui';
 import { navidromeService } from '../services/navidrome';
 import { rateLimiterService } from '../services/rate-limiter';
+import { buildAllowedMentions } from '../utils/permissions';
+import { assertPublicUrl, safeFetchText } from '../utils/safe-fetch';
+import { mediaAllowedHosts } from '../utils/media-allowlist';
 import type { InteractionSource } from '../services/dashboard-logger';
 
 export interface Command {
@@ -177,14 +180,6 @@ function getMentionedUserDisplayMap(message: Message): Map<string, string> {
   return mentionedUsers;
 }
 
-function buildAllowedMentions(userIds: Iterable<string>) {
-  return {
-    parse: [],
-    users: Array.from(new Set(userIds)),
-    repliedUser: false,
-  };
-}
-
 function buildDiscordImageFiles(attachments: GeneratedImageAttachment[]): AttachmentBuilder[] {
   return attachments.map((attachment) => new AttachmentBuilder(attachment.data, {
     name: attachment.name,
@@ -219,7 +214,7 @@ function resolveInteractionSource(
   if (isReplyToBot) {
     return 'reply';
   }
-  if (new RegExp(`<@!?${botId}>`).test(content)) {
+  if (getBotMentionPattern(botId).test(content)) {
     return 'mention';
   }
   return 'keyword';
@@ -259,18 +254,425 @@ function canUserRequestNsfwImages(channel: Message['channel'], userId?: string):
   return !!userId && userId === config.bot.ownerId;
 }
 
+// ---------------------------------------------------------------------------
+// Pure helpers (no Discord objects) — unit-tested in `__tests__/generation-guard.test.ts`
+// ---------------------------------------------------------------------------
+
+/**
+ * The hosts this bot is willing to fetch media from server-side.
+ *
+ * Discord allows `embed.image.url` / `embed.thumbnail.url` / `embed.video.url` to
+ * be an **arbitrary http(s) URL on any host** — there is no Discord-CDN
+ * restriction at the API level. Those URLs are fetched by the server and
+ * base64-inlined into a request to an external model vendor, so an unfiltered
+ * list is both an SSRF sink (`http://127.0.0.1:4533/rest/getCoverArt.view`,
+ * `http://127.0.0.1:3001/api/persona`, `http://169.254.169.254/…`) and an
+ * exfiltration channel: the fetched bytes leave to the model vendor and the
+ * model frequently narrates them back into the channel.
+ *
+ * The list itself lives in `utils/media-allowlist.ts` and is operator
+ * configurable via `DISCORD_MEDIA_ALLOWED_HOSTS`, because a Discord-only list
+ * also drops real Tenor/Giphy `gifv` embeds whose `video.url` is
+ * `media.tenor.com`. Matching still goes through `utils/safe-fetch.ts`, so this
+ * is one allowlist, not two. See `media-allowlist.ts` for the trust argument.
+ */
+
+/** Wall-clock budget for a single server-side media fetch. */
+const DISCORD_MEDIA_TIMEOUT_MS = 15_000;
+
+/**
+ * Is this URL one this bot is willing to fetch server-side on behalf of a
+ * Discord-supplied reference?
+ *
+ * Fails **closed** (a rejected URL is dropped, not fetched) because the input is
+ * attacker-controlled by any member of any guild.
+ */
+async function isPermittedDiscordMediaUrl(url: string): Promise<boolean> {
+  try {
+    await assertPublicUrl(url, { allowHosts: mediaAllowedHosts() });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Drop every URL that is not on the configured media allowlist.
+ *
+ * Called on the image/video lists immediately before they are handed to
+ * `handleMessage`, which is what ultimately performs the server-side fetch.
+ */
+async function filterDiscordMediaUrls(urls: string[], logPrefix: string): Promise<string[]> {
+  if (urls.length === 0) {
+    return urls;
+  }
+  const permitted = await Promise.all(urls.map(isPermittedDiscordMediaUrl));
+  const kept = urls.filter((_, index) => permitted[index] === true);
+  if (kept.length !== urls.length) {
+    for (let i = 0; i < urls.length; i++) {
+      if (permitted[i] !== true) {
+        // Log the host only. A full URL can carry a signature/token in its query.
+        let host = 'unparseable';
+        try {
+          host = new URL(urls[i] as string).host;
+        } catch {
+          // keep the placeholder
+        }
+        console.warn(`🛡️  [${logPrefix}] Dropped media URL outside the configured allowlist (host: ${host})`);
+      }
+    }
+  }
+  return kept;
+}
+
+/** {@link filterDiscordMediaUrls} for `{ url, mimeType }` attachments. */
+async function filterDiscordMediaAttachments(
+  media: { url: string; mimeType?: string }[],
+  logPrefix: string,
+): Promise<{ url: string; mimeType?: string }[]> {
+  if (media.length === 0) {
+    return media;
+  }
+  const permitted = await Promise.all(media.map((entry) => isPermittedDiscordMediaUrl(entry.url)));
+  const kept = media.filter((_, index) => permitted[index] === true);
+  if (kept.length !== media.length) {
+    console.warn(
+      `🛡️  [${logPrefix}] Dropped ${media.length - kept.length} media attachment(s) outside the configured allowlist`,
+    );
+  }
+  return kept;
+}
+
+/**
+ * Did the user summon the bot without saying anything?
+ *
+ * Extracted so the "start typing" call can be placed strictly *after* this
+ * check. The empty-content branch replies and returns, so any typing started
+ * before it leaked an 8-second interval per channel that only ever self-heals
+ * when `sendTyping()` throws — which it does not for a healthy channel.
+ */
+export function isEmptyTriggeredTurn(
+  hasTrigger: boolean,
+  cleanedContent: string,
+  stickerHintCount: number,
+): boolean {
+  return hasTrigger && cleanedContent.trim().length === 0 && stickerHintCount === 0;
+}
+
+/**
+ * A held generation key.
+ *
+ * The point of the object is that {@link GenerationKeyGuard.release} accepts
+ * *only* a lease it issued. A caller that lost the `begin` race has `null`, and
+ * `release(null)` is a no-op — so a duplicate-suppressed turn can no longer
+ * delete the key that the in-flight generation is still using.
+ */
+export class GenerationLease {
+  private released = false;
+
+  constructor(
+    private readonly guard: GenerationKeyGuard,
+    readonly key: string,
+  ) {}
+
+  get isReleased(): boolean {
+    return this.released;
+  }
+
+  release(): void {
+    if (this.released) {
+      return;
+    }
+    this.released = true;
+    this.guard.endGeneration(this.key);
+  }
+}
+
+/**
+ * In-flight generation guard.
+ *
+ * Two layers, because they defend against different things:
+ *
+ *   - `active` is the *correctness* lock. It is released only by the holder,
+ *     via its lease. A generation that runs longer than the recent-TTL (a
+ *     10-round tool loop plus retries makes that entirely plausible) keeps its
+ *     lock indefinitely; the recent layer below exists purely to suppress
+ *     near-simultaneous duplicates, not to enforce mutual exclusion.
+ *   - `recent` is a 120s suppression window so a retry of the *same* Discord
+ *     message does not regenerate. It is TTL'd precisely because it must not
+ *     outlive the work.
+ *
+ * The bug this replaces: `endGeneration(key)` took a bare key, so the `finally`
+ * of a turn whose `beginGeneration` had returned `false` deleted the key held
+ * by the real, still-running generation. `recent` masked it for 120s; past that
+ * two generations for one message ran concurrently.
+ */
+export class GenerationKeyGuard {
+  private readonly active = new Map<string, GenerationLease>();
+  private readonly recent = new Set<string>();
+  private readonly recentTimers = new Map<string, Timer>();
+
+  constructor(private readonly recentTtlMs: number = 120_000) {}
+
+  /**
+   * Try to take the lock for `key`.
+   * @returns a lease the caller **must** release, or `null` when the key is
+   *          already in flight or was in flight within the recent window.
+   */
+  begin(key: string): GenerationLease | null {
+    if (this.active.has(key) || this.recent.has(key)) {
+      return null;
+    }
+
+    const lease = new GenerationLease(this, key);
+    this.active.set(key, lease);
+    this.recent.add(key);
+
+    const timer = setTimeout(() => {
+      this.recent.delete(key);
+      this.recentTimers.delete(key);
+    }, this.recentTtlMs);
+    // Never let a suppression timer hold the process open.
+    timer.unref?.();
+    this.recentTimers.set(key, timer);
+
+    return lease;
+  }
+
+  /**
+   * Release a lease. A `null` lease (the caller lost the `begin` race) and an
+   * already-released or superseded lease are both no-ops.
+   */
+  release(lease: GenerationLease | null | undefined): void {
+    if (!lease || lease.isReleased) {
+      return;
+    }
+    lease.release();
+  }
+
+  /** @internal called by {@link GenerationLease.release} */
+  endGeneration(key: string): void {
+    this.active.delete(key);
+  }
+
+  isActive(key: string): boolean {
+    return this.active.has(key);
+  }
+
+  isRecent(key: string): boolean {
+    return this.recent.has(key);
+  }
+
+  /** Drop all state and cancel suppression timers. Used on shutdown and in tests. */
+  clear(): void {
+    for (const timer of this.recentTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.recentTimers.clear();
+    this.active.clear();
+    this.recent.clear();
+  }
+}
+
+/** A live typing ticker: the interval handle plus the channel it pings. */
+interface TypingTicker {
+  interval: Timer;
+  channelId: string;
+}
+
+/**
+ * Holder token for orchestrator-driven typing.
+ *
+ * The orchestrator signals typing as a boolean per channel rather than per turn,
+ * so its token is a constant. Direct-path turns use `turn:<messageId>` instead.
+ */
+const ORCHESTRATOR_TYPING_HOLDER = 'orchestrator';
+
+/** Holder token for a single direct-path turn. */
+function directTypingHolder(messageId: string): string {
+  return `turn:${messageId}`;
+}
+
+/** The Discord channel shapes that expose `sendTyping()`. */
+type TypeableChannel =
+  | TextChannel
+  | ThreadChannel
+  | NewsChannel
+  | VoiceChannel
+  | StageChannel
+  | DMChannel;
+
+/**
+ * Ref-counted typing indicators, one live interval per channel.
+ *
+ * The old map was keyed by channel with no reference counting, and `startTyping`
+ * called `stopTyping` first. Two concurrent turns in one channel therefore fought:
+ * turn B's start cancelled turn A's interval, and A's `stopTyping` then killed B's,
+ * so the indicator vanished mid-generation — exactly when the queue is deepest and
+ * the user most needs the feedback. Holders are per-turn tokens and the interval
+ * only stops when the last holder releases.
+ */
+export class TypingIndicatorRegistry<THandle = unknown> {
+  private readonly holders = new Map<string, Set<string>>();
+  private readonly handles = new Map<string, THandle>();
+
+  constructor(
+    private readonly beginTicking: (channelId: string, onFailure: () => void) => THandle,
+    private readonly endTicking: (handle: THandle) => void,
+  ) {}
+
+  /**
+   * Register `holder` (a per-turn token) as wanting a typing indicator in
+   * `channelId`. Idempotent per holder: acquiring the same token twice does not
+   * double-count, so a retried turn cannot pin the indicator open.
+   */
+  acquire(channelId: string, holder: string): void {
+    let set = this.holders.get(channelId);
+    if (!set) {
+      set = new Set<string>();
+      this.holders.set(channelId, set);
+    }
+    if (set.has(holder)) {
+      return;
+    }
+    set.add(holder);
+
+    if (this.handles.has(channelId)) {
+      return;
+    }
+
+    try {
+      const handle = this.beginTicking(channelId, () => this.releaseChannel(channelId));
+      this.handles.set(channelId, handle);
+    } catch (error) {
+      // A failed start must not leave a phantom holder behind.
+      this.release(channelId, holder);
+      throw error;
+    }
+  }
+
+  /** Release one holder. The interval stops only when the last one leaves. */
+  release(channelId: string, holder: string): void {
+    const set = this.holders.get(channelId);
+    if (!set) {
+      return;
+    }
+    set.delete(holder);
+    if (set.size === 0) {
+      this.holders.delete(channelId);
+      this.stopHandle(channelId);
+    }
+  }
+
+  /** Force-stop a channel regardless of holders (channel lost, shutdown, REST failure). */
+  releaseChannel(channelId: string): void {
+    this.holders.delete(channelId);
+    this.stopHandle(channelId);
+  }
+
+  releaseAll(): void {
+    for (const channelId of Array.from(this.holders.keys())) {
+      this.releaseChannel(channelId);
+    }
+    for (const channelId of Array.from(this.handles.keys())) {
+      this.stopHandle(channelId);
+    }
+  }
+
+  /** Number of channels with a live indicator. */
+  get size(): number {
+    return this.handles.size;
+  }
+
+  /** Number of channels with at least one holder, exposed so leaks are assertable in tests. */
+  get trackedChannels(): number {
+    return this.holders.size;
+  }
+
+  /** Every channel that currently has at least one holder. */
+  trackedChannelsKeys(): IterableIterator<string> {
+    return this.holders.keys();
+  }
+
+  holderCount(channelId: string): number {
+    return this.holders.get(channelId)?.size ?? 0;
+  }
+
+  isActive(channelId: string): boolean {
+    return this.handles.has(channelId);
+  }
+
+  private stopHandle(channelId: string): void {
+    const handle = this.handles.get(channelId);
+    if (handle === undefined) {
+      return;
+    }
+    this.handles.delete(channelId);
+    this.endTicking(handle);
+  }
+}
+
+/**
+ * Log a failure from the message-handling loop with enough context to find the
+ * offending turn, and nothing that should not be logged.
+ *
+ * Deliberately excluded: `message.content` (arbitrary user text — it can contain
+ * a secret the user pasted, and log aggregators are frequently a wider audience
+ * than the channel) and anything token-shaped. Included: guild, channel, author
+ * and message ids, which are enough to locate the message with one API call.
+ */
+function logMessageHandlerFailure(
+  source: string,
+  message: Pick<Message, 'id' | 'channelId' | 'guildId' | 'author'> | undefined,
+  error: unknown,
+  extra?: { channelId?: string; messageId?: string },
+): void {
+  const reason = error instanceof Error
+    ? `${error.name}: ${error.message}`
+    : String(error);
+
+  console.error(`❌ [CLIENT/${source}] Unhandled message-handling failure`, {
+    reason,
+    stack: error instanceof Error ? error.stack : undefined,
+    guildId: message?.guildId,
+    channelId: message?.channelId ?? extra?.channelId,
+    messageId: message?.id ?? extra?.messageId,
+    userId: message?.author?.id,
+    username: message?.author?.username,
+  });
+}
+
+/**
+ * `<@123>` / `<@!123>` pattern for one bot id, compiled once.
+ *
+ * `resolveInteractionSource` runs on every triggered message and the old code
+ * compiled a fresh `RegExp` each call. The pattern is cached by id because the
+ * id is only known after login, but it never changes for the life of the client.
+ */
+let mentionPatternCache: { botId: string; pattern: RegExp } | null = null;
+
+function getBotMentionPattern(botId: string): RegExp {
+  if (!mentionPatternCache || mentionPatternCache.botId !== botId) {
+    mentionPatternCache = { botId, pattern: new RegExp(`<@!?${botId}>`) };
+  }
+  return mentionPatternCache.pattern;
+}
+
 export class DiscordBot {
   public client: Client;
   public commands: Collection<string, Command>;
-  private typingIntervals: Map<string, Timer>; // channelId -> timer
+  private typingIndicators: TypingIndicatorRegistry<TypingTicker>;
+  private typingChannels: Map<string, TypeableChannel>;
+  private generationGuard: GenerationKeyGuard;
   private orchestrator?: LumiaBotIntegration;
   private orchestratorQueue: Map<string, OrchestratorQueuedInfo>; // eventId -> message info
+  private queuedMessageChannels: Map<string, string>; // eventId -> channelId this bot queued for
+  private orchestratorSweepInterval?: Timer;
   private channelProcessingQueue: Map<string, Promise<void>>; // per-channel sequential processing
   private processedMessageIds: Set<string>; // duplicate event guard
   private processedMessageTimers: Map<string, Timer>; // TTL cleanup for processedMessageIds
   private repliedMessageIds: Set<string>; // cross-path guard: prevents double replies regardless of trigger path
-  private activeGenerationKeys: Set<string>; // in-flight generation guard
-  private recentGenerationKeys: Set<string>; // short TTL generation guard
+  private repliedMessageTimers: Map<string, Timer>; // TTL cleanup for repliedMessageIds
 
   constructor() {
     this.client = new Client({
@@ -283,14 +685,22 @@ export class DiscordBot {
     });
 
     this.commands = new Collection();
-    this.typingIntervals = new Map();
+    this.generationGuard = new GenerationKeyGuard();
+    this.typingChannels = new Map();
+    this.typingIndicators = new TypingIndicatorRegistry<TypingTicker>(
+      (channelId, onFailure) => this.startTypingTicker(channelId, onFailure),
+      (ticker) => {
+        clearInterval(ticker.interval);
+        this.typingChannels.delete(ticker.channelId);
+      },
+    );
     this.orchestratorQueue = new Map();
+    this.queuedMessageChannels = new Map();
     this.channelProcessingQueue = new Map();
     this.processedMessageIds = new Set();
     this.processedMessageTimers = new Map();
     this.repliedMessageIds = new Set();
-    this.activeGenerationKeys = new Set();
-    this.recentGenerationKeys = new Set();
+    this.repliedMessageTimers = new Map();
     this.setupEventHandlers();
     this.setupOrchestrator();
   }
@@ -416,7 +826,10 @@ export class DiscordBot {
         });
       }
 
-      const memoryMatches = userMemoryService.searchUsers(query, limit);
+      // Scope the memory lookup to this guild. Without the guild id every
+      // resolveUserMention call searched the `legacy` bucket only, so the model
+      // could never resolve a user it had met in the current server.
+      const memoryMatches = userMemoryService.searchUsers(query, limit, guild.id);
       for (const match of memoryMatches) {
         if (results.length >= limit) break;
         try {
@@ -560,15 +973,22 @@ ${sections.join('\n\n')}
 
     // Periodically clean up stale orchestrator queue entries (older than 5 minutes).
     // This prevents memory leaks from events that never completed or had no follow-ups.
-    setInterval(() => {
+    //
+    // The handle is retained so shutdown can clear it, and `unref()`'d so this
+    // housekeeping timer can never be the reason the process stays alive.
+    this.orchestratorSweepInterval = setInterval(() => {
       const staleThreshold = Date.now() - 5 * 60 * 1000;
       for (const [eventId, info] of this.orchestratorQueue.entries()) {
         if (info.message.createdTimestamp < staleThreshold) {
           this.orchestratorQueue.delete(eventId);
+          // Drop the same event from the queued-message index so it cannot be
+          // used to authorise a later snapshot reconstruction.
+          this.queuedMessageChannels.delete(eventId);
           console.log(`[Orchestrator] Cleaned up stale queue entry for event ${eventId}`);
         }
       }
     }, 60_000);
+    this.orchestratorSweepInterval.unref?.();
 
     // Set up typing callback for orchestrated responses
     this.orchestrator.setTypingCallback((channelId: string, guildId: string, isTyping: boolean) => {
@@ -646,22 +1066,58 @@ ${sections.join('\n\n')}
       }
     }
 
-    if (generationKey && !this.beginGeneration(generationKey)) {
-      console.warn(`⚠️ [Orchestrator] Suppressing duplicate generation for message ${message.id} (event ${eventId}, turn ${turnId})`);
-      return '';
-    }
-
-    // Get the last message from context
+    // The last message must be resolved BEFORE the generation lock is taken.
+    //
+    // It used to be checked after `beginGeneration` but before the `try`, so the
+    // `return ''` skipped the `finally` and the key stayed in `activeGenerationKeys`
+    // forever (unlike `recentGenerationKeys`, which is TTL'd). That conversation
+    // slot was permanently dead: the bot could never generate a root response for
+    // that message again for the life of the process.
     const lastMessage = context.previousMessages[context.previousMessages.length - 1];
     if (!lastMessage) {
       console.error('[Orchestrator] No last message in context');
       return '';
     }
 
+    // Rate limiting belongs HERE, not at notify time.
+    //
+    // `handleOrchestratedMention` used to stamp the limiter's window and then
+    // return immediately; the real LLM generation happens later, driven by an
+    // inbound `response_request` over the WebSocket. Neither that turn nor any
+    // follow-up turn was ever limited, so the user's window was charged for a
+    // *notification* instead of for the work — the limiter was effectively
+    // bypassed for every orchestrated conversation. Enforcing it at the point
+    // the generation actually happens also charges exactly once: the notify path
+    // no longer stamps at all, so there is no double charge.
+    //
+    // Keyed on the human author of the turn being answered. A bot-authored turn
+    // is council chatter, not a user request, so it is not charged to anyone.
+    const isBotAuthoredTurn = lastMessage.isBot;
+    if (!isBotAuthoredTurn && rateLimiterService.isRateLimited(lastMessage.authorId, message.member)) {
+      console.warn(
+        `⏳ [Orchestrator] Rate limited turn ${turnId} for user ${lastMessage.authorId} (event ${eventId}); declining`,
+      );
+      try {
+        const resolvedEmoji = this.resolveEmojiReaction(config.rateLimit.emoji, message.guild ?? undefined);
+        await message.react(resolvedEmoji);
+      } catch (err) {
+        console.warn(`⚠️ [Orchestrator] Failed to add rate limit reaction:`, err);
+      }
+      return '';
+    }
+
+    // Lease-based guard. `null` means a generation for this key is already in
+    // flight and this turn must not run; the suppressed turn holds no lease, so
+    // it cannot release the in-flight generation's lock in the `finally` below.
+    const generationLease = generationKey ? this.generationGuard.begin(generationKey) : null;
+    if (generationKey && !generationLease) {
+      console.warn(`⚠️ [Orchestrator] Suppressing duplicate generation for message ${message.id} (event ${eventId}, turn ${turnId})`);
+      return '';
+    }
+
     try {
       orchestratorTurnJournal.markGenerating(turnId, eventId, instanceId, payload);
 
-      const isBotAuthoredTurn = lastMessage.isBot;
       const allowNsfwImageGeneration = canUserRequestNsfwImages(
         message.channel,
         isBotAuthoredTurn ? undefined : lastMessage.authorId,
@@ -772,11 +1228,17 @@ ${sections.join('\n\n')}
 
       const isNsfwChannel = isDiscordNsfwChannel(message.channel);
 
+      // Enforce the Discord-CDN allowlist on every media URL before anything
+      // fetches them server-side. These lists came from the orchestrator's
+      // snapshot of a user-authored message, so their hosts are attacker-chosen.
+      const safeImageUrls = await filterDiscordMediaUrls(imageUrls, 'ORCH-MEDIA');
+      const safeVideoUrls = await filterDiscordMediaAttachments(videoUrls, 'ORCH-MEDIA');
+
       // Generate response using the existing message handler
       let response = await handleMessage({
         content: lastMessage.content,
-        imageUrls,
-        videoUrls,
+        imageUrls: safeImageUrls,
+        videoUrls: safeVideoUrls,
         textAttachments,
         pageContents: orchestratorPageContents.length > 0 ? orchestratorPageContents : undefined,
         userId: isBotAuthoredTurn ? undefined : lastMessage.authorId,
@@ -815,8 +1277,8 @@ ${sections.join('\n\n')}
 
         response = await handleMessage({
           content: lastMessage.content,
-          imageUrls,
-          videoUrls,
+          imageUrls: safeImageUrls,
+          videoUrls: safeVideoUrls,
           textAttachments,
           pageContents: orchestratorPageContents.length > 0 ? orchestratorPageContents : undefined,
           userId: isBotAuthoredTurn ? undefined : lastMessage.authorId,
@@ -884,9 +1346,9 @@ ${sections.join('\n\n')}
       orchestratorTurnJournal.markFailed(turnId, eventId, instanceId, error instanceof Error ? error.message : String(error), payload);
       return '';
     } finally {
-      if (generationKey) {
-        this.endGeneration(generationKey);
-      }
+      // Release only a lease this turn actually holds. `release(null)` is a no-op,
+      // so a suppressed turn can never free the in-flight generation's lock.
+      this.generationGuard.release(generationLease);
     }
   }
 
@@ -900,17 +1362,79 @@ ${sections.join('\n\n')}
       return undefined;
     }
 
-    const message = await this.fetchOrchestratorMessageFromSnapshot(payload.eventSnapshot);
+    // PIN THE SNAPSHOT TO A CHANNEL THIS BOT ACTUALLY QUEUED FOR.
+    //
+    // The orchestrator-side `authorizeTurn()` pins the orchestrator's *claim*
+    // about the channel against the mention this bot sent, and rejects turns whose
+    // event id it never observed. But the snapshot itself is what this client then
+    // acts on: it supplies `channelId` and `messageId`, and those are used to
+    // reconstruct a `Message` and to aim the reply. Without the check below, a
+    // peer that knows the shared API key could pair an authorised `eventId` with a
+    // snapshot naming any message in any channel the bot can read, and steer the
+    // reply there — the last piece of an authenticated-but-unverified peer being
+    // able to post into arbitrary channels.
+    //
+    // So: the snapshot's channel must be one this bot announced a mention for, and
+    // the turn's own declared channel (when present) must agree with it. If nothing
+    // is queued for this event, we refuse rather than fall back to the snapshot.
+    const queuedChannelId = this.queuedMessageChannels.get(payload.eventId);
+    const snapshot = payload.eventSnapshot;
+
+    if (!queuedChannelId) {
+      console.warn(
+        `🚨 [Orchestrator] Refusing snapshot reconstruction for event ${payload.eventId}: this bot never queued a mention for it.`,
+      );
+      return undefined;
+    }
+
+    if (snapshot.channelId !== queuedChannelId) {
+      console.warn(
+        `🚨 [Orchestrator] Refusing snapshot for event ${payload.eventId}: snapshot names channel ${snapshot.channelId} but this bot queued for ${queuedChannelId}.`,
+      );
+      return undefined;
+    }
+
+    if (payload.channelId && payload.channelId !== queuedChannelId) {
+      console.warn(
+        `🚨 [Orchestrator] Refusing turn ${payload.turnId}: turn names channel ${payload.channelId} but this bot queued for ${queuedChannelId}.`,
+      );
+      return undefined;
+    }
+
+    if (payload.guildId && snapshot.guildId && payload.guildId !== snapshot.guildId) {
+      console.warn(
+        `🚨 [Orchestrator] Refusing turn ${payload.turnId}: turn names guild ${payload.guildId} but event ${payload.eventId} was queued in ${snapshot.guildId}.`,
+      );
+      return undefined;
+    }
+
+    const message = await this.fetchOrchestratorMessageFromSnapshot(snapshot);
     if (!message) {
       return undefined;
     }
 
+    // The reconstructed message must actually live in the channel we authorised.
+    // `channels.fetch` is keyed by the snapshot's own channelId, but the message
+    // itself is the object we later reply through, so verify it directly.
+    if (message.channelId !== queuedChannelId) {
+      console.warn(
+        `🚨 [Orchestrator] Refusing reconstructed message ${message.id}: it is in channel ${message.channelId}, not the queued channel ${queuedChannelId}.`,
+      );
+      return undefined;
+    }
+
+    // The snapshot's media is user-influenced, so it gets the same Discord-CDN
+    // allowlist as the direct path. Filtered here rather than at the `handleMessage`
+    // call so both the first and the anti-duplicate retry see the same list.
+    const snapshotImageUrls = await filterDiscordMediaUrls(snapshot.imageUrls || [], 'ORCH-SNAPSHOT');
+    const snapshotVideoUrls = await filterDiscordMediaAttachments(snapshot.videoUrls || [], 'ORCH-SNAPSHOT');
+
     return {
       message,
-      replyContext: payload.eventSnapshot.replyContext,
-      imageUrls: payload.eventSnapshot.imageUrls || [],
-      videoUrls: payload.eventSnapshot.videoUrls || [],
-      textAttachments: payload.eventSnapshot.textAttachments || [],
+      replyContext: snapshot.replyContext,
+      imageUrls: snapshotImageUrls,
+      videoUrls: snapshotVideoUrls,
+      textAttachments: snapshot.textAttachments || [],
     };
   }
 
@@ -1046,27 +1570,19 @@ ${sections.join('\n\n')}
       return true;
     }
     this.repliedMessageIds.add(messageId);
-    // Auto-cleanup after 2 minutes
-    setTimeout(() => this.repliedMessageIds.delete(messageId), 120_000);
+    // Auto-cleanup after 2 minutes. The handle is retained so `destroy()` can
+    // clear it, and `unref()`'d so a suppression timer can never be the reason
+    // the process stays alive.
+    const cleanupTimer = setTimeout(() => {
+      this.repliedMessageIds.delete(messageId);
+      this.repliedMessageTimers.delete(messageId);
+    }, 120_000);
+    cleanupTimer.unref?.();
+    this.repliedMessageTimers.set(messageId, cleanupTimer);
     return false;
   }
 
-  private beginGeneration(key: string): boolean {
-    if (this.activeGenerationKeys.has(key) || this.recentGenerationKeys.has(key)) {
-      return false;
-    }
-
-    this.activeGenerationKeys.add(key);
-    this.recentGenerationKeys.add(key);
-    setTimeout(() => this.recentGenerationKeys.delete(key), 120_000);
-    return true;
-  }
-
-  private endGeneration(key: string): void {
-    this.activeGenerationKeys.delete(key);
-  }
-
-    /**
+  /**
    * Resolves a raw emoji tag (name, :name:, <:name:id>, or unicode)
    * to a valid Discord.js reaction identifier (supports Developer Dashboard Application Emojis).
    */
@@ -1113,55 +1629,84 @@ ${sections.join('\n\n')}
   }
 
   /**
-   * Start typing indicator for a specific channel
-   * Each channel gets its own independent typing indicator
+   * Create the 8-second keep-alive ticker for one channel.
+   *
+   * Split out of {@link startTyping} so {@link TypingIndicatorRegistry} owns all
+   * of the start/stop bookkeeping: it decides *whether* a ticker should exist,
+   * this method only creates one. `onFailure` is invoked when `sendTyping()`
+   * throws, which is the one case where a live channel stops being typeable
+   * (deleted channel, lost permission) and every holder must be dropped.
+   *
+   * `unref()`'d so a stray ticker can never be the reason the process stays up.
    */
-  private startTyping(channel: TextChannel | ThreadChannel | NewsChannel | VoiceChannel | StageChannel | DMChannel): Timer {
-    const channelId = channel.id;
-    
-    // Clear any existing typing interval for this channel
-    this.stopTyping(channelId);
-    
-    // Send initial typing indicator
-    channel.sendTyping().catch(() => {});
-    
-    // Set up interval to keep typing indicator alive (every 8 seconds)
-    const interval = setInterval(async () => {
-      try {
-        await channel.sendTyping();
-      } catch {
-        // Channel might be deleted or bot lost permissions - stop typing
-        this.stopTyping(channelId);
-      }
+  private startTypingTicker(channelId: string, onFailure: () => void): TypingTicker {
+    // The registry calls this once per channel, so the ticker is the sole owner
+    // of the channel reference for as long as the indicator is live. Re-resolving
+    // through the cache each tick would work too, but a deleted channel then
+    // throws on every tick instead of failing once.
+    const channel = this.typingChannels.get(channelId);
+    if (!channel) {
+      throw new Error(`cannot start typing indicator: channel ${channelId} is not tracked`);
+    }
+
+    const sendPing = async (): Promise<void> => {
+      await channel.sendTyping();
+    };
+
+    // Fire-and-forget initial ping. Errors here are not fatal: the interval's
+    // first tick hits the same failure and tears the ticker down.
+    void sendPing().catch(() => {});
+
+    const interval = setInterval(() => {
+      void sendPing().catch(() => {
+        // Channel deleted, or the bot lost Send Messages / Typing permission.
+        onFailure();
+      });
     }, 8000);
-    
-    this.typingIntervals.set(channelId, interval);
-    console.log(`⌨️ [TYPING] Started typing indicator in channel ${channelId} (${this.typingIntervals.size} active)`);
-    
-    return interval;
+    // Never let a stray ticker keep the process alive on its own.
+    interval.unref?.();
+
+    console.log(`⌨️ [TYPING] Started typing indicator in channel ${channelId}`);
+    return { interval, channelId };
   }
 
   /**
-   * Stop typing indicator for a specific channel
+   * Start (or join) the typing indicator for a channel.
+   *
+   * `holder` is a per-turn token. Holders are reference-counted, so a second
+   * concurrent turn in the same channel joins the existing ticker instead of
+   * cancelling it — the old code called `stopTyping` first, which meant turn B's
+   * start killed turn A's interval and A's stop then killed B's, so the
+   * indicator flickered off mid-generation, exactly when the queue is deepest.
    */
-  private stopTyping(channelId: string): void {
-    const interval = this.typingIntervals.get(channelId);
-    if (interval) {
-      clearInterval(interval);
-      this.typingIntervals.delete(channelId);
-      console.log(`⌨️ [TYPING] Stopped typing indicator in channel ${channelId} (${this.typingIntervals.size} active)`);
+  private startTyping(channel: TypeableChannel, holder: string): void {
+    // Registered before `acquire`, because `acquire` may synchronously construct
+    // the ticker, and the ticker needs the channel to ping.
+    this.typingChannels.set(channel.id, channel);
+    try {
+      this.typingIndicators.acquire(channel.id, holder);
+    } catch (error) {
+      console.warn(`⚠️ [TYPING] Failed to start typing indicator in ${channel.id}:`, error);
+      this.typingChannels.delete(channel.id);
     }
+  }
+
+  /**
+   * Stop the typing indicator for one holder in a channel. The ticker only stops
+   * when the last holder releases.
+   */
+  private stopTyping(channelId: string, holder: string): void {
+    this.typingIndicators.release(channelId, holder);
   }
 
   /**
    * Stop all typing indicators (useful for shutdown)
    */
   private stopAllTyping(): void {
-    for (const [channelId, interval] of this.typingIntervals) {
-      clearInterval(interval);
+    for (const channelId of Array.from(this.typingIndicators.trackedChannelsKeys())) {
       console.log(`⌨️ [TYPING] Stopped typing indicator in channel ${channelId}`);
     }
-    this.typingIntervals.clear();
+    this.typingIndicators.releaseAll();
   }
 
   /**
@@ -1198,14 +1743,20 @@ ${sections.join('\n\n')}
           channel instanceof StageChannel ||
           channel instanceof DMChannel
         ) {
-          this.startTyping(channel);
+          // The orchestrator drives typing as a boolean per channel, so its holder
+          // token is fixed. `acquire` is idempotent per holder, so repeated
+          // `isTyping: true` frames cannot inflate the reference count and pin
+          // the indicator open after the orchestrator has sent `false`.
+          this.startTyping(channel, ORCHESTRATOR_TYPING_HOLDER);
           console.log(`⌨️ [Orchestrator-Typing] ✅ Started typing in channel ${channelId}`);
         } else {
           console.warn(`[Orchestrator-Typing] Channel ${channelId} is not text-based (${channel.constructor.name})`);
         }
       } else {
-        // Stop typing
-        this.stopTyping(channelId);
+        // Stop typing for the orchestrator's holder only. A direct-path turn
+        // running concurrently in the same channel keeps its own holder, so the
+        // indicator correctly stays up.
+        this.stopTyping(channelId, ORCHESTRATOR_TYPING_HOLDER);
         console.log(`⌨️ [Orchestrator-Typing] ✅ Stopped typing in channel ${channelId}`);
       }
     } catch (error) {
@@ -1224,19 +1775,35 @@ ${sections.join('\n\n')}
       }
       boredomService.start(this.client);
     });
-  
-    // Handle process shutdown to clean up timers
-    process.on('SIGINT', () => {
-      console.log('\n🛑 [CLIENT] Shutting down...');
-      boredomService.stop();
-      this.destroy().then(() => process.exit(0));
+
+    // Client-level error handlers.
+    //
+    // These are not optional. `Client` is an EventEmitter, and an `'error'`
+    // event with no listener is not ignored — Node (and Bun) throw it. So a
+    // single transient gateway blip, one failed heartbeat, or one REST fault
+    // escalated into an uncaught exception and killed the whole process. The
+    // `'warn'` and `'shardError'` handlers are here for the same reason: they
+    // are the only signal that a shard is degrading before it hard-fails.
+    this.client.on(Events.Error, (error) => {
+      console.error('❌ [DISCORD] Client error (continuing):', error);
     });
 
-    process.on('SIGTERM', () => {
-      console.log('\n🛑 [CLIENT] Shutting down...');
-      boredomService.stop();
-      this.destroy().then(() => process.exit(0));
+    this.client.on(Events.Warn, (message) => {
+      console.warn(`⚠️ [DISCORD] Client warning: ${message}`);
     });
+
+    this.client.on(Events.ShardError, (error, shardId) => {
+      console.error(`❌ [DISCORD] Shard ${shardId} error (continuing):`, error);
+    });
+
+    this.client.on(Events.ShardDisconnect, (_event, shardId) => {
+      console.warn(`⚠️ [DISCORD] Shard ${shardId} disconnected (will reconnect)`);
+    });
+
+    // NOTE: SIGINT/SIGTERM are handled once, in `src/index.ts`, which also owns
+    // the dashboard. They used to be registered here as well, so both handlers
+    // ran on one signal: two concurrent `destroy()` calls and two `process.exit(0)`
+    // calls, racing each other. Single owner now.
 
     this.client.on(Events.InteractionCreate, async (interaction) => {
       if (!interaction.isChatInputCommand()) return;
@@ -1286,8 +1853,31 @@ ${sections.join('\n\n')}
       }
     });
 
-    // Handle message mentions and keyword triggers
-    this.client.on(Events.MessageCreate, async (message: Message) => {
+    // Handle message mentions and keyword triggers.
+    //
+    // Registered as a *synchronous* wrapper on purpose. `client.on()` does not
+    // await an async listener, so every `await` inside it runs outside any
+    // handler the emitter controls: a throw from `handleOrchestratedMention(...)`
+    // or from `message.fetchReference()` produced an unhandled promise rejection.
+    // Bun treats unhandled rejections as fatal by default, so one malformed
+    // message could take the entire bot offline with no stack trace pointing at
+    // the cause. The body therefore lives in `onMessageCreate`, whose entire
+    // surface is a top-level try/catch.
+    this.client.on(Events.MessageCreate, (message: Message) => {
+      void this.onMessageCreate(message);
+    });
+  }
+
+  /**
+   * Body of the `MessageCreate` listener, with a crash guard around all of it.
+   *
+   * Never throws and never rejects. Logging is deliberately limited to
+   * identifiers: the message *text* is user content (it can contain anything,
+   * including something the operator would not want in a log aggregator) and no
+   * token or auth header is ever included.
+   */
+  private async onMessageCreate(message: Message): Promise<void> {
+    try {
       // Ignore messages from bots (including self)
       if (message.author.bot) return;
 
@@ -1308,6 +1898,7 @@ ${sections.join('\n\n')}
         this.processedMessageIds.delete(message.id);
         this.processedMessageTimers.delete(message.id);
       }, 60_000);
+      cleanupTimer.unref?.();
       this.processedMessageTimers.set(message.id, cleanupTimer);
 
       const botId = this.client.user?.id;
@@ -1470,6 +2061,22 @@ ${sections.join('\n\n')}
       }
 
       if (shouldTrigger) {
+        // Check if orchestrator should handle this mention.
+        //
+        // This is tested BEFORE the rate limiter on purpose. `isRateLimited` both
+        // checks and *stamps* the window, and it used to run first, so the
+        // orchestrated path charged the user's window for a notification and then
+        // returned — while the actual LLM generation arrived later as an inbound
+        // `response_request` that no limiter ever saw, along with every follow-up
+        // turn. The net effect was that the limiter was bypassed for every
+        // orchestrated conversation while the user's quota was spent on a
+        // notification. The limiter is now enforced where the generation actually
+        // happens (`handleOrchestratorResponse`), so this branch must not stamp.
+        if (this.shouldUseOrchestrator(message)) {
+          await this.handleOrchestratedMention(message, replyContext);
+          return;
+        }
+
         if (rateLimiterService.isRateLimited(message.author.id, message.member)) {
           try {
             const resolvedEmoji = this.resolveEmojiReaction(config.rateLimit.emoji, message.guild ?? undefined);
@@ -1477,12 +2084,6 @@ ${sections.join('\n\n')}
           } catch (err) {
             console.warn(`⚠️ [CLIENT] Failed to add rate limit reaction:`, err);
           }
-          return;
-        }
-
-        // Check if orchestrator should handle this mention
-        if (this.shouldUseOrchestrator(message)) {
-          await this.handleOrchestratedMention(message, replyContext);
           return;
         }
 
@@ -1498,14 +2099,41 @@ ${sections.join('\n\n')}
 
         this.channelProcessingQueue.set(channelId, currentTask);
 
-        // Clean up the map entry once this task settles, but only if it's still the latest
-        currentTask.finally(() => {
-          if (this.channelProcessingQueue.get(channelId) === currentTask) {
-            this.channelProcessingQueue.delete(channelId);
-          }
-        });
+        // Clean up the map entry once this task settles, but only if it's still the latest.
+        //
+        // `currentTask.finally(...)` used to be a floating expression. `.finally()`
+        // does NOT swallow a rejection: it *derives a new promise that also rejects*,
+        // and that derived promise was discarded, so `processTriggeredMessage`
+        // throwing produced a SECOND unhandled rejection on top of the first. One
+        // rejected turn was therefore enough to terminate the process (verified in
+        // Bun 1.4.2: a discarded `.finally()` on a rejected promise exits 1). This
+        // is the mechanism that turned a single bad turn into a permanent outage.
+        //
+        // The fix is `.then(onSettled, onSettled)`: a two-argument `then` handles
+        // the rejection, and the derived promise resolves either way, so there is
+        // nothing left floating.
+        void currentTask.then(
+          () => {
+            if (this.channelProcessingQueue.get(channelId) === currentTask) {
+              this.channelProcessingQueue.delete(channelId);
+            }
+          },
+          (error) => {
+            if (this.channelProcessingQueue.get(channelId) === currentTask) {
+              this.channelProcessingQueue.delete(channelId);
+            }
+            // `processTriggeredMessage` has its own catch, so reaching here means
+            // something outside it threw. Log and keep the bot alive.
+            logMessageHandlerFailure('channel-task', undefined, error, {
+              channelId,
+              messageId: message.id,
+            });
+          },
+        );
       }
-    });
+    } catch (error) {
+      logMessageHandlerFailure('message', message, error);
+    }
   }
 
   /**
@@ -1528,6 +2156,7 @@ ${sections.join('\n\n')}
     } | undefined,
   ): Promise<void> {
     const generationKey = `root:${message.id}`;
+    const typingHolder = directTypingHolder(message.id);
 
     // Check if channel supports typing indicator
     const canType = (
@@ -1538,11 +2167,6 @@ ${sections.join('\n\n')}
       message.channel instanceof StageChannel ||
       message.channel instanceof DMChannel
     );
-
-    // Start typing indicator for this specific channel
-    if (canType) {
-      this.startTyping(message.channel);
-    }
 
     // Extract the actual message content (remove triggers if present)
     const cleanedContent = hasTrigger ? extractMessageContent(message.content, botId) : message.content;
@@ -1557,7 +2181,13 @@ ${sections.join('\n\n')}
       : cleanedContent;
 
     // Don't respond if there's no actual content after removing triggers (only for explicit triggers)
-    if (hasTrigger && !cleanedContent.trim() && stickerMedia.stickerHints.length === 0) {
+    //
+    // This check is deliberately BEFORE `startTyping`. It used to run after, and
+    // the branch returned without stopping the indicator: the 8-second interval
+    // only self-terminated when `sendTyping()` threw, which it does not for a
+    // healthy channel. So every bare "hey Lumia" left a permanent REST ping per
+    // affected channel and grew `typingIntervals` by one entry per channel, forever.
+    if (isEmptyTriggeredTurn(hasTrigger, cleanedContent, stickerMedia.stickerHints.length)) {
       // Check if channel is still available (bot may have been kicked)
       if (!message.channel) {
         console.warn('⚠️ [CLIENT] Cannot reply - channel no longer available (bot may have been kicked)');
@@ -1567,13 +2197,29 @@ ${sections.join('\n\n')}
       return;
     }
 
-    try {
-      if (!this.beginGeneration(generationKey)) {
-        console.warn(`⚠️ [CLIENT] Suppressing duplicate generation for message ${message.id}`);
-        this.stopTyping(message.channelId);
-        return;
-      }
+    // Start typing indicator for this specific channel, once we know there is
+    // actual work to indicate.
+    if (canType) {
+      this.startTyping(message.channel, typingHolder);
+    }
 
+    // Lease-based guard, taken BEFORE the `try` on purpose — the old code took
+    // the lock *inside* the try and unconditionally released it in the `finally`.
+    // A duplicate-suppressed turn therefore ran the `finally` and deleted the key
+    // held by the real, still-running generation. The 120s `recent` window masked
+    // this, but any generation exceeding 120s (entirely plausible with a 10-round
+    // tool loop plus retries) lost its guard entirely and two generations for the
+    // same message ran concurrently.
+    const generationLease = this.generationGuard.begin(generationKey);
+    if (!generationLease) {
+      console.warn(`⚠️ [CLIENT] Suppressing duplicate generation for message ${message.id}`);
+      if (canType) {
+        this.stopTyping(message.channelId, typingHolder);
+      }
+      return;
+    }
+
+    try {
       // Extract image and video URLs from attachments
       const imageUrls: string[] = [];
       const videoUrls: { url: string; mimeType?: string }[] = [];
@@ -1613,22 +2259,27 @@ ${sections.join('\n\n')}
 
             try {
               console.log(`📄 [CLIENT] Text file detected: ${attachment.name} (${attachment.contentType || 'unknown type'}, ${(attachment.size / 1024).toFixed(1)}KB)`);
-              const response = await fetch(attachment.url);
-              if (response.ok) {
-                const textContent = await response.text();
-                // Limit text content to prevent token overflow
-                const maxChars = maxSizeBytes;
-                const truncatedContent = textContent.length > maxChars
-                  ? textContent.substring(0, maxChars) + '\n... [content truncated]'
-                  : textContent;
-                textAttachments.push({
-                  name: attachment.name,
-                  content: truncatedContent,
-                });
-                console.log(`📄 [CLIENT] Read text file: ${attachment.name} (${truncatedContent.length} chars)`);
-              } else {
-                console.warn(`⚠️ [CLIENT] Failed to fetch text file ${attachment.name}: ${response.status}`);
-              }
+              // `safeFetchText`, not a bare `fetch`. Discord's own attachment host
+              // is pinned by `allowHosts`, and every redirect hop is re-validated,
+              // so this cannot be steered at an internal service even if the
+              // attachment URL is attacker-influenced. The `maxBytes` cap is
+              // enforced while streaming, so a hostile body cannot exhaust memory
+              // before the limit is consulted.
+              const { text: textContent } = await safeFetchText(attachment.url, {
+                allowHosts: mediaAllowedHosts(),
+                maxBytes: maxSizeBytes,
+                timeoutMs: DISCORD_MEDIA_TIMEOUT_MS,
+              });
+              // Limit text content to prevent token overflow
+              const maxChars = maxSizeBytes;
+              const truncatedContent = textContent.length > maxChars
+                ? textContent.substring(0, maxChars) + '\n... [content truncated]'
+                : textContent;
+              textAttachments.push({
+                name: attachment.name,
+                content: truncatedContent,
+              });
+              console.log(`📄 [CLIENT] Read text file: ${attachment.name} (${truncatedContent.length} chars)`);
             } catch (error) {
               console.error(`❌ [CLIENT] Error reading text file ${attachment.name}:`, error);
             }
@@ -1694,6 +2345,27 @@ ${sections.join('\n\n')}
         imageUrls.push(...replyContext.embeddedContent.images);
         videoUrls.push(...replyContext.embeddedContent.videos);
       }
+
+      // Enforce the Discord-CDN allowlist on every collected media URL.
+      //
+      // This is the SSRF/exfiltration fix. `embed.image.url`,
+      // `embed.thumbnail.url` and `embed.video.url` may be ANY http(s) URL on
+      // ANY host — Discord imposes no CDN restriction on them — and any member of
+      // any guild controls them. Downstream (`convertImageUrlToBase64`,
+      // `videoService.processVideo`) fetches them server-side, base64-inlines the
+      // bytes and sends them to the external OpenAI/Gemini endpoint. So a message
+      // whose embed image is `http://127.0.0.1:4533/rest/getCoverArt.view`,
+      // `http://127.0.0.1:3001/api/persona` or `http://169.254.169.254/latest/meta-data/`
+      // made the bot fetch it and forward it to the model vendor, which is both an
+      // internal-network read and an attacker-visible side channel (the model
+      // frequently narrates the content back into the channel).
+      //
+      // Attachment-derived URLs (the loop above), sticker URLs, custom-emoji URLs
+      // and the referenced message's embeds all flow through these same two
+      // arrays, so this single filter covers the attachment path as well as the
+      // embed path.
+      const permittedImageUrls = await filterDiscordMediaUrls(imageUrls, 'CLIENT-MEDIA');
+      const permittedVideoUrls = await filterDiscordMediaAttachments(videoUrls, 'CLIENT-MEDIA');
 
       // Extract mentioned users for context parsing, using guild display names when available.
       const mentionedUsers = getMentionedUserDisplayMap(message);
@@ -1777,8 +2449,8 @@ ${sections.join('\n\n')}
       // Generate response with tool availability attached for model-directed use
       const response = await handleMessage({
         content: contentWithStickers,
-        imageUrls,
-        videoUrls,
+        imageUrls: permittedImageUrls,
+        videoUrls: permittedVideoUrls,
         textAttachments,
         pageContents: pageContents.length > 0 ? pageContents : undefined,
         userId: message.author.id,
@@ -1805,7 +2477,9 @@ ${sections.join('\n\n')}
       });
 
       // Clear typing indicator before sending response
-      this.stopTyping(message.channelId);
+      if (canType) {
+        this.stopTyping(message.channelId, typingHolder);
+      }
 
       // Cross-path reply guard: prevent double replies if the orchestrator path
       // also processed this message (or any other duplicate trigger).
@@ -1885,7 +2559,9 @@ ${sections.join('\n\n')}
       }
     } catch (error) {
       // Clear typing indicator on error too
-      this.stopTyping(message.channelId);
+      if (canType) {
+        this.stopTyping(message.channelId, typingHolder);
+      }
       console.error('Message response error:', error);
       // Check if channel is still available before trying to send error message
       if (!message.channel) {
@@ -1898,7 +2574,10 @@ ${sections.join('\n\n')}
         console.error('❌ [CLIENT] Failed to send error reply:', replyError);
       }
     } finally {
-      this.endGeneration(generationKey);
+      // Release only the lease this turn actually holds. A `null` lease (the turn
+      // lost the `begin` race) is a no-op, so a suppressed turn can never free the
+      // in-flight generation's key.
+      this.generationGuard.release(generationLease);
     }
   }
 
@@ -1974,22 +2653,24 @@ ${sections.join('\n\n')}
           
           try {
             console.log(`📄 [Orchestrator] Text file detected: ${attachment.name} (${attachment.contentType || 'unknown type'}, ${(attachment.size / 1024).toFixed(1)}KB)`);
-            const response = await fetch(attachment.url);
-            if (response.ok) {
-              const textContent = await response.text();
-              // Limit text content to prevent token overflow
-              const maxChars = maxSizeBytes;
-              const truncatedContent = textContent.length > maxChars 
-                ? textContent.substring(0, maxChars) + '\n... [content truncated]' 
-                : textContent;
-              textAttachments.push({
-                name: attachment.name,
-                content: truncatedContent,
-              });
-              console.log(`📄 [Orchestrator] Read text file: ${attachment.name} (${truncatedContent.length} chars)`);
-            } else {
-              console.warn(`⚠️ [Orchestrator] Failed to fetch text file ${attachment.name}: ${response.status}`);
-            }
+            // `safeFetchText`, not a bare `fetch` — same reasoning as the direct
+            // path: the Discord host is pinned by `allowHosts`, every redirect hop
+            // is re-validated, and `maxBytes` is enforced while streaming.
+            const { text: textContent } = await safeFetchText(attachment.url, {
+              allowHosts: mediaAllowedHosts(),
+              maxBytes: maxSizeBytes,
+              timeoutMs: DISCORD_MEDIA_TIMEOUT_MS,
+            });
+            // Limit text content to prevent token overflow
+            const maxChars = maxSizeBytes;
+            const truncatedContent = textContent.length > maxChars
+              ? textContent.substring(0, maxChars) + '\n... [content truncated]'
+              : textContent;
+            textAttachments.push({
+              name: attachment.name,
+              content: truncatedContent,
+            });
+            console.log(`📄 [Orchestrator] Read text file: ${attachment.name} (${truncatedContent.length} chars)`);
           } catch (error) {
             console.error(`❌ [Orchestrator] Error reading text file ${attachment.name}:`, error);
           }
@@ -2044,14 +2725,34 @@ ${sections.join('\n\n')}
       videoUrls.push(...replyContext.embeddedContent.videos);
     }
 
+    // Enforce the Discord-CDN allowlist before this bot stores or transmits the
+    // media list. Same SSRF/exfiltration reasoning as the direct path: embed
+    // image/thumbnail/video URLs are attacker-chosen and would otherwise be
+    // fetched server-side and forwarded to the model vendor. Filtering here (and
+    // again in `handleOrchestratorResponse`, for snapshot-supplied lists) means
+    // neither the queue nor the notify payload can carry a non-Discord URL.
+    const permittedImageUrls = await filterDiscordMediaUrls(imageUrls, 'ORCH-NOTIFY');
+    const permittedVideoUrls = await filterDiscordMediaAttachments(videoUrls, 'ORCH-NOTIFY');
+
     // Store the message info and modal content so we can reply when orchestrator asks us to
     this.orchestratorQueue!.set(eventId, {
       message,
       replyContext,
-      imageUrls,
-      videoUrls,
+      imageUrls: permittedImageUrls,
+      videoUrls: permittedVideoUrls,
       textAttachments,
     });
+
+    // Record which channel this bot announced a mention for.
+    //
+    // This is the client-side half of the orchestrator authorisation story. The
+    // orchestrator's `authorizeTurn()` pins its own claim about the channel, but
+    // the *snapshot* it sends back is what `resolveOrchestratorQueuedInfo` acts
+    // on when the live queue entry is gone. Without this index, a peer holding
+    // the shared API key could pair an authorised `eventId` with a snapshot
+    // naming any message in any channel this bot can read. With it, a snapshot is
+    // only honoured when its channel matches the one we queued for.
+    this.queuedMessageChannels.set(eventId, message.channelId);
 
     // Notify orchestrator about the mention (fire and forget)
     this.orchestrator.notifyMention({
@@ -2066,8 +2767,8 @@ ${sections.join('\n\n')}
       timestamp: message.createdAt,
       triggerKeywords: triggerKeywords.length > 0 ? triggerKeywords : undefined,
       replyContext,
-      imageUrls,
-      videoUrls,
+      imageUrls: permittedImageUrls,
+      videoUrls: permittedVideoUrls,
       textAttachments,
     });
 
@@ -2082,6 +2783,32 @@ ${sections.join('\n\n')}
 
   async destroy(): Promise<void> {
     this.stopAllTyping();
+
+    // Clear the retained interval and timeout handles. These were previously
+    // registered with a bare `setInterval`/`setTimeout` and never cleared, which
+    // was harmless only because `process.exit(0)` fired immediately after; any
+    // graceful-restart path that awaited real teardown would hang on them. They
+    // are `unref()`'d too, so they can never be the reason the process stays
+    // alive.
+    if (this.orchestratorSweepInterval) {
+      clearInterval(this.orchestratorSweepInterval);
+      this.orchestratorSweepInterval = undefined;
+    }
+    for (const timer of this.processedMessageTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.processedMessageTimers.clear();
+    this.processedMessageIds.clear();
+    for (const timer of this.repliedMessageTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.repliedMessageTimers.clear();
+    this.repliedMessageIds.clear();
+    this.typingChannels.clear();
+    this.orchestratorQueue.clear();
+    this.queuedMessageChannels.clear();
+    this.generationGuard.clear();
+
     boredomService.stop();
     if (this.orchestrator) {
       this.orchestrator.disconnect();

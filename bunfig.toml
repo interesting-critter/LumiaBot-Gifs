@@ -1,0 +1,12 @@
+[test]
+# Runs before ANY test module is evaluated. This is the test-isolation
+# boundary: it must set DATA_DIR before the first `import` of a module that
+# reaches `dbPath()`.
+#
+#   bunfig.toml
+#     [test]
+#       preload = ["./src/__tests__/setup.ts"]
+#
+# `preload` is resolved relative to the project root and applies to `bun test`
+# only (unlike the top-level `preload`, which would also affect `bun run`).
+preload = ["./src/__tests__/setup.ts"]

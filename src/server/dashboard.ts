@@ -2,6 +2,8 @@ import { join } from 'node:path';
 import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { config } from '../utils/config';
+import { KNOWLEDGE_DOCUMENTS_DIR, PROMPT_STORAGE_DIR } from '../utils/paths';
+import { strEnv } from '../utils/env';
 import { dashboardLoggerService, type InteractionSource } from '../services/dashboard-logger';
 import { apiUsageService } from '../services/api-usage';
 import { userMemoryService, type MemoryEntryKind, type UserOpinion } from '../services/user-memory';
@@ -15,8 +17,9 @@ import { reloadBotDefinition } from '../utils/bot-definition';
 import { bot } from '../bot/client';
 
 const UI_PATH = join(import.meta.dir, 'dashboard', 'index.html');
-const PROMPT_STORAGE_DIR = join(import.meta.dir, '..', '..', 'prompt_storage');
-const KNOWLEDGE_DIR = 'knowledge_documents';
+
+/** Shown in the UI so the operator knows which directory sync reads. */
+const KNOWLEDGE_DIR_LABEL = 'knowledge_documents';
 
 /**
  * How many consecutive ports to try, starting at `config.dashboard.port`.
@@ -86,21 +89,99 @@ function safeEqual(a: string, b: string): boolean {
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
 /**
+ * Optional absolute origin the dashboard is also served under, e.g.
+ * `https://ops.example.com` behind a TLS-terminating proxy.
+ *
+ * When set it becomes the only accepted `Origin` for mutations, which is
+ * strictly safer than reconstructing an origin from request headers: a
+ * `Host`/`X-Forwarded-Proto` pair is exactly what DNS rebinding controls.
+ */
+const PUBLIC_ORIGIN = strEnv('DASHBOARD_PUBLIC_ORIGIN', '').trim().replace(/\/+$/, '');
+
+/** Upper bound on a single prompt-file write. */
+const PERSONA_MAX_BYTES = 256 * 1024;
+
+/** JSON envelope overhead on top of {@link PERSONA_MAX_BYTES}. */
+const PERSONA_BODY_SLACK_BYTES = 64 * 1024;
+
+/**
+ * Build the set of `Host` header values this server answers to.
+ *
+ * WHY THIS EXISTS
+ * ---------------
+ * The origin check below used to compare `Origin` against
+ * `${X-Forwarded-Proto}://${Host}`, which looks like it stops DNS rebinding and
+ * does not: once the victim's DNS resolves `evil.com` to `127.0.0.1`, the
+ * attacker's page origin *is* `http://evil.com:3001` and the `Host` header *is*
+ * `evil.com:3001`, so the comparison matches and the request is same-origin as
+ * far as every header is concerned. The page can then read every prompt and
+ * response plus the system prompt, and rewrite the persona on disk. No CORS
+ * headers are involved because after rebinding it genuinely is same-origin.
+ *
+ * The only defence that closes the class is to refuse requests whose `Host` we
+ * were never configured to serve, before auth and before any data is touched.
+ * The configured bind host and the loopback names are the legitimate values;
+ * anything else is a rebinding attempt (or a stray port-forward).
+ *
+ * Every candidate port is included because the bind may step forward past a
+ * busy one, and the operator follows the URL that was logged.
+ */
+function buildHostAllowlist(bindHost: string, basePort: number): Set<string> {
+  const names = new Set<string>(['localhost', '127.0.0.1', '[::1]']);
+  names.add(bindHost);
+  // An IPv6 bind host arrives unbracketed from config (`::`) but bracketed in a
+  // Host header (`[::]`), so allow both spellings.
+  if (bindHost.includes(':') && !bindHost.startsWith('[')) {
+    names.add(`[${bindHost}]`);
+  }
+
+  const allowed = new Set<string>();
+  for (const name of names) {
+    allowed.add(name.toLowerCase());
+    for (let i = 0; i < DASHBOARD_PORT_ATTEMPTS; i++) {
+      allowed.add(`${name}:${basePort + i}`.toLowerCase());
+    }
+  }
+
+  if (PUBLIC_ORIGIN) {
+    try {
+      const publicUrl = new URL(PUBLIC_ORIGIN);
+      allowed.add(publicUrl.host.toLowerCase());
+      allowed.add(publicUrl.hostname.toLowerCase());
+    } catch {
+      // A malformed DASHBOARD_PUBLIC_ORIGIN must not silently widen or narrow
+      // anything; it simply does not contribute to the allowlist.
+    }
+  }
+
+  return allowed;
+}
+
+function isAllowedHost(header: string | null, allowed: Set<string>): boolean {
+  if (!header) {
+    return false;
+  }
+  // Case-insensitive per RFC 3986, and a trailing dot is the same host.
+  return allowed.has(header.trim().toLowerCase().replace(/\.$/, ''));
+}
+
+/**
  * Whether a state-changing request came from somewhere other than the page's
  * own origin.
  *
  * The dashboard authenticates with HTTP Basic, which does not stop cross-site
  * requests: browsers cache Basic credentials against the *origin*, not the
- * referring page, so they will attach them to a cross-origin request too. And
- * with no password set (the loopback default) auth is a no-op. A plain
- * cross-origin `<form method="POST">` or `fetch` is a CORS "simple request",
- * so it is sent without a preflight — meaning any page the operator visits
- * could silently reset the model or wipe the usage counter.
+ * referring page, so they will attach them to a cross-origin request too. A
+ * plain cross-origin `<form method="POST">` or `fetch` is a CORS "simple
+ * request", so it is sent without a preflight — meaning any page the operator
+ * visits could silently reset the model or wipe the usage counter.
  *
- * Both checks below are origin-scoped, so they behave the same whether the
- * dashboard is reached over an SSH port-forward (`http://localhost:3001`) or a
- * LAN bind (`http://192.168.x.x:3001`): the request's own `Host` is what the
- * `Origin` is compared against.
+ * Note that this is defence in depth only. Under a full DNS rebinding attack
+ * both `Origin` and `Host` are attacker-chosen and agree with each other, so
+ * the check passes; {@link isAllowedHost} is what actually stops that.
+ *
+ * `same-site` is treated as hostile: a legitimate sibling-subdomain deployment
+ * would be blocked, which errs in the safe direction.
  */
 function isCrossSiteMutation(request: Request, method: string): boolean {
   if (!MUTATING_METHODS.has(method)) {
@@ -114,7 +195,9 @@ function isCrossSiteMutation(request: Request, method: string): boolean {
 
   const origin = request.headers.get('Origin');
   // Omitted Origin on a mutation is not a case a browser produces for a real
-  // same-origin form/fetch, so allow it rather than break an exotic client.
+  // same-origin form/fetch, so allow it rather than break an exotic client
+  // (curl from a local shell). Credentials are still required, and the Host
+  // allowlist has already rejected anything we were not bound to serve.
   if (!origin) {
     return false;
   }
@@ -124,56 +207,237 @@ function isCrossSiteMutation(request: Request, method: string): boolean {
     return true;
   }
 
+  if (PUBLIC_ORIGIN) {
+    return origin !== PUBLIC_ORIGIN;
+  }
+
   const host = request.headers.get('Host');
   if (!host) {
     return true;
   }
 
-  const protocol = request.headers.get('X-Forwarded-Proto') || 'http';
-  return origin !== `${protocol}://${host}`;
+  // No configured public origin: compare against the request's own Host on the
+  // scheme the server actually speaks. `X-Forwarded-Proto` is deliberately NOT
+  // trusted — it is a request header, so anyone who can send a request can set
+  // it, and trusting it makes the check trivially satisfiable once the
+  // dashboard is ever fronted by a proxy.
+  return origin !== `http://${host}`;
 }
 
-/**
- * HTTP Basic auth. Enabled only when DASHBOARD_PASSWORD is set, which is the
- * default-safe state because the server binds to loopback.
- */
-function isAuthorized(request: Request): boolean {
-  const expectedPassword = config.dashboard.password;
-  if (!expectedPassword) {
-    return true;
-  }
+// ---- Brute-force protection ------------------------------------------------
 
+/** Consecutive failures tolerated before the caller starts being delayed. */
+const AUTH_FAILURE_LIMIT = 5;
+
+/** First lockout window, doubling per further failure. */
+const AUTH_BACKOFF_BASE_MS = 2_000;
+
+/** Ceiling on the lockout window. */
+const AUTH_BACKOFF_MAX_MS = 120_000;
+
+/** Failed attempts older than this are forgotten. */
+const AUTH_STATE_TTL_MS = 15 * 60_000;
+
+/** Cap on tracked IPs so a spray from many source addresses cannot leak. */
+const AUTH_STATE_MAX_ENTRIES = 1024;
+
+interface AuthState {
+  failures: number;
+  blockedUntil: number;
+  lastSeen: number;
+}
+
+const authStates = new Map<string, AuthState>();
+
+function authBackoffMs(failures: number): number {
+  const over = failures - AUTH_FAILURE_LIMIT;
+  return Math.min(AUTH_BACKOFF_BASE_MS * 2 ** Math.max(0, over), AUTH_BACKOFF_MAX_MS);
+}
+
+function pruneAuthStates(now: number): void {
+  for (const [ip, state] of authStates) {
+    if (state.lastSeen < now - AUTH_STATE_TTL_MS) {
+      authStates.delete(ip);
+    }
+  }
+  // Oldest-first eviction so the map cannot grow without bound.
+  while (authStates.size > AUTH_STATE_MAX_ENTRIES) {
+    let oldestKey: string | null = null;
+    let oldestSeen = Infinity;
+    for (const [ip, state] of authStates) {
+      if (state.lastSeen < oldestSeen) {
+        oldestSeen = state.lastSeen;
+        oldestKey = ip;
+      }
+    }
+    if (oldestKey === null) break;
+    authStates.delete(oldestKey);
+  }
+}
+
+/** Extract `user:pass` from an HTTP Basic header, or null when absent/invalid. */
+function readBasicCredentials(request: Request): { username: string; password: string } | null {
   const header = request.headers.get('Authorization') || '';
   if (!header.startsWith('Basic ')) {
-    return false;
+    return null;
   }
 
   let decoded: string;
   try {
     decoded = atob(header.slice(6).trim());
   } catch {
-    return false;
+    return null;
   }
 
   const separatorIndex = decoded.indexOf(':');
   if (separatorIndex < 0) {
-    return false;
+    return null;
   }
 
-  const username = decoded.slice(0, separatorIndex);
-  const password = decoded.slice(separatorIndex + 1);
-
-  return safeEqual(username, config.dashboard.username) && safeEqual(password, expectedPassword);
+  return {
+    username: decoded.slice(0, separatorIndex),
+    password: decoded.slice(separatorIndex + 1),
+  };
 }
 
-function unauthorizedResponse(): Response {
-  return new Response('Authentication required', {
-    status: 401,
-    headers: {
-      'WWW-Authenticate': 'Basic realm="LumiaBot Dashboard", charset="UTF-8"',
-      'Content-Type': 'text/plain; charset=utf-8',
-    },
-  });
+/**
+ * Clear the per-IP failure counters.
+ *
+ * Exported for tests only: the state is module-level, so without this a suite
+ * that makes several deliberate bad-password attempts shares one counter across
+ * cases and later ones see a lockout that has nothing to do with them.
+ */
+export function resetAuthFailuresForTests(): void {
+  authStates.clear();
+  mutationWindows.clear();
+}
+
+export interface AuthDecision {
+  ok: boolean;
+  /** 401 or 429. */
+  status: number;
+  /** Set only on success; used for the mutation audit trail. */
+  username: string;
+  retryAfterSeconds: number;
+}
+
+/**
+ * HTTP Basic auth plus a per-IP failure counter.
+ *
+ * `safeEqual` is not constant-time (see its comment), the same single
+ * credential guards full verbatim transcripts and long-term memory, and the
+ * check was previously unthrottled — so a wrong password could be retried
+ * forever at line speed. Failures are counted per source address: the first
+ * {@link AUTH_FAILURE_LIMIT} are answered with a plain 401, and from the
+ * threshold on the caller is locked out for an exponentially growing window
+ * until a correct password arrives, which resets the counter.
+ *
+ * The response body and status never reveal whether the *username* was the
+ * wrong part, so the endpoint cannot be used to enumerate accounts.
+ */
+function checkAuthorization(request: Request, clientIp: string): AuthDecision {
+  const now = Date.now();
+  const existing = authStates.get(clientIp);
+
+  if (existing && existing.blockedUntil > now) {
+    return {
+      ok: false,
+      status: 429,
+      username: '',
+      retryAfterSeconds: Math.max(1, Math.ceil((existing.blockedUntil - now) / 1000)),
+    };
+  }
+
+  const credentials = readBasicCredentials(request);
+  const expectedPassword = config.dashboard.password;
+  const ok =
+    credentials !== null &&
+    safeEqual(credentials.username, config.dashboard.username) &&
+    safeEqual(credentials.password, expectedPassword);
+
+  if (ok) {
+    authStates.delete(clientIp);
+    return { ok: true, status: 200, username: credentials.username, retryAfterSeconds: 0 };
+  }
+
+  const failures = (existing?.failures ?? 0) + 1;
+  const blockedUntil = failures >= AUTH_FAILURE_LIMIT ? now + authBackoffMs(failures) : 0;
+  authStates.set(clientIp, { failures, blockedUntil, lastSeen: now });
+  pruneAuthStates(now);
+
+  if (blockedUntil > 0) {
+    return {
+      ok: false,
+      status: 429,
+      username: '',
+      retryAfterSeconds: Math.max(1, Math.ceil((blockedUntil - now) / 1000)),
+    };
+  }
+
+  return { ok: false, status: 401, username: '', retryAfterSeconds: 0 };
+}
+
+/**
+ * Deliberately identical for a wrong username, a wrong password and a missing
+ * header: any difference would let a caller enumerate the account name.
+ */
+function unauthorizedResponse(retryAfterSeconds = 0): Response {
+  const headers: Record<string, string> = {
+    'WWW-Authenticate': 'Basic realm="LumiaBot Dashboard", charset="UTF-8"',
+    'Content-Type': 'text/plain; charset=utf-8',
+    'Cache-Control': 'no-store',
+  };
+  if (retryAfterSeconds > 0) {
+    headers['Retry-After'] = String(retryAfterSeconds);
+  }
+  return new Response('Authentication required', { status: retryAfterSeconds > 0 ? 429 : 401, headers });
+}
+
+// ---- Mutation rate limiting ------------------------------------------------
+
+/** Writes allowed per IP per window. Generous for an operator, hostile to a loop. */
+const MUTATION_LIMIT = 60;
+
+/** Sliding window for {@link MUTATION_LIMIT}. */
+const MUTATION_WINDOW_MS = 60_000;
+
+const mutationWindows = new Map<string, number[]>();
+
+function isMutationRateLimited(clientIp: string): number {
+  const now = Date.now();
+  const recent = (mutationWindows.get(clientIp) ?? []).filter((at) => now - at < MUTATION_WINDOW_MS);
+
+  if (recent.length >= MUTATION_LIMIT) {
+    mutationWindows.set(clientIp, recent);
+    return Math.max(1, Math.ceil((recent[0]! + MUTATION_WINDOW_MS - now) / 1000));
+  }
+
+  recent.push(now);
+  mutationWindows.set(clientIp, recent);
+  return 0;
+}
+
+/**
+ * Every state change is logged with the authenticated user and source address.
+ *
+ * On Android under Termux every app on the device can reach `127.0.0.1`, so
+ * loopback is not a trust boundary and something else on the phone could be
+ * holding valid credentials. The audit line is what makes "who rewrote the
+ * persona / switched the model / injected a memory" answerable after the fact.
+ */
+function auditMutation(username: string, clientIp: string, method: string, path: string): void {
+  console.log(`🔐 [DASHBOARD] user=${username} ip=${clientIp} ${method} ${path}`);
+}
+
+/**
+ * Log the full error server-side, return a short generic message plus a
+ * correlation id. Raw SQLite constraint text and absolute filesystem paths
+ * used to be handed straight to the client.
+ */
+function internalFailure(context: string, error: unknown, status: number): Response {
+  const correlationId = crypto.randomUUID().slice(0, 8);
+  console.error(`❌ [DASHBOARD] ${context} (ref ${correlationId}):`, error);
+  return json({ error: 'The dashboard could not complete that request', ref: correlationId }, status);
 }
 
 async function readJsonBody(request: Request): Promise<Record<string, unknown> | null> {
@@ -333,7 +597,7 @@ function buildKnowledgePayload(limitParam: string | null) {
     },
     topics: knowledgeGraphService.getTopicStats().sort((a, b) => b.count - a.count),
     documents: knowledgeGraphService.getAllDocuments(limit).map((doc) => serialiseDocument(doc)),
-    directory: KNOWLEDGE_DIR,
+    directory: KNOWLEDGE_DIR_LABEL,
   };
 }
 
@@ -380,18 +644,33 @@ function readDocumentInput(body: Record<string, unknown>, existing?: ReturnType<
 
 // ---- Conversations --------------------------------------------------------
 
+type ConversationRow = {
+  userId: string;
+  guildId: string;
+  username: string;
+  messageCount: number;
+  lastActivity: string;
+};
+
 /**
- * `listActiveConversations()` has no LIMIT, so an established bot can return
- * thousands of rows. Cap it here and report the true total so the UI can say
- * "showing 200 of 4212" rather than silently truncating.
+ * `listActiveConversations()` used to have no LIMIT, so an established bot
+ * materialised thousands of rows and this handler then threw all but `limit`
+ * of them away. The service now caps the query itself and reports the true
+ * total, so the UI can say "showing 100 of 4212" rather than silently
+ * truncating.
+ *
+ * The `slice` is still applied here because the service clamps to whatever it
+ * is given while this handler clamps to the dashboard's own 500-row ceiling:
+ * the tighter of the two is the one that should win, and taking `min` of both
+ * is what this already does via `slice`.
  */
 function buildConversationList(limitParam: string | null) {
   const limit = Math.max(1, Math.min(Number.parseInt(limitParam ?? '100', 10) || 100, 500));
-  const all = conversationHistoryService.listActiveConversations();
-  return {
-    total: all.length,
-    conversations: all.slice(0, limit),
-  };
+
+  const result = conversationHistoryService.listActiveConversations(limit);
+  const rows = result.conversations;
+
+  return { total: result.total ?? rows.length, conversations: rows.slice(0, limit) };
 }
 
 // ---- Persona --------------------------------------------------------------
@@ -441,6 +720,68 @@ export interface DashboardServer {
   url: string;
 }
 
+/**
+ * True when a bind failed because the port is taken, as opposed to a bad host
+ * or a permission problem. Only this case justifies trying the next port.
+ *
+ * Bun surfaces the condition inconsistently across versions and platforms (an
+ * `EADDRINUSE` code, or an `EADDRINUSE`/`address already in use` substring), so
+ * both are checked rather than trusting either one alone.
+ */
+function isAddressInUse(error: unknown): boolean {
+  const code = (error as { code?: unknown } | null)?.code;
+  if (code === 'EADDRINUSE') {
+    return true;
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  return /EADDRINUSE|address already in use|port is already in use/i.test(message);
+}
+
+function describeBindError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * One nonce per process boot, substituted into the served HTML.
+ *
+ * The UI is a single file with an inline `<script>`, and `script-src
+ * 'unsafe-inline'` would hand any injected markup the same privileges as the
+ * real script — which throws away the escaping discipline `esc()` maintains on
+ * all 33 `innerHTML` sites. A nonce keeps the inline script legal while making
+ * injected markup unrunnable, because an attacker cannot guess this value.
+ */
+const CSP_NONCE = crypto.randomUUID().replace(/-/g, '');
+
+const CSP_HEADER = [
+  "default-src 'none'",
+  "style-src 'unsafe-inline'",
+  `script-src 'nonce-${CSP_NONCE}'`,
+  "connect-src 'self'",
+  "img-src data:",
+  "base-uri 'none'",
+  "form-action 'none'",
+  "frame-ancestors 'none'",
+].join('; ');
+
+/**
+ * Best-effort peer address, used to bucket brute-force attempts, throttle
+ * mutations and attribute an audit line.
+ *
+ * `server.requestIP()` is the only trustworthy source here: the usual
+ * `X-Forwarded-For` fallback is a request header, so a caller can put any
+ * address they like in it and evade every per-IP limit. When it is unavailable
+ * (some transports, or a test harness calling the handler directly) every
+ * request lands in one shared bucket, which is stricter, not looser.
+ */
+function clientAddress(server: DashboardServerLike | undefined, request: Request): string {
+  const address = server?.requestIP?.(request)?.address;
+  return typeof address === 'string' && address.length > 0 ? address : 'unknown';
+}
+
+interface DashboardServerLike {
+  requestIP?: (request: Request) => { address: string } | null;
+}
+
 export function startDashboardServer(): DashboardServer | null {
   const { enabled, host, port, password } = config.dashboard;
 
@@ -449,22 +790,49 @@ export function startDashboardServer(): DashboardServer | null {
     return null;
   }
 
-  const isLoopback = host === '127.0.0.1' || host === 'localhost' || host === '::1';
-
-  // Refuse to expose memory data and full transcripts on an open network
-  // without credentials. Loopback stays usable with no password at all.
-  if (!isLoopback && !password) {
+  // A dashboard with no password is an open door, and loopback is not a
+  // boundary here: this bot runs under Termux on Android, where every app on
+  // the device can open a socket to 127.0.0.1. So "loopback only" never meant
+  // "only the operator", and there is no safe default to fall back to. Refuse
+  // to start, loudly, and let the bot carry on running normally.
+  if (!password) {
     console.error(
-      `❌ [DASHBOARD] Refusing to start on ${host}: set DASHBOARD_PASSWORD to expose the dashboard beyond localhost. ` +
-      `Set DASHBOARD_HOST=127.0.0.1 (the default) to run without a password.`
+      '❌❌❌ [DASHBOARD] REFUSING TO START — DASHBOARD_PASSWORD is not set ❌❌❌\n' +
+        '   The dashboard exposes full Discord transcripts, the system prompt and long-term\n' +
+        '   memory, and can rewrite the persona on disk. It will not run unauthenticated,\n' +
+        '   not even on loopback: on Android any app on the device can reach 127.0.0.1.\n' +
+        '   To enable it, set DASHBOARD_PASSWORD in your .env file to a long random string\n' +
+        '   and restart the bot. The bot itself is unaffected and keeps running.\n' +
+        '   (To disable the dashboard entirely, set DASHBOARD_ENABLED=false instead.)'
     );
     return null;
   }
 
+  const isLoopback = host === '127.0.0.1' || host === 'localhost' || host === '::1';
+  const allowedHosts = buildHostAllowlist(host, port);
+
   const handler = {
-    async fetch(request: Request): Promise<Response> {
-      if (!isAuthorized(request)) {
-        return unauthorizedResponse();
+    // Bun passes the live server as the second argument, which is the only
+    // trustworthy source of the peer address.
+    async fetch(request: Request, server?: DashboardServerLike): Promise<Response> {
+      const clientIp = clientAddress(server, request);
+
+      // Host allowlist first, ahead of auth: under a full DNS rebinding attack
+      // the browser is genuinely same-origin with `evil.com`, so it would sail
+      // past every origin check with valid-looking headers. Refusing a Host we
+      // were never bound to serve closes the whole class, read and write alike.
+      const requestHost = request.headers.get('Host');
+      if (!isAllowedHost(requestHost, allowedHosts)) {
+        console.warn(
+          `🚨 [DASHBOARD] Rejected request with unexpected Host "${requestHost ?? '(none)'}" from ${clientIp}. ` +
+            `Expected one of: ${[...allowedHosts].filter((h) => h.includes(':')).slice(0, 12).join(', ')}`
+        );
+        return fail('This dashboard only answers to its configured address', 421);
+      }
+
+      const auth = checkAuthorization(request, clientIp);
+      if (!auth.ok) {
+        return unauthorizedResponse(auth.retryAfterSeconds);
       }
 
       const url = new URL(request.url);
@@ -477,10 +845,18 @@ export function startDashboardServer(): DashboardServer | null {
         return fail('Cross-site request rejected', 403);
       }
 
+      if (MUTATING_METHODS.has(method)) {
+        const retryAfter = isMutationRateLimited(clientIp);
+        if (retryAfter > 0) {
+          return fail('Too many changes in a short time. Wait a moment and retry.', 429);
+        }
+        auditMutation(auth.username, clientIp, method, path);
+      }
+
       // ---- UI ----------------------------------------------------------
       if (path === '/' || path === '/index.html') {
         try {
-          const html = await loadUi();
+          const html = (await loadUi()).replace(/__CSP_NONCE__/g, CSP_NONCE);
           return new Response(html, {
             headers: {
               'Content-Type': 'text/html; charset=utf-8',
@@ -488,8 +864,7 @@ export function startDashboardServer(): DashboardServer | null {
               'X-Content-Type-Options': 'nosniff',
               'X-Frame-Options': 'DENY',
               'Referrer-Policy': 'no-referrer',
-              'Content-Security-Policy':
-                "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+              'Content-Security-Policy': CSP_HEADER,
             },
           });
         } catch (error) {
@@ -521,6 +896,11 @@ export function startDashboardServer(): DashboardServer | null {
         try {
           return json({ ok: true, model: modelSelectorService.setModel(model) });
         } catch (error) {
+          // setModel only ever throws its own allow-list validation messages,
+          // which are what the operator needs to see and carry no internals, so
+          // the text is returned as-is — but it is logged too, so a future
+          // failure mode that does leak cannot reach the client silently.
+          console.warn(`📊 [DASHBOARD] Rejected model "${model}":`, error);
           return fail(error instanceof Error ? error.message : String(error), 400);
         }
       }
@@ -573,6 +953,62 @@ export function startDashboardServer(): DashboardServer | null {
         });
       }
 
+      // ---- Log summary ---------------------------------------------------
+      // What the overview polls. `/api/log` serialises up to `limit` entries
+      // plus the full multi-kilobyte system prompt behind each one, which on a
+      // phone is the single most expensive thing the dashboard does; the
+      // overview only needs counters, an hourly profile and the newest prompt.
+      // Everything here is derived from the in-memory ring buffer, so this is a
+      // projection rather than a second pass over the same data.
+      if (path === '/api/log/summary' && method === 'GET') {
+        const windowHours = Math.max(
+          6,
+          Math.min(24, config.dashboard.logWindowHours || 12)
+        );
+        const now = Date.now();
+        const bucketMs = 3_600_000;
+
+        const buckets: Array<{ startMs: number; count: number; errors: number }> = [];
+        for (let i = windowHours - 1; i >= 0; i--) {
+          buckets.push({ startMs: now - i * bucketMs, count: 0, errors: 0 });
+        }
+        const base = buckets[0]?.startMs ?? now;
+
+        // Fields are projected to the handful the strip and the "most recent"
+        // block need; `response` and the full-prompt payloads are dropped here.
+        let latest: { timestamp: string; username: string | null; userId: string | null; source: string; prompt: string } | null =
+          null;
+
+        // The whole in-memory ring buffer, not the default page of 100: the
+        // hourly profile has to account for every activation in the window or
+        // the strip under-reports on a busy bot.
+        for (const entry of dashboardLoggerService.list({ limit: config.dashboard.logMaxEntries })) {
+          let index = Math.floor((entry.epochMs - base) / bucketMs);
+          if (index < 0) index = 0;
+          if (index > buckets.length - 1) index = buckets.length - 1;
+          const bucket = buckets[index];
+          if (bucket) {
+            bucket.count++;
+            if (entry.error) bucket.errors++;
+          }
+          if (!latest) {
+            latest = {
+              timestamp: entry.timestamp,
+              username: entry.username ?? null,
+              userId: entry.userId ?? null,
+              source: entry.source,
+              prompt: entry.prompt,
+            };
+          }
+        }
+
+        return json({
+          summary: dashboardLoggerService.getSummary(),
+          timeline: buckets,
+          latest,
+        });
+      }
+
       if (path === '/api/log' && method === 'DELETE') {
         const cleared = dashboardLoggerService.clear();
         return json({ ok: true, cleared });
@@ -603,16 +1039,19 @@ export function startDashboardServer(): DashboardServer | null {
         try {
           knowledgeGraphService.storeDocument(patch as never);
         } catch (error) {
-          return fail(error instanceof Error ? error.message : String(error), 400);
+          // SQLite constraint text names tables and columns; it does not belong
+          // in a response body.
+          return internalFailure('Storing a knowledge document failed', error, 400);
         }
         return json({ ok: true, documents: knowledgeGraphService.getAllDocuments(1) });
       }
 
       if (path === '/api/knowledge/sync' && method === 'POST') {
         try {
-          await knowledgeGraphService.syncFromFiles(KNOWLEDGE_DIR);
+          await knowledgeGraphService.syncFromFiles(KNOWLEDGE_DOCUMENTS_DIR);
         } catch (error) {
-          return fail(error instanceof Error ? error.message : String(error), 500);
+          // The message here embeds an absolute filesystem path.
+          return internalFailure('Knowledge file sync failed', error, 500);
         }
         return json(buildKnowledgePayload('50'));
       }
@@ -660,7 +1099,7 @@ export function startDashboardServer(): DashboardServer | null {
           try {
             knowledgeGraphService.updateDocument(id, patch as never);
           } catch (error) {
-            return fail(error instanceof Error ? error.message : String(error), 400);
+            return internalFailure(`Updating knowledge document ${id} failed`, error, 400);
           }
           return json({ ok: true, document: serialiseDocument(knowledgeGraphService.getDocument(id)) });
         }
@@ -749,6 +1188,18 @@ export function startDashboardServer(): DashboardServer | null {
       }
 
       if (path === '/api/persona' && method === 'PUT') {
+        // Bun's default maximum request body is ~128 MB, so reject an oversized
+        // body on its declared length before parsing it. Without this a single
+        // request can allocate hundreds of megabytes on a phone.
+        const declaredLength = Number.parseInt(request.headers.get('Content-Length') ?? '', 10);
+        if (Number.isFinite(declaredLength) && declaredLength > PERSONA_MAX_BYTES + PERSONA_BODY_SLACK_BYTES) {
+          return fail(
+            `That file is too large. The limit is ${PERSONA_MAX_BYTES} bytes; ` +
+              `this request body is ${declaredLength} bytes.`,
+            413
+          );
+        }
+
         const body = await readJsonBody(request);
         if (!body) return fail('Expected a JSON body', 400);
 
@@ -760,6 +1211,21 @@ export function startDashboardServer(): DashboardServer | null {
         const meta = PROMPT_FILE_MAP.get(filePath);
         if (!meta) return fail('That file is not editable', 400);
 
+        // Cap the write itself rather than trusting the declared length: a
+        // chunked request has no Content-Length, and the limit must hold
+        // regardless of how the body arrived.
+        const contentBytes = Buffer.byteLength(content, 'utf-8');
+        if (contentBytes > PERSONA_MAX_BYTES) {
+          return fail(`That file is too large. The limit is ${PERSONA_MAX_BYTES} bytes (got ${contentBytes}).`, 413);
+        }
+
+        // An empty system prompt is not a valid state: `loadTextFile` treats a
+        // blank file as "no persona" without reporting anything, so the bot
+        // would silently lose its instructions on the next reply.
+        if (filePath === 'persona/identity.txt' && !content.trim()) {
+          return fail('The identity file cannot be empty. Write the persona text first.', 400);
+        }
+
         // Reject unparseable JSON before it reaches disk: a broken triggers.json
         // makes loadJsonFile return null, which silently disables the feature
         // rather than reporting the error.
@@ -767,16 +1233,44 @@ export function startDashboardServer(): DashboardServer | null {
           try {
             JSON.parse(content);
           } catch (error) {
+            // The parser's message describes the operator's own text, not our
+            // internals, so it is safe and useful to return.
             return fail(`Not valid JSON: ${error instanceof Error ? error.message : String(error)}`, 400);
           }
         }
 
+        const full = join(PROMPT_STORAGE_DIR, filePath);
+
+        // Optimistic concurrency. The editor sends the content it loaded as
+        // `ifMatch`; if the file changed on disk since then — another tab, a
+        // hand edit over SSH, or a second operator on the LAN — refuse rather
+        // than silently clobbering that edit with a blind overwrite.
+        const ifMatch = asString(body.ifMatch);
+        if (ifMatch === undefined) {
+          return fail('Missing "ifMatch": reload the file and save again', 428);
+        }
+
+        let current = '';
+        if (existsSync(full)) {
+          try {
+            current = await readFile(full, 'utf-8');
+          } catch (error) {
+            return internalFailure(`Reading ${filePath} before writing failed`, error, 500);
+          }
+        }
+        if (current !== ifMatch) {
+          return fail(
+            'This file changed on disk since you opened it. Reload it, re-apply your edit, then save.',
+            409
+          );
+        }
+
         try {
-          const full = join(PROMPT_STORAGE_DIR, filePath);
           await mkdir(join(full, '..'), { recursive: true });
           await writeFile(full, content, 'utf-8');
         } catch (error) {
-          return fail(error instanceof Error ? error.message : String(error), 500);
+          // writeFile errors carry the absolute path and the OS errno text.
+          return internalFailure(`Writing ${filePath} failed`, error, 500);
         }
 
         // Same process as the bot (started in-process from src/index.ts), so
@@ -816,7 +1310,7 @@ export function startDashboardServer(): DashboardServer | null {
             if (!updated) return fail(`No memory with id ${entryId}`, 404);
             return json({ ok: true, entry: updated });
           } catch (error) {
-            return fail(error instanceof Error ? error.message : String(error), 400);
+            return internalFailure(`Updating memory ${entryId} failed`, error, 400);
           }
         }
 
@@ -906,7 +1400,7 @@ export function startDashboardServer(): DashboardServer | null {
             );
             return json({ ok: true, entry });
           } catch (error) {
-            return fail(error instanceof Error ? error.message : String(error), 400);
+            return internalFailure(`Adding a memory for user ${userId} failed`, error, 400);
           }
         }
 
@@ -923,15 +1417,23 @@ export function startDashboardServer(): DashboardServer | null {
   };
 
   /**
-   * Bind the configured port, stepping forward if it is taken.
+   * Bind the configured port, stepping forward only when that exact port is
+   * already in use.
    *
    * The dashboard is optional observability, so a stale process squatting on
-   * the port must never stop the bot from connecting to Discord. Trying the
-   * next few ports keeps it reachable without being fatal; if they are all
-   * occupied we log and return null so startup continues without it.
+   * the port must never stop the bot from connecting to Discord. But stepping
+   * silently is its own hazard: a bookmark for `http://localhost:3001` lands in
+   * whatever process *does* own 3001, and that process receives the operator's
+   * credentials. Availability is not worth trading for confidentiality without
+   * saying so, so the move is announced loudly below.
+   *
+   * Any other bind failure (bad interface, permission denied, invalid host) is
+   * fatal for the dashboard rather than a reason to try a different port —
+   * retrying it four more times cannot fix it and only delays the log line.
    */
   let server: ReturnType<typeof Bun.serve> | null = null;
   let lastBindError: unknown = null;
+  let movedFrom = 0;
 
   for (let attempt = 0; attempt < DASHBOARD_PORT_ATTEMPTS && server === null; attempt++) {
     const candidate = port + attempt;
@@ -942,30 +1444,55 @@ export function startDashboardServer(): DashboardServer | null {
         fetch: handler.fetch,
         error: handler.error,
       });
+      movedFrom = candidate;
     } catch (error) {
       lastBindError = error;
+      if (!isAddressInUse(error)) {
+        console.error(
+          `❌ [DASHBOARD] Could not bind ${host}:${candidate}: ` +
+            `${error instanceof Error ? error.message : String(error)}. ` +
+            `Starting without the dashboard; Discord is unaffected.`
+        );
+        return null;
+      }
       console.warn(
-        `📊 [DASHBOARD] Port ${candidate} unavailable: ${error instanceof Error ? error.message : String(error)}`
+        `⚠️  [DASHBOARD] Another process already owns port ${candidate} (${describeBindError(error)}).`
       );
     }
   }
 
   if (server === null) {
     console.error(
-      `❌ [DASHBOARD] Could not bind any port from ${port} to ${port + DASHBOARD_PORT_ATTEMPTS - 1}; ` +
+      `❌ [DASHBOARD] Ports ${port} to ${port + DASHBOARD_PORT_ATTEMPTS - 1} are all in use; ` +
         `starting without the dashboard. Discord is unaffected.`
     );
     void lastBindError;
     return null;
   }
 
+  if (movedFrom !== port) {
+    console.warn(
+      `⚠️⚠️  [DASHBOARD] THE DASHBOARD HAS MOVED: another process owns port ${port}, ` +
+        `so it is now on port ${movedFrom} ⚠️⚠️\n` +
+        `   Do NOT use a saved URL or bookmark for port ${port} — it points at that other\n` +
+        `   process, which is not this bot and will receive your dashboard sign-in.\n` +
+        `   Use port ${movedFrom}, or stop the other process and restart to get ${port} back.`
+    );
+  }
+
   const displayHost = isLoopback ? 'localhost' : host;
   console.log(`📊 [DASHBOARD] Listening on http://${displayHost}:${server.port}`);
   console.log(`📊 [DASHBOARD] Open http://${displayHost}:${server.port} in your mobile browser`);
-  if (password) {
-    console.log(`📊 [DASHBOARD] Auth required — user "${config.dashboard.username}"`);
-  } else {
-    console.log('📊 [DASHBOARD] No password set (safe: bound to loopback only)');
+  console.log(`📊 [DASHBOARD] Auth required — user "${config.dashboard.username}", password from DASHBOARD_PASSWORD`);
+  if (!isLoopback) {
+    console.warn(
+      `📊 [DASHBOARD] Bound to ${host}, so this is reachable by anything that can route to this ` +
+        `device. Only Host headers for ${[...allowedHosts].filter((h) => h.includes(':')).length} ` +
+        `configured address(es) are answered.`
+    );
+  }
+  if (PUBLIC_ORIGIN) {
+    console.log(`📊 [DASHBOARD] Also answering on the configured public origin ${PUBLIC_ORIGIN}`);
   }
 
   return {

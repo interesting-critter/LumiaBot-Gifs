@@ -39,6 +39,10 @@ const rest = new REST().setToken(config.discord.token);
 
     console.log(`Successfully reloaded ${data.length} application (/) commands.`);
   } catch (error) {
+    // A failed deployment used to be logged and then swallowed, so the process
+    // still exited 0 and any CI job or wrapper reported a successful command
+    // registration while Discord was still serving the previous set.
     console.error(error);
+    process.exitCode = 1;
   }
 })();

@@ -149,37 +149,100 @@ export async function parseMarkdownFile(filePath: string): Promise<ParsedMarkdow
 }
 
 /**
- * Import all Markdown files from a directory
+ * Options for {@link importMarkdownDirectory}.
  */
-export async function importMarkdownDirectory(dirPath: string): Promise<ParsedMarkdownDocument[]> {
-  const results: ParsedMarkdownDocument[] = [];
-  
+export interface MarkdownImportOptions {
+  /**
+   * Throw a {@link MarkdownImportError} when any file or directory could not be
+   * read, instead of returning the documents that *were* readable.
+   *
+   * Default `false` (lenient) because the boot-time sync in
+   * `knowledge-graph.syncFromFiles()` must not take the whole bot down when one
+   * document is unreadable. An explicit import run should pass `true`: silently
+   * skipping a file makes a partial import look like a complete one.
+   */
+  strict?: boolean;
+}
+
+/**
+ * Thrown in strict mode when part of the tree could not be read. Carries the
+ * documents that did parse, so the caller can report "12 of 15 imported" rather
+ * than pretending the import was empty.
+ */
+export class MarkdownImportError extends Error {
+  public readonly failures: string[];
+  public readonly documents: ParsedMarkdownDocument[];
+
+  constructor(failures: string[], documents: ParsedMarkdownDocument[]) {
+    super(
+      `Markdown import incomplete: ${failures.length} file(s) or directory(ies) could not be read ` +
+        `(${documents.length} parsed). Unreadable: ${failures.join(', ')}`
+    );
+    this.name = 'MarkdownImportError';
+    this.failures = failures;
+    this.documents = documents;
+  }
+}
+
+async function importMarkdownDirectoryInto(
+  dirPath: string,
+  results: ParsedMarkdownDocument[],
+  failures: string[]
+): Promise<void> {
+  let entries;
   try {
-    const entries = await readdir(dirPath, { withFileTypes: true });
-    
-    for (const entry of entries) {
-      const fullPath = join(dirPath, entry.name);
-      
-      if (entry.isDirectory()) {
-        // Recursively process subdirectories
-        const subResults = await importMarkdownDirectory(fullPath);
-        results.push(...subResults);
-      } else if (entry.isFile() && extname(entry.name) === '.md') {
-        // Skip README.md files (documentation, not knowledge content)
-        if (entry.name.toLowerCase() === 'readme.md') {
-          continue;
-        }
-        
-        const doc = await parseMarkdownFile(fullPath);
-        if (doc) {
-          results.push(doc);
-        }
+    entries = await readdir(dirPath, { withFileTypes: true });
+  } catch (error) {
+    // Previously swallowed, so a permission error or a missing directory made
+    // a *partial* tree look like an empty one.
+    failures.push(dirPath);
+    console.error(`Error reading directory ${dirPath}:`, error);
+    return;
+  }
+
+  for (const entry of entries) {
+    const fullPath = join(dirPath, entry.name);
+
+    if (entry.isDirectory()) {
+      // Recursively process subdirectories
+      await importMarkdownDirectoryInto(fullPath, results, failures);
+    } else if (entry.isFile() && extname(entry.name) === '.md') {
+      // Skip README.md files (documentation, not knowledge content)
+      if (entry.name.toLowerCase() === 'readme.md') {
+        continue;
+      }
+
+      const doc = await parseMarkdownFile(fullPath);
+      if (doc) {
+        results.push(doc);
+      } else {
+        // parseMarkdownFile returns null only when the read threw.
+        failures.push(fullPath);
       }
     }
-  } catch (error) {
-    console.error(`Error reading directory ${dirPath}:`, error);
   }
-  
+}
+
+/**
+ * Import all Markdown files from a directory (recursively).
+ *
+ * Unreadable files and directories are counted. With `strict: true` the import
+ * fails loudly instead of returning a short list, because a short list is
+ * indistinguishable from "there was nothing to import" at the call site.
+ */
+export async function importMarkdownDirectory(
+  dirPath: string,
+  options: MarkdownImportOptions = {}
+): Promise<ParsedMarkdownDocument[]> {
+  const results: ParsedMarkdownDocument[] = [];
+  const failures: string[] = [];
+
+  await importMarkdownDirectoryInto(dirPath, results, failures);
+
+  if (failures.length > 0 && options.strict) {
+    throw new MarkdownImportError(failures, results);
+  }
+
   return results;
 }
 
@@ -192,7 +255,7 @@ if (import.meta.main) {
   
   console.log(`📚 Importing Markdown files from: ${targetDir}\n`);
   
-  importMarkdownDirectory(targetDir).then(docs => {
+  importMarkdownDirectory(targetDir, { strict: true }).then(docs => {
     if (docs.length === 0) {
       console.log('❌ No valid Markdown files found.');
       process.exit(1);

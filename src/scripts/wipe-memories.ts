@@ -1,310 +1,478 @@
 #!/usr/bin/env bun
 /**
  * Memory Wipe Script for Lumia
- * 
- * This script wipes all memories, opinions, and conversation history for a specific user.
- * Useful when you want to reset Lumia's relationship with a user.
- * 
+ *
+ * Irreversibly erases every stored trace of one Discord user: their long-term
+ * opinion profile, pronouns, third-party context, the individual memory rows
+ * derived from them, and their full conversation history in every guild.
+ *
  * Usage:
- *   bun run src/scripts/wipe-memories.ts <username_or_userid>
- * 
- * Examples:
- *   bun run src/scripts/wipe-memories.ts Prolix
- *   bun run src/scripts/wipe-memories.ts 123456789012345678
+ *   bun run wipe-memories <discord_user_id> [--force]
+ *   bun run wipe-memories <display_name>   [--force] [--dry-run]
+ *
+ * Deleting by ID is always safe to confirm. Deleting by display name resolves
+ * through an explicit disambiguation step first, because display names are
+ * per-guild nicknames and are not unique.
+ *
+ * WHY THE CONFIRMATION IS STRICT
+ * ------------------------------
+ * This script previously printed "type the username" and then exited without
+ * ever reading stdin, so the documented confirmation did nothing; and it
+ * skipped the prompt entirely whenever `CI` or `FORCE_WIPE` was set, which
+ * meant any automation shell could delete a user with no prompt at all. It now
+ * reads a real line from stdin and refuses entirely when it cannot.
  */
 
 import { Database } from 'bun:sqlite';
-import { userMemoryService } from '../services/user-memory';
-import { conversationHistoryService } from '../services/conversation-history';
-import { boredomService } from '../services/boredom';
-
-// Parse command line args
-const args = process.argv.slice(2);
-if (args.includes('--force')) {
-  process.env.FORCE_WIPE = 'true';
-}
-
-interface WipeResult {
-  userId: string;
-  username: string;
-  opinionsDeleted: boolean;
-  conversationsCleared: number;
-  boredomSettingsDeleted: boolean;
-}
-
-/**
- * Find a user by username (case insensitive) or user ID
- */
-function findUser(identifier: string): { userId: string; username: string } | null {
-  // Try to find by user ID first (Discord IDs are 17-20 digit numbers)
-  const isDiscordId = /^\d{17,20}$/.test(identifier);
-  
-  if (isDiscordId) {
-    // Check if this user exists in any of our databases
-    const userId = identifier;
-    
-    // Check user_memories.db
-    try {
-      const db = new Database('user_memories.db');
-      const result = db.query('SELECT username FROM user_opinions WHERE user_id = ? LIMIT 1').get(userId) as { username: string } | undefined;
-      db.close();
-      
-      if (result) {
-        return { userId, username: result.username };
-      }
-    } catch (error) {
-      console.error('Error checking user_memories.db:', error);
-    }
-    
-    // Check conversations.db
-    try {
-      const db = new Database('conversations.db');
-      const result = db.query('SELECT username FROM conversation_messages WHERE user_id = ? LIMIT 1').get(userId) as { username: string } | undefined;
-      db.close();
-      
-      if (result) {
-        return { userId, username: result.username };
-      }
-    } catch (error) {
-      console.error('Error checking conversations.db:', error);
-    }
-    
-    // Check boredom.db
-    try {
-      const db = new Database('boredom.db');
-      const result = db.query('SELECT 1 as exists FROM boredom_settings WHERE user_id = ? LIMIT 1').get(userId) as { exists: number } | undefined;
-      db.close();
-      
-      if (result) {
-        // We found them in boredom db but don't have username, use ID as username
-        return { userId, username: userId };
-      }
-    } catch (error) {
-      console.error('Error checking boredom.db:', error);
-    }
-    
-    console.log(`❌ No user found with ID: ${identifier}`);
-    return null;
-  }
-  
-  // Search by username (case insensitive)
-  const username = identifier;
-  
-  // Check user_memories.db
-  try {
-    const db = new Database('user_memories.db');
-    const result = db.query('SELECT user_id, username FROM user_opinions WHERE LOWER(username) = LOWER(?) LIMIT 1').get(username) as { user_id: string; username: string } | undefined;
-    db.close();
-    
-    if (result) {
-      return { userId: result.user_id, username: result.username };
-    }
-  } catch (error) {
-    console.error('Error checking user_memories.db:', error);
-  }
-  
-  // Check conversations.db
-  try {
-    const db = new Database('conversations.db');
-    const result = db.query('SELECT user_id, username FROM conversation_messages WHERE LOWER(username) = LOWER(?) LIMIT 1').get(username) as { user_id: string; username: string } | undefined;
-    db.close();
-    
-    if (result) {
-      return { userId: result.user_id, username: result.username };
-    }
-  } catch (error) {
-    console.error('Error checking conversations.db:', error);
-  }
-  
-  console.log(`❌ No user found with username: ${identifier}`);
-  return null;
-}
+import { existsSync } from 'node:fs';
+import { dbPath } from '../utils/paths';
+import {
+  decideConfirmation,
+  isInteractive,
+  matchesConfirmation,
+  mergeUserCandidates,
+  missingDatabases,
+  parseArgs,
+  readConfirmationLine,
+  runDestructiveSteps,
+  wantsHelp,
+  type DestructiveStep,
+  type UserCandidate,
+  type UserRefRow,
+  resolveTarget,
+} from './safety';
 
 /**
- * Get detailed info about a user before wiping
+ * Absolute paths from `utils/paths`. These were CWD-relative filenames, which
+ * meant running this from any other directory silently created a brand-new
+ * empty database — and "no memories found" for a user who demonstrably had
+ * them, followed by a wipe of that empty file.
  */
-function getUserInfo(userId: string): {
-  hasOpinion: boolean;
-  conversationCount: number;
+const USER_MEMORIES_PATH = dbPath('user_memories.db');
+const CONVERSATIONS_PATH = dbPath('conversations.db');
+
+const REQUIRED_DATABASES = [
+  { label: 'user memories', path: USER_MEMORIES_PATH },
+  { label: 'conversation history', path: CONVERSATIONS_PATH },
+];
+
+interface UserStats {
+  opinionProfiles: number;
+  memoryEntries: number;
+  thirdPartyEntries: number;
+  conversationMessages: number;
   guilds: string[];
-  boredomEnabled: boolean | null;
-} {
-  let hasOpinion = false;
-  let conversationCount = 0;
-  const guilds: string[] = [];
-  let boredomEnabled: boolean | null = null;
-  
-  // Check opinions
-  try {
-    const opinion = userMemoryService.getOpinion(userId);
-    hasOpinion = !!opinion;
-  } catch (error) {
-    // User might not have an opinion
-  }
-  
-  // Check conversations
-  try {
-    conversationCount = conversationHistoryService.getTotalMessageCount(userId);
-    const userConversations = conversationHistoryService.listUserConversations(userId);
-    guilds.push(...userConversations.map(c => c.guildId));
-  } catch (error) {
-    // User might not have conversations
-  }
-  
-  // Check boredom settings (need to check across all guilds they've interacted in)
-  try {
-    const db = new Database('boredom.db');
-    const results = db.query('SELECT enabled FROM boredom_settings WHERE user_id = ?').all(userId) as Array<{ enabled: number }>;
-    db.close();
-    
-    if (results.length > 0) {
-      // If any guild has it enabled, consider it enabled
-      boredomEnabled = results.some(r => r.enabled === 1);
-    }
-  } catch (error) {
-    // User might not have boredom settings
-  }
-  
-  return { hasOpinion, conversationCount, guilds, boredomEnabled };
 }
 
 /**
- * Wipe all memories for a user
+ * `user_memory_entries` was added after the original schema, so a database
+ * that has not been opened by the bot since the upgrade may not have it.
  */
-function wipeUserMemories(userId: string, username: string): WipeResult {
-  let opinionsDeleted = false;
-  let conversationsCleared = 0;
-  let boredomSettingsDeleted = false;
-  
-  console.log(`\n🧹 Wiping memories for ${username} (${userId})...\n`);
-  
-  // 1. Delete user opinion
-  try {
-    if (userMemoryService.hasOpinion(userId)) {
-      userMemoryService.deleteOpinion(userId);
-      opinionsDeleted = true;
-      console.log('  ✓ Deleted user opinion/memories');
-    } else {
-      console.log('  ℹ No user opinion to delete');
-    }
-  } catch (error) {
-    console.error('  ✗ Error deleting opinion:', error);
+function tableExists(db: Database, table: string): boolean {
+  return (db
+    .query(`SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = ?`)
+    .get(table) as { count: number }).count > 0;
+}
+
+function countRows(db: Database, sql: string, ...params: string[]): number {
+  return (db.query(sql).get(...params) as { count: number }).count;
+}
+
+function openDatabase(path: string): Database {
+  // The file's existence is asserted before any open. `new Database(path)`
+  // creates a missing file, so opening first would defeat that check.
+  return new Database(path);
+}
+
+function assertDatabasesExist(): boolean {
+  const missing = missingDatabases(REQUIRED_DATABASES, existsSync);
+  if (missing.length === 0) return true;
+
+  console.error('❌ Refusing to run: the following databases do not exist:');
+  for (const spec of missing) {
+    console.error(`   - ${spec.label}: ${spec.path}`);
   }
-  
-  // 2. Clear conversation history across all guilds
-  try {
-    const beforeCount = conversationHistoryService.getTotalMessageCount(userId);
-    if (beforeCount > 0) {
-      conversationHistoryService.clearAllHistory(userId);
-      conversationsCleared = beforeCount;
-      console.log(`  ✓ Cleared ${beforeCount} conversation messages`);
-    } else {
-      console.log('  ℹ No conversation history to clear');
-    }
-  } catch (error) {
-    console.error('  ✗ Error clearing conversations:', error);
-  }
-  
-  // 3. Delete boredom settings
-  try {
-    const db = new Database('boredom.db');
-    const result = db.run('DELETE FROM boredom_settings WHERE user_id = ?', [userId]);
-    db.close();
-    
-    if (result.changes > 0) {
-      boredomSettingsDeleted = true;
-      console.log(`  ✓ Deleted boredom settings (${result.changes} guild(s))`);
-    } else {
-      console.log('  ℹ No boredom settings to delete');
-    }
-  } catch (error) {
-    console.error('  ✗ Error deleting boredom settings:', error);
-  }
-  
-  return { userId, username, opinionsDeleted, conversationsCleared, boredomSettingsDeleted };
+  console.error('\n`new Database()` creates a missing file, so continuing would wipe a brand-new');
+  console.error('empty database and report success. Start the bot once to create its databases,');
+  console.error('or check that DATA_DIR points at the directory the bot actually uses.');
+  return false;
 }
 
 /**
- * Main function
+ * Every row that mentions a user, from both databases.
+ *
+ * The previous version ran `LOWER(username) = LOWER(?) LIMIT 1`. Because
+ * `username` is populated from `member.displayName` — a per-guild nickname,
+ * not a unique account handle — that could select a completely different
+ * person, and then permanently delete their memories. Collecting all rows lets
+ * the resolver refuse instead of guessing.
  */
-async function main() {
-  // Filter out --force from args for processing
-  const cleanArgs = args.filter(arg => arg !== '--force');
-  
-  if (cleanArgs.length === 0) {
-    console.log(`
+function collectUserRefs(): UserRefRow[] {
+  interface RawRow {
+    user_id?: string | null;
+    username?: string | null;
+    guild_id?: string | null;
+  }
+
+  const raw: RawRow[] = [];
+
+  const memories = openDatabase(USER_MEMORIES_PATH);
+  try {
+    raw.push(...(memories.query('SELECT user_id, username, guild_id FROM user_opinions').all() as RawRow[]));
+    if (tableExists(memories, 'user_memory_entries')) {
+      // `user_memory_entries` has no username column in the current schema, so
+      // rows from here carry the id and scope only; the resolver merges them
+      // with the names already seen for the same id.
+      raw.push(
+        ...(memories
+          .query('SELECT user_id, NULL AS username, guild_id FROM user_memory_entries')
+          .all() as RawRow[])
+      );
+    }
+  } finally {
+    memories.close();
+  }
+
+  const conversations = openDatabase(CONVERSATIONS_PATH);
+  try {
+    raw.push(...(conversations.query('SELECT user_id, username, guild_id FROM conversation_messages').all() as RawRow[]));
+  } finally {
+    conversations.close();
+  }
+
+  const refs: UserRefRow[] = [];
+  for (const row of raw) {
+    if (typeof row.user_id !== 'string') continue;
+    refs.push({
+      userId: row.user_id,
+      username: typeof row.username === 'string' ? row.username : '',
+      scope: typeof row.guild_id === 'string' ? row.guild_id : undefined,
+    });
+  }
+  return refs;
+}
+
+/**
+ * Read what is about to be destroyed.
+ *
+ * This deliberately does **not** swallow errors. It previously caught every
+ * exception and reported `false`/`0`, so a broken query was displayed to the
+ * operator as "this user has no memories" immediately before the wipe — the
+ * exact moment where a wrong answer is most dangerous.
+ */
+function getUserStats(userId: string): UserStats {
+  const memories = openDatabase(USER_MEMORIES_PATH);
+  let opinionProfiles: number;
+  let memoryEntries = 0;
+  let thirdPartyEntries = 0;
+
+  try {
+    opinionProfiles = countRows(memories, 'SELECT COUNT(*) AS count FROM user_opinions WHERE user_id = ?', userId);
+    if (tableExists(memories, 'user_memory_entries')) {
+      memoryEntries = countRows(memories, 'SELECT COUNT(*) AS count FROM user_memory_entries WHERE user_id = ?', userId);
+      thirdPartyEntries = countRows(
+        memories,
+        "SELECT COUNT(*) AS count FROM user_memory_entries WHERE user_id = ? AND kind = 'third_party'",
+        userId
+      );
+    }
+  } finally {
+    memories.close();
+  }
+
+  const conversations = openDatabase(CONVERSATIONS_PATH);
+  let conversationMessages: number;
+  let guilds: string[];
+  try {
+    conversationMessages = countRows(
+      conversations,
+      'SELECT COUNT(*) AS count FROM conversation_messages WHERE user_id = ?',
+      userId
+    );
+    guilds = (conversations
+      .query('SELECT DISTINCT guild_id FROM conversation_messages WHERE user_id = ? ORDER BY guild_id')
+      .all(userId) as Array<{ guild_id: string }>).map(row => row.guild_id);
+  } finally {
+    conversations.close();
+  }
+
+  return { opinionProfiles, memoryEntries, thirdPartyEntries, conversationMessages, guilds };
+}
+
+interface WipeCounts {
+  opinionProfilesDeleted: number;
+  memoryEntriesDeleted: number;
+  conversationMessagesDeleted: number;
+}
+
+/**
+ * Build the deletion steps.
+ *
+ * Each database's work is wrapped in its own transaction: a partial failure
+ * must not leave memories deleted from one table but not another in the same
+ * file. `user_opinions` holds the opinion, pronouns and third-party context
+ * columns; `user_memory_entries` holds the individual rows those blobs were
+ * split into, so both have to go for erasure to be complete.
+ */
+function buildWipeSteps(userId: string, counts: WipeCounts): DestructiveStep[] {
+  return [
+    {
+      name: 'user memories (opinion, pronouns, third-party context, memory entries)',
+      run: () => {
+        const memories = openDatabase(USER_MEMORIES_PATH);
+        try {
+          memories.run('BEGIN');
+          try {
+            if (tableExists(memories, 'user_memory_entries')) {
+              counts.memoryEntriesDeleted = memories.run(
+                'DELETE FROM user_memory_entries WHERE user_id = ?',
+                [userId]
+              ).changes;
+            }
+            counts.opinionProfilesDeleted = memories.run(
+              'DELETE FROM user_opinions WHERE user_id = ?',
+              [userId]
+            ).changes;
+            memories.run('COMMIT');
+          } catch (error) {
+            memories.run('ROLLBACK');
+            throw error;
+          }
+        } finally {
+          memories.close();
+        }
+      },
+    },
+    {
+      name: 'conversation history (all guilds)',
+      run: () => {
+        const conversations = openDatabase(CONVERSATIONS_PATH);
+        try {
+          conversations.run('BEGIN');
+          try {
+            counts.conversationMessagesDeleted = conversations.run(
+              'DELETE FROM conversation_messages WHERE user_id = ?',
+              [userId]
+            ).changes;
+            conversations.run('COMMIT');
+          } catch (error) {
+            conversations.run('ROLLBACK');
+            throw error;
+          }
+        } finally {
+          conversations.close();
+        }
+      },
+    },
+  ];
+}
+
+function describeCandidate(candidate: UserCandidate): string {
+  const names = candidate.usernames.length > 0 ? candidate.usernames.join(' / ') : '(no display name)';
+  const guilds = candidate.scopes.length > 0 ? candidate.scopes.join(', ') : 'unknown';
+  return `  ${candidate.userId}  "${names}"  [guilds: ${guilds}]`;
+}
+
+function printUsage(): void {
+  console.log(`
 🧹 Lumia Memory Wipe Tool
 
-Usage: bun run src/scripts/wipe-memories.ts <username_or_userid>
+Usage:
+  bun run wipe-memories <discord_user_id> [--force]
+  bun run wipe-memories <display_name>   [--force] [--dry-run]
 
-Examples:
-  bun run src/scripts/wipe-memories.ts Prolix
-  bun run src/scripts/wipe-memories.ts 123456789012345678
+Options:
+  --force      Skip the interactive confirmation. Required in any non-interactive
+               shell (cron, CI, a piped heredoc). Nothing about the environment
+               implies consent any more.
+  --dry-run    Show exactly what would be deleted, then exit without writing.
 
-This will delete:
-  - User opinions and memories
-  - Conversation history (all guilds)
-  - Boredom settings
-  - Pronouns and third-party context
+This permanently deletes, for one Discord user:
+  - their long-term opinion profile, pronouns and third-party context
+  - every individual memory entry recorded about them
+  - their conversation messages in every guild
 
-⚠️  This action cannot be undone!
-    `);
-    process.exit(1);
-  }
-  
-  const identifier = cleanArgs[0]!;
-  
-  console.log(`\n🔍 Searching for user: ${identifier}...`);
-  
-  const user = findUser(identifier);
-  
-  if (!user) {
-    console.log('\n❌ User not found in any database');
-    console.log('\nTip: Try using the exact Discord username or User ID');
-    process.exit(1);
-  }
-  
-  console.log(`\n✓ Found user: ${user.username} (${user.userId})`);
-  
-  // Get current info before wiping
-  const info = getUserInfo(user.userId);
-  
-  console.log('\n📊 Current Memory State:');
-  console.log(`  Has opinion: ${info.hasOpinion ? 'Yes' : 'No'}`);
-  console.log(`  Conversation messages: ${info.conversationCount}`);
-  console.log(`  Guilds with history: ${info.guilds.length > 0 ? info.guilds.join(', ') : 'None'}`);
-  console.log(`  Boredom enabled: ${info.boredomEnabled === null ? 'N/A' : info.boredomEnabled ? 'Yes' : 'No'}`);
-  
-  // Confirm before wiping
-  console.log('\n⚠️  WARNING: This will permanently delete all memories for this user!');
-  console.log('   This action cannot be undone.\n');
-  
-  // Check if running in CI/non-interactive mode
-  if (process.env.CI || process.env.FORCE_WIPE) {
-    console.log('Running in non-interactive mode (CI/FORCE_WIPE set), proceeding with wipe...\n');
-  } else {
-    console.log('To confirm, type the username: ');
-    
-    // Simple confirmation for now - in production you might want to use readline
-    // For now, require --force flag or CI environment
-    console.log('\nAdd --force flag to skip confirmation:');
-    console.log(`  bun run src/scripts/wipe-memories.ts ${identifier} --force\n`);
-    process.exit(0);
-  }
-  
-  // Perform the wipe
-  const result = wipeUserMemories(user.userId, user.username);
-  
-  // Summary
-  console.log('\n' + '='.repeat(50));
-  console.log('WIPE COMPLETE');
-  console.log('='.repeat(50));
-  console.log(`User: ${result.username} (${result.userId})`);
-  console.log(`Opinions deleted: ${result.opinionsDeleted ? 'Yes' : 'No'}`);
-  console.log(`Messages cleared: ${result.conversationsCleared}`);
-  console.log(`Boredom settings deleted: ${result.boredomSettingsDeleted ? 'Yes' : 'No'}`);
-  console.log('='.repeat(50));
-  console.log('\n✨ All memories have been wiped. Lumia will treat this user as a new acquaintance.\n');
+Deletion by display name resolves to a Discord user ID first and prints it for
+confirmation; a name shared by more than one account is refused.
+
+⚠️  There is no undo. Take a copy of the database first if you might need it.
+  `);
 }
 
-main().catch(console.error);
+async function main(): Promise<void> {
+  const parsed = parseArgs(process.argv.slice(2));
+
+  if (wantsHelp(parsed)) {
+    printUsage();
+    return;
+  }
+
+  if (parsed.unknownFlags.length > 0) {
+    console.error(`❌ Unknown option(s): ${parsed.unknownFlags.join(', ')}`);
+    console.error('A mistyped flag must not silently run a destructive script.');
+    printUsage();
+    process.exitCode = 1;
+    return;
+  }
+
+  if (parsed.positional.length === 0) {
+    printUsage();
+    process.exitCode = 1;
+    return;
+  }
+
+  if (parsed.positional.length > 1) {
+    console.error('❌ Expected exactly one user identifier. Ambiguous input is refused rather than guessed.');
+    process.exitCode = 1;
+    return;
+  }
+
+  const identifier = parsed.positional[0]!;
+  const force = parsed.flags.has('--force');
+  const dryRun = parsed.flags.has('--dry-run');
+
+  if (!assertDatabasesExist()) {
+    process.exitCode = 1;
+    return;
+  }
+
+  console.log(`\n🔍 Resolving "${identifier}"...`);
+
+  const resolution = resolveTarget(identifier, mergeUserCandidates(collectUserRefs()));
+
+  if (resolution.status === 'ambiguous') {
+    console.error(`\n❌ "${resolution.identifier}" matches ${resolution.candidates.length} different Discord accounts:`);
+    for (const candidate of resolution.candidates) console.error(describeCandidate(candidate));
+    console.error('\nDisplay names are per-guild nicknames and are not unique, so this script refuses to');
+    console.error('guess which one you meant. Re-run with the numeric Discord user ID.');
+    console.error('Nothing was changed.');
+    process.exitCode = 1;
+    return;
+  }
+
+  if (resolution.status === 'not-found') {
+    console.error(`\n❌ No stored data found for "${identifier}".`);
+    console.error('Nothing was changed. Check the ID, or confirm the bot has ever seen this user.');
+    process.exitCode = 1;
+    return;
+  }
+
+  const target = resolution.candidate;
+  const username = target.usernames[0] ?? target.userId;
+
+  // Echo the numeric ID even when the operator supplied a name: the ID is the
+  // only handle that cannot be ambiguous, so it is what they must confirm.
+  console.log(`\n✓ Resolved to Discord user ID ${target.userId}`);
+  console.log(`  Display name(s): ${target.usernames.length > 0 ? target.usernames.join(' / ') : '(none recorded)'}`);
+  console.log(`  Guild scopes:    ${target.scopes.length > 0 ? target.scopes.join(', ') : 'none recorded'}`);
+
+  let stats: UserStats;
+  try {
+    stats = getUserStats(target.userId);
+  } catch (error) {
+    console.error('\n❌ Could not read the current memory state:', error);
+    console.error('Refusing to wipe: a failed lookup is indistinguishable from an empty one, and the');
+    console.error('summary you would be shown right now would be a guess. Nothing was changed.');
+    process.exitCode = 1;
+    return;
+  }
+
+  console.log('\n📊 What would be deleted:');
+  console.log(`  Opinion profiles (incl. pronouns, third-party context): ${stats.opinionProfiles}`);
+  console.log(`  Individual memory entries:                             ${stats.memoryEntries}`);
+  console.log(`  ...of which third-party references:                    ${stats.thirdPartyEntries}`);
+  console.log(`  Conversation messages:                                  ${stats.conversationMessages}`);
+  console.log(`  Guilds with history:                                    ${stats.guilds.length > 0 ? stats.guilds.join(', ') : 'none'}`);
+
+  const totalRecords =
+    stats.opinionProfiles + stats.memoryEntries + stats.conversationMessages;
+
+  if (totalRecords === 0) {
+    console.log('\nℹ No stored records for this user. Nothing to wipe.');
+    return;
+  }
+
+  if (dryRun) {
+    console.log(`\n🏃 Dry run: ${totalRecords} record(s) would be deleted. No changes made.`);
+    return;
+  }
+
+  console.log('\n⚠️  WARNING: this permanently deletes all stored data for this user.');
+  console.log(`   Target Discord user ID: ${target.userId}`);
+  console.log('   This cannot be undone.\n');
+
+  const decision = decideConfirmation({
+    force,
+    interactive: isInteractive(),
+    userId: target.userId,
+    username,
+  });
+
+  if (!decision.allowed) {
+    console.error(`❌ ${decision.reason}`);
+    console.error(`\nTo proceed anyway: bun run wipe-memories ${target.userId} --force`);
+    console.error('To preview first:   bun run wipe-memories ' + target.userId + ' --dry-run');
+    process.exitCode = 1;
+    return;
+  }
+
+  if (decision.mode === 'prompt') {
+    const answer = await readConfirmationLine(
+      `Type the Discord user ID to confirm deletion (${target.userId}): `
+    );
+
+    if (answer === null || !matchesConfirmation(answer, { userId: target.userId, username })) {
+      console.error('\n❌ Confirmation did not match. Aborting; nothing was deleted.');
+      process.exitCode = 1;
+      return;
+    }
+  } else {
+    console.log('Confirmation skipped because --force was given.');
+  }
+
+  const counts: WipeCounts = {
+    opinionProfilesDeleted: 0,
+    memoryEntriesDeleted: 0,
+    conversationMessagesDeleted: 0,
+  };
+
+  const result = await runDestructiveSteps(buildWipeSteps(target.userId, counts));
+
+  console.log('\n' + '='.repeat(60));
+
+  if (result.failed.length > 0) {
+    // The previous version printed "WIPE COMPLETE" regardless of what had
+    // actually happened, which told the operator (and CI) that a partial,
+    // possibly inconsistent deletion had fully succeeded.
+    console.log('WIPE INCOMPLETE');
+    console.log('='.repeat(60));
+    console.log(`Target: ${username} (${target.userId})`);
+    console.log('\nThe following steps FAILED:');
+    for (const failure of result.failed) {
+      console.error(`  ✗ ${failure.name}: ${failure.error}`);
+    }
+    console.log('\nPartial results:');
+    console.log(`  Opinion profiles deleted: ${counts.opinionProfilesDeleted}`);
+    console.log(`  Memory entries deleted:   ${counts.memoryEntriesDeleted}`);
+    console.log(`  Messages deleted:         ${counts.conversationMessagesDeleted}`);
+    console.log('\n⚠️  Data for this user may still partially exist. Re-run the script, or restore');
+    console.log('    from a backup, before considering the erasure complete.');
+    process.exitCode = 1;
+    return;
+  }
+
+  console.log('WIPE COMPLETE');
+  console.log('='.repeat(60));
+  console.log(`User: ${username} (${target.userId})`);
+  console.log(`Opinion profiles deleted: ${counts.opinionProfilesDeleted}`);
+  console.log(`Memory entries deleted:   ${counts.memoryEntriesDeleted}`);
+  console.log(`Messages deleted:         ${counts.conversationMessagesDeleted}`);
+  console.log('='.repeat(60));
+  console.log('\n✨ All stored memories, pronouns, third-party context and conversation history');
+  console.log('   for this user have been removed.\n');
+}
+
+main().catch(error => {
+  console.error('❌ Fatal error:', error);
+  process.exitCode = 1;
+});
