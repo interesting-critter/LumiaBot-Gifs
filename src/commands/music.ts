@@ -729,95 +729,6 @@ function formatDate(isoString: string): string {
   });
 }
 
-async function handleNowPlaying(interaction: ChatInputCommandInteraction) {
-     await interaction.deferReply();
-
-     if (!navidromeService.isAvailable()) {
-       await interaction.editReply({
-         content: '❌ Navidrome is not configured. Please set NAVIDROME_URL, NAVIDROME_USER, and NAVIDROME_PASSWORD in your environment.',
-       });
-       return;
-     }
-
-     try {
-       const nowPlaying = await navidromeService.getNowPlaying();
-
-       if (nowPlaying.length === 0) {
-         await interaction.editReply({
-           content: '🎧 Nothing is currently playing on Navidrome.',
-         });
-         return;
-       }
-
-       const embed = new EmbedBuilder()
-         .setTitle('🎧 Currently Playing on Navidrome')
-         .setColor(0x00A4DC);
-
-       const current = nowPlaying[0];
-       embed.setDescription(`**${current.title}**\nby **${current.artist}**`);
-       embed.addFields(
-         { name: '💿 Album', value: current.album, inline: true },
-         { name: '👤 Listener', value: current.username, inline: true },
-         { name: '⏱️ Status', value: current.minutesAgo === 0 ? 'Playing now' : `Played ${current.minutesAgo}m ago`, inline: true }
-       );
-
-       const files: AttachmentBuilder[] = [];
-
-       if (current.coverArt) {
-         const artBuffer = await navidromeService.getCoverArtBuffer(current.coverArt);
-         if (artBuffer) {
-           const attachment = new AttachmentBuilder(artBuffer, { name: 'cover.jpg' });
-           embed.setThumbnail('attachment://cover.jpg');
-           files.push(attachment);
-         }
-       }
-
-       if (nowPlaying.length > 1) {
-         const otherTracks = nowPlaying.slice(1, 4).map(
-           (t) => `• **${t.title}** - ${t.artist} (${t.username})`
-         ).join('\n');
-         embed.addFields({ name: 'Also Active', value: otherTracks });
-       }
-
-       // Button to load lyrics
-       const lyricsButtonRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
-         new ButtonBuilder()
-           .setCustomId(`navidrome_lyrics_${interaction.id}`)
-           .setLabel('📜 Show Lyrics')
-           .setStyle(ButtonStyle.Secondary)
-       );
-
-       const responseMsg = await interaction.editReply({
-         embeds: [embed],
-         files,
-         components: [lyricsButtonRow],
-       });
-
-       // Create button collector for the lyrics
-       const collector = responseMsg.createMessageComponentCollector({
-         componentType: ComponentType.Button,
-         time: 120_000, // 2 minutes
-       });
-
-       collector.on('collect', async (btnInteraction) => {
-         if (btnInteraction.customId === `navidrome_lyrics_${interaction.id}`) {
-           await handleShowLyrics(btnInteraction, current.artist, current.title);
-         }
-       });
-
-       collector.on('end', () => {
-         lyricsButtonRow.components.forEach((c) => c.setDisabled(true));
-         interaction.editReply({ components: [lyricsButtonRow] }).catch(() => {});
-       });
-     } catch (error) {
-       console.error('❌ [NAVIDROME] Error:', error);
-       const message = error instanceof Error ? error.message : 'Unknown error';
-       await interaction.editReply({
-         content: `❌ Failed to fetch from Navidrome: ${message}`,
-       });
-     }
-}
-
 /**
  * Handles fetching and paginating lyrics in an interactive embed
  */
@@ -842,6 +753,16 @@ async function handleNowPlaying(interaction: ChatInputCommandInteraction) {
     }
 
     const current = nowPlaying[0];
+
+    // The length check above already guarantees this is defined; the guard only
+    // satisfies noUncheckedIndexedAccess and keeps a malformed response from
+    // throwing on a deferred interaction.
+    if (!current) {
+      await interaction.editReply({
+        content: '🎧 Nothing is currently playing on Navidrome.',
+      });
+      return;
+    }
 
     // Fetch lyrics directly for the track
     const rawLyrics = await navidromeService.getLyrics(current.artist, current.title);

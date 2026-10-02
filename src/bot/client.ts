@@ -16,6 +16,8 @@ import type { MessageContext, ReplyContext, MediaAttachment, TextAttachment, Res
 import type { ResolvedUserMention, ResolveUserMention } from '../services/user-mention-resolver';
 import type { GeneratedImageAttachment } from '../services/swarmui';
 import { navidromeService } from '../services/navidrome';
+import { rateLimiterService } from '../services/rate-limiter';
+import type { InteractionSource } from '../services/dashboard-logger';
 
 export interface Command {
   data: {
@@ -203,6 +205,41 @@ function isDiscordNsfwChannel(channel: Message['channel'] | Channel | null | und
   }
 
   return false;
+}
+
+/**
+ * Classify why the bot woke up, for the dashboard's activity log.
+ * Priority: explicit reply to the bot > direct mention > keyword trigger.
+ */
+function resolveInteractionSource(
+  content: string,
+  botId: string,
+  isReplyToBot: boolean,
+): InteractionSource {
+  if (isReplyToBot) {
+    return 'reply';
+  }
+  if (new RegExp(`<@!?${botId}>`).test(content)) {
+    return 'mention';
+  }
+  return 'keyword';
+}
+
+/**
+ * Best-effort human-readable channel name. Threads report their parent channel
+ * so the log groups activity by the space users actually think of.
+ */
+function getChannelDisplayName(channel: Message['channel'] | null | undefined): string | undefined {
+  if (!channel) {
+    return undefined;
+  }
+  if (channel instanceof ThreadChannel) {
+    return channel.parent?.name ?? channel.name;
+  }
+  if ('name' in channel && typeof channel.name === 'string') {
+    return channel.name;
+  }
+  return undefined;
 }
 
 function canUserRequestNsfwImages(channel: Message['channel'], userId?: string): boolean {
@@ -767,6 +804,10 @@ ${sections.join('\n\n')}
           ? (evtId, currentTurnId, targetBotId, reason) => this.orchestrator!.requestFollowUp(evtId, currentTurnId, targetBotId, reason)
           : undefined,
         requestCollectiveKnowledge,
+        source: 'orchestrator',
+        channelId: message.channelId,
+        channelName: getChannelDisplayName(message.channel),
+        guildName: message.guild?.name,
       });
 
       if (response.text && this.isDuplicateOrchestratorResponse(response.text, context)) {
@@ -801,6 +842,10 @@ ${sections.join('\n\n')}
             ? (evtId, currentTurnId, targetBotId, reason) => this.orchestrator!.requestFollowUp(evtId, currentTurnId, targetBotId, reason)
             : undefined,
           requestCollectiveKnowledge,
+          source: 'orchestrator',
+          channelId: message.channelId,
+          channelName: getChannelDisplayName(message.channel),
+          guildName: message.guild?.name,
         });
       }
 
@@ -1425,6 +1470,16 @@ ${sections.join('\n\n')}
       }
 
       if (shouldTrigger) {
+        if (rateLimiterService.isRateLimited(message.author.id, message.member)) {
+          try {
+            const resolvedEmoji = this.resolveEmojiReaction(config.rateLimit.emoji, message.guild ?? undefined);
+            await message.react(resolvedEmoji);
+          } catch (err) {
+            console.warn(`⚠️ [CLIENT] Failed to add rate limit reaction:`, err);
+          }
+          return;
+        }
+
         // Check if orchestrator should handle this mention
         if (this.shouldUseOrchestrator(message)) {
           await this.handleOrchestratedMention(message, replyContext);
@@ -1743,6 +1798,10 @@ ${sections.join('\n\n')}
         isNsfwChannel,
         allowNsfwImageGeneration,
         requestCollectiveKnowledge,
+        source: resolveInteractionSource(message.content, botId, replyContext?.isReplyToLumia === true),
+        channelId: message.channelId,
+        channelName: getChannelDisplayName(message.channel),
+        guildName: message.guild?.name,
       });
 
       // Clear typing indicator before sending response

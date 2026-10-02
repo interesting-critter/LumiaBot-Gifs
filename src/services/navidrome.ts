@@ -12,6 +12,37 @@ export interface NavidromeNowPlayingEntry {
   coverArt?: string;
 }
 
+/**
+ * Minimal shape of the Subsonic JSON API responses this service consumes.
+ * Documenting them keeps the parsed payloads typed instead of `unknown`.
+ */
+interface SubsonicNowPlayingEntry {
+  id: string;
+  title?: string;
+  artist?: string;
+  album?: string;
+  username?: string;
+  minutesAgo?: number;
+  duration?: number;
+  coverArt?: string;
+}
+
+interface SubsonicLyrics {
+  content?: string;
+  value?: string;
+}
+
+interface SubsonicResponseBody {
+  status?: string;
+  error?: { message?: string };
+  nowPlaying?: { entry?: SubsonicNowPlayingEntry | SubsonicNowPlayingEntry[] };
+  lyrics?: string | SubsonicLyrics;
+}
+
+interface SubsonicEnvelope {
+  'subsonic-response'?: SubsonicResponseBody;
+}
+
 export class NavidromeService {
   private get baseUrl(): string {
     return (config.navidrome.url || '').replace(/\/+$/, '');
@@ -56,7 +87,7 @@ export class NavidromeService {
       throw new Error(`Navidrome HTTP error: ${res.status} ${res.statusText}`);
     }
 
-    const json = await res.json();
+    const json = (await res.json()) as SubsonicEnvelope;
     const response = json?.['subsonic-response'];
 
     if (!response || response.status !== 'ok') {
@@ -71,7 +102,7 @@ export class NavidromeService {
 
     const list = Array.isArray(entries) ? entries : [entries];
 
-    return list.map((item: any) => ({
+    return list.map((item) => ({
       id: item.id,
       title: item.title || 'Unknown Title',
       artist: item.artist || 'Unknown Artist',
@@ -114,7 +145,7 @@ export class NavidromeService {
       const res = await fetch(url);
       if (!res.ok) return null;
 
-      const json = await res.json();
+      const json = (await res.json()) as SubsonicEnvelope;
       const lyricsData = json?.['subsonic-response']?.lyrics;
       if (!lyricsData) return null;
 
@@ -139,7 +170,10 @@ export class NavidromeService {
       const nowPlaying = await this.getNowPlaying();
       if (!nowPlaying || nowPlaying.length === 0) return null;
 
+      // The length check above guarantees this exists; the guard just satisfies
+      // noUncheckedIndexedAccess and keeps a malformed response from throwing.
       const current = nowPlaying[0];
+      if (!current) return null;
 
       return {
         source: 'spotify', // Set to 'spotify' so existing tool formatters recognize title/artist/album/lyrics

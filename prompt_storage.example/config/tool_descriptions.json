@@ -1,8 +1,4 @@
 {
-  "boredomPreference": {
-    "name": "set_boredom_preference",
-    "description": "Enable or disable random boredom pings from {botName}. When enabled, {botName} will occasionally send friendly messages to active users."
-  },
   "queryKnowledgeBase": {
     "name": "query_knowledge_base",
     "description": "Search through accumulated knowledge, memories, and previous conversations to find relevant information."

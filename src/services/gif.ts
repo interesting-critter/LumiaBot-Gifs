@@ -71,6 +71,9 @@ export class GifService {
       const html = await res.text();
       const candidates = [...html.matchAll(/<img[^>]+src="([^"]+\.gif)"/g)]
         .map((match) => match[1])
+        // Group 1 is a required capture, so this never drops anything; it only
+        // narrows the type for noUncheckedIndexedAccess.
+        .filter((candidate): candidate is string => Boolean(candidate))
         .slice(0, 4)
         .sort(() => Math.random() - 0.5);
 
