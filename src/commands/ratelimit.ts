@@ -1,21 +1,21 @@
-import { SlashCommandBuilder, ChatInputCommandInteraction, PermissionFlagsBits, MessageFlags } from 'discord.js';
+import { SlashCommandBuilder, ChatInputCommandInteraction, MessageFlags } from 'discord.js';
 import { rateLimiterService } from '../services/rate-limiter';
-import { config } from '../utils/config';
+import { canRunPrivilegedCommand } from '../utils/permissions';
 import type { Command } from '../bot/client';
 
 const rateLimitCommand: Command = {
   data: new SlashCommandBuilder()
     .setName('ratelimit')
-    .setDescription('Manage bot chat rate limiting (Mod Only)')
+    .setDescription('Manage bot chat rate limiting (Owner or trusted role)')
     .addSubcommand((subcommand) =>
       subcommand
         .setName('status')
-        .setDescription('View current rate limit configuration (Mod Only)')
+        .setDescription('View current rate limit configuration (Owner or trusted role)')
     )
     .addSubcommand((subcommand) =>
       subcommand
         .setName('set')
-        .setDescription('Set rate limit window in seconds (Mod Only)')
+        .setDescription('Set rate limit window in seconds (Owner or trusted role). Survives a restart.')
         .addIntegerOption((opt) =>
           opt
             .setName('seconds')
@@ -26,16 +26,9 @@ const rateLimitCommand: Command = {
     ) as SlashCommandBuilder,
 
   async execute(interaction: ChatInputCommandInteraction) {
-    const isOwner = interaction.user.id === config.bot.ownerId;
-    const isServerOwner = interaction.guild?.ownerId === interaction.user.id;
-    const hasAdminOrBanPerms = Boolean(
-      interaction.memberPermissions?.has(PermissionFlagsBits.BanMembers) ||
-      interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)
-    );
-
-    if (!isOwner && !isServerOwner && !hasAdminOrBanPerms) {
+    if (!canRunPrivilegedCommand(interaction.user.id, interaction.member)) {
       await interaction.reply({
-        content: '❌ You must be the bot owner or a mod to use this command.',
+        content: '❌ You must be the bot owner or hold a trusted role to use this command.',
         flags: MessageFlags.Ephemeral,
       });
       return;
@@ -57,7 +50,9 @@ const rateLimitCommand: Command = {
 **Window:** ${seconds} second(s) per request
 **Max Requests:** 1 per window
 **Exempt Roles:** ${exemptFormatted}
-**Owner Exempt:** Yes`,
+**Owner Exempt:** Yes
+
+_These roles also grant access to \`/ratelimit\` and \`/boredom\`._`,
           flags: MessageFlags.Ephemeral,
         });
         break;

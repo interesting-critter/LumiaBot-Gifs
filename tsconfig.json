@@ -14,6 +14,12 @@
     "verbatimModuleSyntax": true,
     "noEmit": true,
 
+    // Explicit because TypeScript 7 no longer auto-includes every package under
+    // node_modules/@types the way 5.x did. Without this, `Bun`, `Timer`,
+    // `bun:sqlite` and `import.meta.dir` all fail to resolve, producing ~35
+    // spurious errors across src/. Verified against both TS 5.9.3 and 7.0.2.
+    "types": ["bun", "node"],
+
     // Best practices
     "strict": true,
     "skipLibCheck": true,

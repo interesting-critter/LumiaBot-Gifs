@@ -143,6 +143,18 @@ export const config = {
   },
   rateLimit: {
     seconds: parseInt(process.env.RATE_LIMIT_SECONDS || '60', 10),
+    /**
+     * Deliberately shared with command authorisation.
+     *
+     * `RATE_LIMIT_EXEMPT_ROLES` means "trusted": members holding any of these
+     * roles both bypass chat rate limiting AND may run the privileged mod
+     * commands (`/ratelimit`, `/boredom`). One list, one meaning — do not split
+     * it into two env vars. The name only describes the original use, so treat
+     * it as the trusted-role list when reading it.
+     *
+     * Consequence: when this is empty, `/ratelimit` and `/boredom` are
+     * owner-only, because the bot owner bypasses it explicitly.
+     */
     exemptRoles: (process.env.RATE_LIMIT_EXEMPT_ROLES || '')
       .split(',')
       .map((r) => r.trim())

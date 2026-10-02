@@ -32,6 +32,7 @@ import {
   getNsfwGuidelines
 } from './prompts';
 import { apiUsageService } from './api-usage';
+import { formatPromptForLog } from './dashboard-logger';
 
 // Moonshot pricing (per million tokens)
 const COST_INPUT_PER_M  = 0.90;  // cache miss / regular input
@@ -145,6 +146,12 @@ export interface ChatCompletionOptions {
   allowNsfwImageGeneration?: boolean;
   isGifEnabled?: boolean;
   onImageGenerated?: (image: GeneratedImageAttachment) => void;
+  /**
+   * Called with the exact payload handed to the provider, rendered as readable
+   * text, once the system prompt and message array are final. Only the
+   * non-streaming path fires it, which is the path the bot turn uses.
+   */
+  onFullPrompt?: (fullPrompt: string) => void;
 }
 
 export interface ToolExecutionSnapshot {
@@ -163,6 +170,28 @@ export interface ToolExecutionSnapshot {
   status: 'success' | 'error';
   reason?: string;
   error?: string;
+}
+
+/**
+ * Flattens a message `content` field, which is either a plain string or an
+ * array of content parts, into text for the dashboard's full-prompt view.
+ */
+function extractTextContent(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => {
+        if (typeof part === 'string') return part;
+        const p = part as { type?: string; text?: string };
+        if (p && typeof p.text === 'string') return p.text;
+        if (p && p.type === 'image_url') return '[image]';
+        if (p && p.type === 'input_audio') return '[audio]';
+        return '';
+      })
+      .filter(Boolean)
+      .join('\n');
+  }
+  return content === undefined || content === null ? '' : String(content);
 }
 
 let lastToolExecutionSnapshot: ToolExecutionSnapshot | null = null;
@@ -1079,6 +1108,25 @@ If they mention @OtherUser, they are talking TO that user, not AS them.`;
     ];
 
     // Clean up uploaded videos after use (in finally block later)
+
+    // Hand the caller the final payload for the dashboard log. Taken here,
+    // after the prefix and multimodal conversion, so it is what the provider
+    // actually receives rather than a reconstruction of it.
+    if (options.onFullPrompt) {
+      try {
+        options.onFullPrompt(
+          formatPromptForLog(
+            systemPrompt,
+            enhancedMessages.map((m) => ({
+              role: String((m as { role?: string }).role ?? 'user'),
+              content: extractTextContent((m as { content?: unknown }).content),
+            }))
+          )
+        );
+      } catch (promptLogError) {
+        console.error('⚠️ [OPENAI] Failed to capture full prompt for the dashboard log:', promptLogError);
+      }
+    }
 
     const provider: 'moonshot' | 'other' = isMoonshotProvider() ? 'moonshot' : 'other';
     const moonshotThinkingModel = isMoonshotThinkingModel();

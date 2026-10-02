@@ -215,7 +215,7 @@ Once the bot is running and invited to your server, use these slash commands:
   - `category`: (Optional) Filter by category (general, images, news, science, files)
   - `timerange`: (Optional) Filter by time (day, month, year)
 
-- **`/ratelimit status|set <seconds>`** - View or change the chat rate limit (owner/mod only)
+- **`/ratelimit status|set <seconds>`** - View or change the chat rate limit (owner or trusted role)
 
 ## Rate Limiting
 
@@ -246,9 +246,26 @@ No API call is made for the reaction itself.
 /ratelimit set 15        # 15-second window
 ```
 
-Setting the window to `1` effectively turns limiting off. Both subcommands are
-restricted to the bot owner, the server owner, and users with Administrator or
-Ban Members permissions.
+`/ratelimit set` persists to `dashboard_settings.db`, so the value survives a
+restart. To go back to the environment default, change `RATE_LIMIT_SECONDS` and
+restart. The minimum window is 1 second, which still allows one request per
+second — it does not disable limiting entirely.
+
+**Access to privileged commands**
+
+`/ratelimit` and `/boredom` are restricted to the **bot owner** and members of a
+role listed in `RATE_LIMIT_EXEMPT_ROLES`. That list is deliberately shared: it is
+the single set of "trusted" roles, used both to bypass rate limiting and to
+authorise these commands.
+
+> **Note:** this is a change from earlier versions, where a guild's owner and
+> anyone with Administrator or Ban Members could also run these commands. Those
+> permissions were removed because `/boredom interval`, `/boredom trigger` and
+> `/ratelimit set` all write **global** bot state — a server admin could otherwise
+> reconfigure the bot for every other server it is in. Guild-scoped permissions
+> cannot authorise global writes.
+>
+> If `RATE_LIMIT_EXEMPT_ROLES` is empty, both commands are owner-only.
 
 ## Dashboard
 
@@ -265,19 +282,56 @@ from `PORT` so it never collides with the orchestrator websocket.
 
 **Tabs**
 
-- **Overview** — The active model (switchable, see below), LLM request count,
-  activation count, average response time, and error count for the rolling window;
-  a requests-per-day usage bar; bot, guild, and orchestrator status; current
-  rate-limit settings.
+A bottom bar carries the four you reach for daily, with everything else behind
+**More**. The same four appear as a left rail from 64rem.
+
+- **Overview** — Activation count for the rolling window, an hour-by-hour
+  activity chart, the most recent turn, people / reply time / failures, the
+  active model (switchable, see below), the request budget, per-model request
+  counts, and bot, guild, orchestrator and rate-limit details.
 - **Log** — Every activation within the rolling window (default 12h) with the
   exact prompt, the response, the trigger type (mention / keyword / reply /
   orchestrator / boredom), timestamps, and how long the turn took. Searchable
-  and filterable, with collapsible entries.
+  and filterable, with collapsible entries. The collapsed view shows only the
+  user's own message; opening an entry adds a **Full prompt sent to the model**
+  disclosure with the complete payload as it was transmitted — the assembled
+  system prompt (identity, guidelines, memory, knowledge, attached files) plus
+  every turn, including the datetime reminder prefix. A **Latency and busiest
+  hours** panel adds p50/p95/p99 reply time, an hour-of-day heatmap, and people
+  and channel leaderboards.
+
+  The payload is captured by the AI service at the moment it hands the request
+  to the provider, so it reflects the real thing rather than a reconstruction.
+  Turns that fail before the model is reached have no payload, and the
+  disclosure is omitted. Because the system prompt is nearly identical turn to
+  turn, distinct payloads are stored once and shared, so a long persona is not
+  duplicated per entry.
 - **Memory** — Browse every user the bot has a memory of. Expand a user to view
   individual memories and edit, delete, or add them. Profile fields (username,
   pronouns, sentiment) are editable too.
-- **Setup** — Auto-refresh toggle, a manual "add memory" form, the API counter
-  reset, and a storage/settings summary.
+- **Knowledge** — The knowledge base the bot retrieves from. Search by keyword,
+  filter by topic, and open a document to edit its title, topic, type,
+  priority, URL, keywords and content, or delete it. **Reload from files**
+  re-imports `./knowledge_documents` on demand, matching by title and topic.
+
+**More**
+
+- **Conversations** — Stored message history per person and per server, newest
+  first. Read a transcript, clear one conversation, or clear everything for a
+  person across every server.
+- **Integrations** — Liveness for the local SearXNG and Navidrome servers:
+  online, unreachable, or not configured, with address, response time, status
+  code and detail. Probes are timeout-bounded, so one dead server cannot stall
+  the page.
+- **Persona** — Edit every file under `prompt_storage/` that the bot actually
+  reads (identity, reinforcement, guideline, instruction, trigger and tool
+  description files). **Save and reload** writes the file and drops the in-memory
+  persona and prompt caches, so the change applies to the bot's very next
+  message with no restart. JSON files are validated before they reach disk, and
+  unsaved edits are guarded when you switch files or tabs. Files present on disk
+  that no getter reads are listed read-only.
+- **Setup** — Auto-refresh toggle and interval, a manual "add memory" form, a
+  configuration summary, and the API counter reset.
 
 ### Switching models live
 

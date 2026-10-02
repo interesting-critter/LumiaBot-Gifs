@@ -243,6 +243,9 @@ export class BoredomService {
       }
 
       const aiService = getAIService();
+      // A boredom turn has no user prompt, so the payload the service built is
+      // the only record of what was actually sent. Worth capturing.
+      let fullPrompt: string | undefined;
       const response = await aiService.createChatCompletion({
         messages: turns,
         systemPromptOverride: spontaneousInstructions,
@@ -250,6 +253,7 @@ export class BoredomService {
         enableKnowledgeGraph: false,
         isGifEnabled,
         guildId: channel.guildId,
+        onFullPrompt: (captured: string) => { fullPrompt = captured; },
       });
 
       const { text: textWithoutGif, gifUrl } = isGifEnabled
@@ -280,6 +284,7 @@ export class BoredomService {
       dashboardLoggerService.log({
         source: 'boredom',
         prompt: '[spontaneous chatter — no user prompt]',
+        fullPrompt,
         response: formatted,
         durationMs: Date.now() - turnStartedAt,
         channelId: channel.id,

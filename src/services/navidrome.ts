@@ -37,10 +37,21 @@ interface SubsonicResponseBody {
   error?: { message?: string };
   nowPlaying?: { entry?: SubsonicNowPlayingEntry | SubsonicNowPlayingEntry[] };
   lyrics?: string | SubsonicLyrics;
+  version?: string;
 }
 
 interface SubsonicEnvelope {
   'subsonic-response'?: SubsonicResponseBody;
+}
+
+/** Result of a Navidrome liveness probe. See `NavidromeService.ping`. */
+export interface NavidromeHealth {
+  configured: boolean;
+  reachable: boolean;
+  url: string | null;
+  status: number | null;
+  latencyMs: number | null;
+  detail: string | null;
 }
 
 export class NavidromeService {
@@ -69,6 +80,86 @@ export class NavidromeService {
       c: 'LumiaBot',
       f: 'json',
     });
+  }
+
+  /**
+   * Liveness probe for the dashboard's integrations view.
+   *
+   * Uses the Subsonic `ping.view` endpoint, which authenticates but returns no
+   * data, so a health check has no side effects. Distinguishes "not configured"
+   * from "configured but unreachable" so a missing password is not reported as
+   * an outage. Never throws and never hangs: the request is bounded by a timeout.
+   */
+  async ping(timeoutMs = 4000): Promise<NavidromeHealth> {
+    const url = this.baseUrl || null;
+
+    if (!this.isAvailable()) {
+      const missing = [
+        !config.navidrome.url && 'NAVIDROME_URL',
+        !config.navidrome.user && 'NAVIDROME_USER',
+        !config.navidrome.password && 'NAVIDROME_PASSWORD',
+      ].filter(Boolean);
+      return {
+        configured: false,
+        reachable: false,
+        url,
+        status: null,
+        latencyMs: null,
+        detail: `set ${missing.join(', ')}`,
+      };
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const started = Date.now();
+
+    try {
+      const params = this.getAuthParams();
+      const res = await fetch(`${this.baseUrl}/rest/ping.view?${params.toString()}`, {
+        signal: controller.signal,
+      });
+      const latencyMs = Date.now() - started;
+
+      if (!res.ok) {
+        return { configured: true, reachable: false, url, status: res.status, latencyMs, detail: `HTTP ${res.status}` };
+      }
+
+      const json = (await res.json()) as SubsonicEnvelope;
+      const response = json?.['subsonic-response'];
+
+      if (!response || response.status !== 'ok') {
+        return {
+          configured: true,
+          reachable: false,
+          url,
+          status: res.status,
+          latencyMs,
+          detail: response?.error?.message || 'Subsonic API rejected the ping',
+        };
+      }
+
+      const version = response.version ?? null;
+      return {
+        configured: true,
+        reachable: true,
+        url,
+        status: res.status,
+        latencyMs,
+        detail: version ? `Navidrome ${version}` : 'healthy',
+      };
+    } catch (error) {
+      const aborted = error instanceof Error && error.name === 'AbortError';
+      return {
+        configured: true,
+        reachable: false,
+        url,
+        status: null,
+        latencyMs: Date.now() - started,
+        detail: aborted ? `no response after ${timeoutMs}ms` : (error instanceof Error ? error.message : String(error)),
+      };
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /**

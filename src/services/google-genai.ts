@@ -11,6 +11,7 @@ import { guildMemoryService } from './guild-memory';
 import { userActivityService, type MusicActivity } from './user-activity';
 import { lrclibService } from './lrclib';
 import { apiUsageService } from './api-usage';
+import { formatPromptForLog } from './dashboard-logger';
 import type { ResolveUserMention } from './user-mention-resolver';
 import { isNsfwImagePrompt, swarmUIService, type GeneratedImageAttachment } from './swarmui';
 import {
@@ -121,6 +122,11 @@ export interface ChatCompletionOptions {
   allowNsfwImageGeneration?: boolean;
   isGifEnabled?: boolean;
   onImageGenerated?: (image: GeneratedImageAttachment) => void;
+  /**
+   * Called with the exact payload handed to Gemini, rendered as readable text,
+   * once the system prompt and contents are final.
+   */
+  onFullPrompt?: (fullPrompt: string) => void;
 }
 
 /**
@@ -1666,6 +1672,33 @@ Use this sparingly and naturally when a reaction enhances your response.
             part.text = PERSONA_DIRECTIVE + '\n\n' + part.text;
           }
           break;
+        }
+      }
+
+
+      // Hand the caller the final payload for the dashboard log. Placed after the
+      // persona directive so the capture matches what Gemini receives. Gemini
+      // carries the persona as a separate systemInstruction, so both halves join.
+      if (options.onFullPrompt) {
+        try {
+          options.onFullPrompt(
+            formatPromptForLog(
+              systemPrompt,
+              contents.map((c) => ({
+                role: c.role === 'model' ? 'assistant' : 'user',
+                content: ((c as { parts?: Array<{ text?: string; inlineData?: unknown }> }).parts ?? [])
+                  .map((part) => {
+                    if (typeof part.text === 'string') return part.text;
+                    if (part.inlineData) return '[attachment]';
+                    return '';
+                  })
+                  .filter(Boolean)
+                  .join('\n'),
+              }))
+            )
+          );
+        } catch (promptLogError) {
+          console.error('⚠️ [GEMINI] Failed to capture full prompt for the dashboard log:', promptLogError);
         }
       }
 

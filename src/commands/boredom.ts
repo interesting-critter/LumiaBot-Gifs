@@ -1,6 +1,7 @@
-import { SlashCommandBuilder, ChatInputCommandInteraction, PermissionFlagsBits, MessageFlags } from 'discord.js';
+import { SlashCommandBuilder, ChatInputCommandInteraction, MessageFlags } from 'discord.js';
 import { boredomService } from '../services/boredom';
 import { config } from '../utils/config';
+import { canRunPrivilegedCommand } from '../utils/permissions';
 import type { Command } from '../bot/client';
 
 const boredomCommand: Command = {
@@ -48,16 +49,12 @@ const boredomCommand: Command = {
     ) as SlashCommandBuilder,
 
   async execute(interaction: ChatInputCommandInteraction) {
-    const isOwner = interaction.user.id === config.bot.ownerId;
-    const isServerOwner = interaction.guild?.ownerId === interaction.user.id;
-    const hasAdminOrBanPerms = Boolean(
-      interaction.memberPermissions?.has(PermissionFlagsBits.BanMembers) ||
-      interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)
-    );
-
-    if (!isOwner && !isServerOwner && !hasAdminOrBanPerms) {
+    // Gates every subcommand, including `interval` and `trigger`, which write
+    // global state. Guild owner / admin permissions were removed deliberately:
+    // see canRunPrivilegedCommand.
+    if (!canRunPrivilegedCommand(interaction.user.id, interaction.member)) {
       await interaction.reply({
-        content: '❌ You must be the bot owner or a mod to use this command.',
+        content: '❌ You must be the bot owner or hold a trusted role to use this command.',
         flags: MessageFlags.Ephemeral,
       });
       return;

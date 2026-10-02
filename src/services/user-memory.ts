@@ -762,31 +762,77 @@ Use naturally — don't mention you're "recalling" anything.
   }
 
   /**
+   * The most recent `limit` opinion memories per user, keyed by userId.
+   *
+   * `user_opinions.opinion` is no longer written — `user_memory_entries` is the
+   * single source of truth since the blob migration — so a snippet has to be
+   * built from the entries table.
+   *
+   * One query for every user rather than a correlated subquery per row. The
+   * per-user cap is MAX_OPINION_ENTRIES (10), so this returns at most 10 rows
+   * per user and stays instant; doing it in SQL would need either a window
+   * function or GROUP_CONCAT over an ordered subquery, and GROUP_CONCAT's row
+   * order is not guaranteed by the spec. Truncating to `limit` in JS keeps the
+   * ordering explicit.
+   */
+  private recentOpinionSnippets(limit: number): Map<string, string> {
+    const rows = this.db
+      .query(
+        `SELECT user_id, content
+         FROM user_memory_entries
+         WHERE kind = 'opinion'
+         ORDER BY user_id, created_at DESC, id DESC`
+      )
+      .all() as Array<{ user_id: string; content: string }>;
+
+    // Rows arrive newest-first per user (and grouped by user), so keeping the
+    // first `limit` per user and reversing gives oldest-first — the same order
+    // buildBlob() hands to the system prompt.
+    const perUser = new Map<string, string[]>();
+    for (const row of rows) {
+      const existing = perUser.get(row.user_id);
+      if (!existing) {
+        perUser.set(row.user_id, [row.content]);
+      } else if (existing.length < limit) {
+        existing.push(row.content);
+      }
+    }
+
+    const snippets = new Map<string, string>();
+    for (const [userId, newest] of perUser) {
+      snippets.set(userId, newest.reverse().join(' | '));
+    }
+    return snippets;
+  }
+
+  /**
    * Fuzzy-search users by partial/informal name.
    * Full-scans user_opinions (typically < 1000 rows — instant) and scores each via computeFuzzyScore().
    */
   searchUsers(query: string, maxResults: number = 5): UserSearchResult[] {
     const rows = this.db.query(
-      'SELECT user_id, username, pronouns, sentiment, opinion FROM user_opinions'
+      'SELECT user_id, username, pronouns, sentiment FROM user_opinions'
     ).all() as Array<{
       user_id: string;
       username: string;
       pronouns: string | null;
       sentiment: string;
-      opinion: string;
     }>;
+
+    const snippets = this.recentOpinionSnippets(3);
 
     const scored: UserSearchResult[] = [];
 
     for (const row of rows) {
       const score = computeFuzzyScore(query, row.username);
       if (score > 0) {
+        const snippet = snippets.get(row.user_id) ?? '';
         scored.push({
           userId: row.user_id,
           username: row.username,
           pronouns: row.pronouns,
           sentiment: row.sentiment,
-          opinionSnippet: row.opinion.length > 150 ? row.opinion.slice(0, 150) + '...' : row.opinion,
+          opinionSnippet: snippet.length > 150 ? snippet.slice(0, 150) + '...' : snippet,
           matchScore: score,
         });
       }

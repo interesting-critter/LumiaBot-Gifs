@@ -285,12 +285,18 @@ export async function handleMessage(options: MessageHandlerOptions): Promise<Mes
         gifUrl: response?.gifUrl,
         searchEnabled: shouldSearchForLog,
         knowledgeEnabled: shouldKnowledgeForLog,
+        fullPrompt: fullPromptForLog,
       });
     };
 
     // Captured before the try block runs so the error path can still log them.
     let shouldSearchForLog = options.enableSearch;
     let shouldKnowledgeForLog = options.enableKnowledgeGraph;
+    // The full system prompt is only ever assembled inside the AI service, so
+    // it is handed back through the same callback pattern already used for
+    // generated images. Undefined when the call throws before the service
+    // reaches the send.
+    let fullPromptForLog: string | undefined;
 
   try {
     // Parse message for pronouns and mentions BEFORE processing
@@ -434,6 +440,7 @@ export async function handleMessage(options: MessageHandlerOptions): Promise<Mes
       requestFollowUp,
       requestCollectiveKnowledge,
       onImageGenerated: (image: GeneratedImageAttachment) => generatedImages.push(image),
+      onFullPrompt: (fullPrompt: string) => { fullPromptForLog = fullPrompt; },
     });
 
     // 1. Extract and resolve GIF if present (and remove <gif> tags from the text)
