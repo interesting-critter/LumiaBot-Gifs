@@ -1,17 +1,16 @@
-import { readFileSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { existsSync, readdirSync, readFileSync, statSync, type Dirent } from 'node:fs';
+import { resolve, sep } from 'node:path';
 import { config } from '../utils/config';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = fileURLToPath(new URL('.', import.meta.url));
+import { PROMPT_STORAGE_DIR } from '../utils/paths';
 
 // Template variable substitutions
 interface TemplateVariables {
   [key: string]: string;
 }
 
-// Cache for loaded prompts
+// Cache for loaded prompts, keyed by `text:`/`json:` plus the **resolved**
+// absolute path of the file that was read (see `loadTextFile`). Keying on the
+// caller's relative path would let two prompt profiles collide on one entry.
 const promptCache: Map<string, string | object> = new Map();
 
 /**
@@ -48,12 +47,248 @@ let templateVariables: TemplateVariables = {
   ownerUsername: 'prolix_oc',
 };
 
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Prompt profiles
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * A *profile* is a named overlay on top of the default prompt tree. The default
+ * profile is the existing `prompt_storage/` root, unchanged, so an install with
+ * no profiles configured behaves exactly as it did before this existed — no
+ * migration, no copy, no new required files.
+ *
+ *   prompt_storage/                              ← profile `default`
+ *   prompt_storage/profiles/<id>/…               ← profile `<id>`
+ *
+ * OVERLAY, NOT A REPLACEMENT (deliberate)
+ * ---------------------------------------
+ * Resolution is **per file**, not per profile: `resolvePromptPath()` returns the
+ * profile's copy of the file only when that physical file exists, and otherwise
+ * falls back to the default root's copy. A profile folder holding one file
+ * overrides exactly that one file and inherits the other ~30.
+ *
+ * That is what keeps authoring a profile cheap ("copy only what differs"), but
+ * it has a consequence every consumer must know: the *shape* of a prompt set is
+ * the union of default and profile, so a file present in the profile and absent
+ * from the default root is read from the profile, and a file present in neither
+ * is still missing. The dashboard's file browser depends on this: it must show
+ * a profile file that only exists in the overlay, and must not hide a default
+ * file that the profile inherits.
+ *
+ * Resolution happens on every load; the loaded bytes are then cached under the
+ * **resolved absolute path** (see `loadTextFile`/`loadJsonFile`). One `existsSync`
+ * per load is the entire cost at steady state — no separate resolution cache,
+ * because a second cache would introduce a second staleness rule for a stat call
+ * that costs microseconds.
+ */
+
+/** One folder per named prompt profile, under the default root. */
+export const PROMPT_PROFILES_DIR: string = resolve(PROMPT_STORAGE_DIR, 'profiles');
+
 /**
- * Get the root directory for prompt storage
+ * The reserved profile id that means "the existing `prompt_storage/` root".
+ *
+ * It is a real value, not a null/absent state: `listPromptProfiles()` always
+ * includes it, and selecting it always succeeds even on an install that has no
+ * `profiles/` directory at all.
+ */
+export const DEFAULT_PROMPT_PROFILE_ID = 'default';
+
+/** The profile every getter resolves against until something changes it. */
+let activePromptProfileId: string = DEFAULT_PROMPT_PROFILE_ID;
+
+/**
+ * Ids are single path segments, so they are restricted to characters that cannot
+ * escape `PROMPT_PROFILES_DIR`. Enforced even though the id normally arrives
+ * from an operator-configured whitelist: this is a filesystem path boundary, and
+ * a resolver pointed at `../../..` would silently read the wrong tree.
+ *
+ * Leading character must be alphanumeric, which alone rules out `.`/`..`; the
+ * explicit substring checks below exist so the failure message names the actual
+ * reason instead of "did not match".
+ */
+const PROFILE_ID_ALLOWED = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const MAX_PROFILE_ID_LENGTH = 64;
+
+/**
+ * Throw unless `id` is safe to join onto a directory.
+ *
+ * Fails closed by design: a rejected id must never be "sanitised" into a
+ * different, still-valid-looking profile, because that would let a typo select a
+ * real profile the caller never asked for.
+ */
+function assertValidPromptProfileId(id: string): void {
+  if (typeof id !== 'string' || id.length === 0) {
+    throw new Error(`Invalid prompt profile id: expected a non-empty string, got ${JSON.stringify(id)}`);
+  }
+  if (id.length > MAX_PROFILE_ID_LENGTH) {
+    throw new Error(`Invalid prompt profile id: longer than ${MAX_PROFILE_ID_LENGTH} characters`);
+  }
+  if (id.includes('\0')) {
+    throw new Error('Invalid prompt profile id: contains a null byte');
+  }
+  if (id.includes('/') || id.includes('\\')) {
+    throw new Error(`Invalid prompt profile id ${JSON.stringify(id)}: path separators are not allowed`);
+  }
+  if (id.includes('..')) {
+    throw new Error(`Invalid prompt profile id ${JSON.stringify(id)}: path traversal is not allowed`);
+  }
+  if (!PROFILE_ID_ALLOWED.test(id)) {
+    throw new Error(
+      `Invalid prompt profile id ${JSON.stringify(id)}: only letters, digits, '.', '_' and '-' are allowed`,
+    );
+  }
+}
+
+/** `statSync().isDirectory()` that answers `false` instead of throwing. */
+function isDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Resolve `relativePath` under `root`, refusing anything that lands outside it.
+ *
+ * Callers pass literals like `persona/identity.txt`, so containment never
+ * rejects a legitimate path; it exists so a future caller cannot read an
+ * arbitrary file through the prompt loader.
+ */
+function resolveInsideRoot(root: string, relativePath: string): string {
+  if (typeof relativePath !== 'string' || relativePath.length === 0) {
+    throw new Error(`Invalid prompt path: expected a non-empty relative path, got ${JSON.stringify(relativePath)}`);
+  }
+  if (relativePath.includes('\0')) {
+    throw new Error('Invalid prompt path: contains a null byte');
+  }
+
+  const resolved = resolve(root, relativePath);
+  const rootWithSep = root.endsWith(sep) ? root : `${root}${sep}`;
+  if (resolved !== root && !resolved.startsWith(rootWithSep)) {
+    throw new Error(`Invalid prompt path ${JSON.stringify(relativePath)}: resolves outside ${root}`);
+  }
+  return resolved;
+}
+
+/**
+ * Get the root directory for prompt storage.
+ *
+ * This is the **default** profile's root, i.e. exactly the directory this module
+ * used unconditionally before profiles existed. Sourced from the shared
+ * `PROMPT_STORAGE_DIR` constant so the dashboard, `swarmui.ts` and this module
+ * cannot drift apart by each re-deriving the path.
  */
 function getPromptStoragePath(): string {
-  const rootDir = join(__dirname, '..', '..');
-  return join(rootDir, 'prompt_storage');
+  return PROMPT_STORAGE_DIR;
+}
+
+/** The profile every getter currently resolves against. */
+export function getActivePromptProfileId(): string {
+  return activePromptProfileId;
+}
+
+/**
+ * Absolute root directory of a profile.
+ *
+ * `default` is the existing `prompt_storage/` root — no profile folder, no copy,
+ * no migration. Any other id must already exist on disk as a directory under
+ * `prompt_storage/profiles/`, or this throws: a profile that points at nothing
+ * would turn every prompt into a missing-file warning at runtime.
+ */
+export function getPromptProfileRoot(id: string): string {
+  assertValidPromptProfileId(id);
+
+  if (id === DEFAULT_PROMPT_PROFILE_ID) {
+    return getPromptStoragePath();
+  }
+
+  const root = resolve(PROMPT_PROFILES_DIR, id);
+  if (!isDirectory(root)) {
+    throw new Error(
+      `Unknown prompt profile ${JSON.stringify(id)}: no directory at ${root}. ` +
+        `Create ${root} or choose one of: ${listPromptProfiles().join(', ')}`,
+    );
+  }
+  return root;
+}
+
+/**
+ * Select the active prompt profile.
+ *
+ * Validation happens **before** the assignment, so a rejected id leaves the
+ * previous one in place: the resolver is never left pointing at a profile that
+ * does not exist.
+ *
+ * On success the cache is cleared, which also bumps the generation counter
+ * `swarmui.ts` watches. That is what makes a profile switch take effect for
+ * consumers that cache `config/swarm_cfg.json` outside this module — without it
+ * a switch would keep serving the previous profile's image config until their
+ * TTL expired.
+ */
+export function setActivePromptProfileId(id: string): void {
+  // Throws before any state changes if the id is unusable or unknown.
+  getPromptProfileRoot(id);
+
+  activePromptProfileId = id;
+  clearCache();
+  console.log(`📝 [PROMPTS] Active prompt profile: ${id}`);
+}
+
+/**
+ * Every profile id that exists on disk, `default` first.
+ *
+ * `default` is always present — it is the storage root itself and needs no
+ * folder of its own — so a fresh install with no `profiles/` directory returns
+ * `['default']` rather than an empty list or an error. Remaining ids are sorted
+ * so a UI dropdown has a stable order across requests.
+ */
+export function listPromptProfiles(): string[] {
+  let entries: Dirent[];
+  try {
+    entries = readdirSync(PROMPT_PROFILES_DIR, { withFileTypes: true });
+  } catch {
+    // No `profiles/` directory yet: the default profile is still selectable.
+    return [DEFAULT_PROMPT_PROFILE_ID];
+  }
+
+  const found: string[] = [];
+  for (const entry of entries) {
+    // Directories only. A stray file (`profiles/README.md`, an editor swap file)
+    // is not a profile and must not appear in a picker.
+    if (!entry.isDirectory()) continue;
+    if (entry.name === DEFAULT_PROMPT_PROFILE_ID) continue;
+    // Skip anything that could not be selected anyway, rather than advertising
+    // an id whose selection would throw.
+    try {
+      assertValidPromptProfileId(entry.name);
+    } catch {
+      continue;
+    }
+    found.push(entry.name);
+  }
+
+  return [DEFAULT_PROMPT_PROFILE_ID, ...found.sort()];
+}
+
+/**
+ * Absolute path of a prompt file, honouring the active profile's per-file
+ * overlay and falling back to the default root.
+ *
+ * Returns the default root's path when the profile has no copy of that file —
+ * even when the default root has none either, so the caller's "file not found"
+ * warning names the default path (the operator's canonical location) instead of
+ * a profile path that may not exist.
+ */
+export function resolvePromptPath(relativePath: string): string {
+  const defaultPath = resolveInsideRoot(getPromptStoragePath(), relativePath);
+
+  if (activePromptProfileId === DEFAULT_PROMPT_PROFILE_ID) {
+    return defaultPath;
+  }
+
+  const profilePath = resolveInsideRoot(getPromptProfileRoot(activePromptProfileId), relativePath);
+  return existsSync(profilePath) ? profilePath : defaultPath;
 }
 
 /**
@@ -68,16 +303,24 @@ function substituteVariables(text: string, variables: TemplateVariables = templa
 
 /**
  * Load a text file from prompt storage
+ *
+ * The cache key is the **resolved absolute path**, not the caller's relative
+ * path. `persona/identity.txt` is the same string under every profile, so a
+ * relative-path key made `default` and any profile share one entry — switching
+ * profiles mid-session would then serve one profile's bytes for another, with
+ * no warning and no way to tell from the output. Keying on the file that was
+ * actually read makes each physical file cache separately, keeps
+ * `clearCache()` the single invalidation point, and means a switch needs no
+ * cache clear for correctness (it is still done, for the generation counter).
  */
 export function loadTextFile(relativePath: string, useCache: boolean = true): string | null {
-  const cacheKey = `text:${relativePath}`;
-  
+  const filePath = resolvePromptPath(relativePath);
+  const cacheKey = `text:${filePath}`;
+
   if (useCache && promptCache.has(cacheKey)) {
     return promptCache.get(cacheKey) as string;
   }
-  
-  const filePath = join(getPromptStoragePath(), relativePath);
-  
+
   if (!existsSync(filePath)) {
     console.warn(`⚠️ [PROMPTS] File not found: ${filePath}`);
     return null;
@@ -97,15 +340,17 @@ export function loadTextFile(relativePath: string, useCache: boolean = true): st
 
 /**
  * Load a JSON file from prompt storage
+ *
+ * Cached under the resolved absolute path, for the same reason as
+ * {@link loadTextFile}.
  */
 export function loadJsonFile<T = any>(relativePath: string, useCache: boolean = true): T | null {
-  const cacheKey = `json:${relativePath}`;
-  
+  const filePath = resolvePromptPath(relativePath);
+  const cacheKey = `json:${filePath}`;
+
   if (useCache && promptCache.has(cacheKey)) {
     return promptCache.get(cacheKey) as unknown as T;
   }
-  
-  const filePath = join(getPromptStoragePath(), relativePath);
   
   if (!existsSync(filePath)) {
     console.warn(`⚠️ [PROMPTS] File not found: ${filePath}`);
@@ -398,7 +643,67 @@ Prefer cooperative, cumulative reasoning over isolated responses when multiple {
 }
 
 /**
+ * Rendered keyword lists, memoised on the array each was rendered from.
+ *
+ * `message-handler.ts`'s `ensureTriggersFresh()` keeps its compiled
+ * `TriggerPatterns` alive by comparing the **array reference** it was compiled
+ * from against the one `getTriggerKeywords()` hands back; a mismatch recompiles
+ * every keyword into a `RegExp` — on the hot path, once per message, per guild.
+ * Substituting therefore has to be memoised: returning a freshly-built array on
+ * every call would keep the behaviour correct and silently delete that cache.
+ *
+ * A `WeakMap` rather than a single "last one" slot because the getter renders
+ * **three** lists per call — one slot would be evicted by `knowledge_intent`
+ * before the next call could reuse `bot_mention`'s. The keys are the arrays
+ * `loadJsonFile` returns from its own cache, so an entry is unreachable the
+ * moment the prompt cache is cleared; nothing needs to evict it by hand.
+ *
+ * `setTemplateVariables` calls `clearCache()`, and `clearCache` is also what a
+ * profile switch calls, so every input to the rendering — the bytes on disk, the
+ * active profile and the variable set — invalidates it. Nothing else needs to.
+ */
+const renderedTriggerKeywords = new WeakMap<readonly string[], string[]>();
+
+/**
+ * Substitute template variables into a keyword list, at most once per source.
+ *
+ * `substituteVariables` leaves an unknown `{name}` alone (that is what keeps a
+ * template's other placeholders intact for later passes), so a triggers file with
+ * no `{…}` in it renders to an equal-but-new array — which is why the memo is
+ * keyed on the source and not on "did anything change".
+ *
+ * A non-array value is passed through untouched, exactly as it was before
+ * substitution: `ensureTriggersFresh()` guards for that shape itself and keeps
+ * the patterns it already has, so degrading to "no new keywords" is the
+ * contract, not "throw".
+ */
+function renderTriggerKeywords(source: string[]): string[] {
+  if (!Array.isArray(source)) {
+    return source;
+  }
+  const cached = renderedTriggerKeywords.get(source);
+  if (cached) {
+    return cached;
+  }
+  const value = source.map((keyword) => substituteVariables(String(keyword)));
+  renderedTriggerKeywords.set(source, value);
+  return value;
+}
+
+/**
  * Get trigger keywords configuration
+ *
+ * Template variables are rendered here, as in every other string getter in this
+ * module. The shipped `prompt_storage.example/config/triggers.json` lists
+ * `"{botName}"` as its first `bot_mention` entry, and this getter used to return
+ * it raw — so the one keyword that could not fire was the bot's own name, while
+ * the generic `"bot"` / `"assistant"` beside it matched fine. It failed silently
+ * because `message-handler.ts` wraps each keyword in `\b…\b` and `{` is a
+ * non-word character: the literal braces acted as word boundaries, so the entry
+ * matched neither `"hey Bad Kitty"` nor a user who typed `"hey {botName}"`.
+ *
+ * `botName` is populated from `config.bot.name` at `src/index.ts:143`, before any
+ * message is handled, so the value was always available.
  */
 export function getTriggerKeywords(): {
   botMention: string[];
@@ -412,16 +717,25 @@ export function getTriggerKeywords(): {
       knowledge_intent: string[];
     };
   }>('config/triggers.json');
-  
+
   if (config) {
     return {
-      botMention: config.triggers.bot_mention,
-      searchIntent: config.triggers.search_intent,
-      knowledgeIntent: config.triggers.knowledge_intent,
+      botMention: renderTriggerKeywords(config.triggers.bot_mention),
+      searchIntent: renderTriggerKeywords(config.triggers.search_intent),
+      knowledgeIntent: renderTriggerKeywords(config.triggers.knowledge_intent),
     };
   }
-  
-  // Fallback defaults
+
+  // Fallback defaults, for an install with no `config/triggers.json` at all.
+  //
+  // Reachable, not dead: `loadJsonFile` returns `null` when the file is absent
+  // *or* unparseable, and a bot with no prompt storage directory would otherwise
+  // have no triggers whatsoever — no bot mention, no search intent. It is
+  // unreachable only on installs that *do* ship the file, which is most of them.
+  //
+  // These are literal strings, so there is nothing to substitute; they are
+  // returned as-is rather than run through `renderTriggerKeywords`, which would
+  // allocate a new array on every call and defeat the handler's reference check.
   return {
     botMention: ['bad kitty', 'lumia'],
     searchIntent: ['search', 'look up', 'find out', 'google'],

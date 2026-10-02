@@ -9,6 +9,13 @@ import { apiUsageService } from '../services/api-usage';
 import { userMemoryService, type MemoryEntryKind, type UserOpinion } from '../services/user-memory';
 import { rateLimiterService } from '../services/rate-limiter';
 import { modelSelectorService } from '../services/model-selector';
+import { promptSelectorService } from '../services/prompt-selector';
+import {
+  DEFAULT_PROMPT_PROFILE_ID,
+  getActivePromptProfileId,
+  getPromptProfileRoot,
+  resolvePromptPath,
+} from '../services/prompts';
 import { knowledgeGraphService } from '../services/knowledge-graph';
 import { conversationHistoryService } from '../services/conversation-history';
 import { searxngService } from '../services/searxng';
@@ -673,16 +680,116 @@ function buildConversationList(limitParam: string | null) {
   return { total: result.total ?? rows.length, conversations: rows.slice(0, limit) };
 }
 
+// ---- Prompt profiles ------------------------------------------------------
+
+/**
+ * The one payload both prompt-profile routes return.
+ *
+ * `byModel` is the raw binding table so the UI can show which profile the model
+ * in use is bound to, and `currentModel` alongside it so that label needs no
+ * second request. `changedAt` is included because the persona and overview views
+ * render it the same way the model card renders its own.
+ */
+function buildPromptProfilePayload() {
+  const state = promptSelectorService.getState();
+  return {
+    available: state.available,
+    selectable: promptSelectorService.selectableProfiles(),
+    active: state.active,
+    override: state.override,
+    byModel: state.byModel,
+    currentModel: promptSelectorService.getCurrentModel(),
+    changedAt: state.changedAt,
+  };
+}
+
 // ---- Persona --------------------------------------------------------------
 
+/**
+ * Root of the profile currently in effect, or `null` when that is `default`.
+ *
+ * `getPromptProfileRoot` throws for an id with no folder on disk. That is the
+ * right behaviour for the prompt loader (a typo must not silently read the
+ * wrong tree) but wrong for the dashboard, which must still render: a 500 on
+ * the persona list over a mistyped `PROMPT_PROFILES` entry would take the
+ * editor down entirely rather than showing the operator the one thing they need
+ * to fix. So this answers `null` and every caller falls back to the default root,
+ * which is exactly what `prompts.ts` does with the same missing folder.
+ */
+function activeProfileRoot(): string | null {
+  try {
+    if (getActivePromptProfileId() === DEFAULT_PROMPT_PROFILE_ID) return null;
+    return getPromptProfileRoot(getActivePromptProfileId());
+  } catch (error) {
+    console.warn('📊 [DASHBOARD] Active prompt profile has no folder; showing the default tree:', error);
+    return null;
+  }
+}
+
+/**
+ * Where a persona **read** resolves to: the profile's copy of the file, or the
+ * default root's when the profile does not ship one.
+ *
+ * This is `resolvePromptPath` verbatim, guarded only so a broken profile id
+ * degrades to the default tree instead of failing the request.
+ */
+function promptReadPath(filePath: string): string {
+  try {
+    return resolvePromptPath(filePath);
+  } catch (error) {
+    console.warn(`📊 [DASHBOARD] Could not resolve ${filePath} against the active profile:`, error);
+    return join(PROMPT_STORAGE_DIR, filePath);
+  }
+}
+
+/**
+ * Where a persona **write** must land: always inside the active profile.
+ *
+ * WHY THIS IS NOT `resolvePromptPath`
+ * -----------------------------------
+ * `resolvePromptPath` is a read resolver. It answers the *default* root's path
+ * whenever the profile does not already have its own copy of the file, because
+ * at read time that is the file whose bytes the bot will use. Used for a write
+ * that rule is actively harmful: the operator has a non-default profile
+ * selected, opens a file the profile inherits from `default`, edits it and saves
+ * — and the edit lands in `prompt_storage/`, changing the shared default for
+ * every profile at once, with no override ever created and no sign in the UI.
+ *
+ * So writes resolve against the profile root unconditionally, which turns that
+ * edit into an explicit override the persona list can show. The relative path
+ * comes from {@link PROMPT_FILE_MAP}, which is checked by the caller before any
+ * path is built — that allow-list is the traversal guard, and joining a known
+ * literal onto the profile root cannot escape it.
+ */
+function promptWritePath(filePath: string): string {
+  const root = activeProfileRoot();
+  return root === null ? join(PROMPT_STORAGE_DIR, filePath) : join(root, filePath);
+}
+
+/** Every file in the profile overlay, or nothing when `default` is active. */
+async function listProfileFiles(root: string): Promise<string[]> {
+  return listFilesRecursive(root);
+}
+
 async function buildPersonaPayload() {
-  const onDisk = await listFilesRecursive(PROMPT_STORAGE_DIR);
+  const activeProfile = getActivePromptProfileId();
+  const profileRoot = activeProfileRoot();
+
+  // The overlay tree is described by the profile that owns it, not as a pile of
+  // loose `profiles/<id>/…` rows. Those raw entries would be listed as paths the
+  // bot never loads (every load goes through the profile root) and would
+  // duplicate every row the active profile already contributes below.
+  const onDisk = (await listFilesRecursive(PROMPT_STORAGE_DIR)).filter(
+    (path) => !path.startsWith('profiles/'),
+  );
+  const profileFiles = profileRoot === null ? [] : await listProfileFiles(profileRoot);
+
   const known = new Set(PROMPT_FILES.map((f) => f.path));
   const editable = new Set(known);
 
   const files = await Promise.all(
     PROMPT_FILES.map(async (meta) => {
-      const full = join(PROMPT_STORAGE_DIR, meta.path);
+      const full = promptReadPath(meta.path);
       let size: number | null = null;
       let exists = false;
       try {
@@ -700,6 +807,10 @@ async function buildPersonaPayload() {
         exists,
         bytes: size,
         editable: editable.has(meta.path),
+        // The whole point of a profile: does this profile ship its own copy, or
+        // is it inheriting the default root's? One `existsSync` inside
+        // `resolvePromptPath` already made this decision, so it is a comparison.
+        overridden: full !== join(PROMPT_STORAGE_DIR, meta.path),
       };
     })
   );
@@ -707,11 +818,21 @@ async function buildPersonaPayload() {
   // Anything on disk the bot does not read: listed so it is visible, never editable.
   const unlisted = onDisk
     .filter((path) => !known.has(path))
-    .map((path) => ({ path, label: path.split('/').pop() || path, kind: path.endsWith('.json') ? ('json' as const) : ('text' as const), hint: 'Not read by the bot, so editing it has no effect.', exists: true, bytes: null, editable: false }));
+    .map((path) => ({ path, label: path.split('/').pop() || path, kind: path.endsWith('.json') ? ('json' as const) : ('text' as const), hint: 'Not read by the bot, so editing it has no effect.', exists: true, bytes: null, editable: false, overridden: false }));
+
+  // Files the active profile ships that the default root does not have. Without
+  // these the list would be a union of default only, and a profile that adds a
+  // prompt would be invisible in the one view that is meant to explain it.
+  const overlayOnly = profileFiles
+    .filter((path) => !known.has(path))
+    .map((path) => ({ path, label: path.split('/').pop() || path, kind: path.endsWith('.json') ? ('json' as const) : ('text' as const), hint: `Only in profile "${activeProfile}".`, exists: true, bytes: null, editable: false, overridden: true }));
 
   return {
     directory: 'prompt_storage',
-    files: [...files, ...unlisted].sort((a, b) => a.path.localeCompare(b.path)),
+    // Which profile the read/write paths below are resolving against. The UI
+    // needs this to tell the operator where a save will land.
+    profile: profileRoot === null ? DEFAULT_PROMPT_PROFILE_ID : activeProfile,
+    files: [...files, ...unlisted, ...overlayOnly].sort((a, b) => a.path.localeCompare(b.path)),
   };
 }
 
@@ -907,6 +1028,48 @@ export function startDashboardServer(): DashboardServer | null {
 
       if (path === '/api/models/reset' && method === 'POST') {
         return json({ ok: true, model: modelSelectorService.reset() });
+      }
+
+      // ---- Prompt profiles --------------------------------------------------
+      // `active` is the *effective* profile — override ?? the current model's
+      // binding ?? `default` — resolved by the service, so the UI never has to
+      // reimplement that precedence. `selectable` is deliberately the
+      // whitelist *plus* `default`: `available` is legitimately empty when
+      // PROMPT_PROFILES is unset, and a picker with no "Default" row in it is a
+      // bug rather than an off switch.
+      //
+      // No changes are needed on the two model routes above: `model-selector.ts`
+      // calls `promptSelectorService.onModelChanged()` itself on a successful
+      // switch and on a reset, which is what clears the override.
+      if (path === '/api/prompt-profiles' && method === 'GET') {
+        return json(buildPromptProfilePayload());
+      }
+
+      if (path === '/api/prompt-profiles/override' && method === 'POST') {
+        const body = await readJsonBody(request);
+        if (!body) return fail('Expected a JSON body', 400);
+        if (!('profile' in body)) return fail('Missing "profile" (use null to clear the override)', 400);
+
+        const requested = body.profile;
+        // Explicit null clears; anything that is not null must be a string, so a
+        // client sending `{"profile": {}}` gets told so instead of it being
+        // coerced into the id "[object Object]" and rejected with a confusing
+        // allow-list message.
+        if (requested !== null && asString(requested) === undefined) {
+          return fail('"profile" must be a string or null', 400);
+        }
+
+        try {
+          promptSelectorService.setOverride(requested as string | null);
+        } catch (error) {
+          // setOverride only throws its own allow-list validation messages, which
+          // are what the operator needs and carry no internals — returned as-is,
+          // logged so a future failure mode that does leak cannot pass silently.
+          console.warn(`📊 [DASHBOARD] Rejected prompt profile override "${String(requested)}":`, error);
+          return fail(error instanceof Error ? error.message : String(error), 400);
+        }
+
+        return json({ ok: true, ...buildPromptProfilePayload() });
       }
 
       // ---- LLM usage ---------------------------------------------------
@@ -1171,19 +1334,29 @@ export function startDashboardServer(): DashboardServer | null {
           return json(await buildPersonaPayload());
         }
 
+        // Allow-listed first: `requested` is untrusted input and
+        // `promptReadPath` joins it onto a directory, so the traversal guard has
+        // to run before any path exists.
         if (!PROMPT_FILE_MAP.has(requested)) {
           return fail('That file is not editable', 400);
         }
 
-        const full = join(PROMPT_STORAGE_DIR, requested);
+        // Profile-aware: the profile's copy if it has one, else the default
+        // root's. Hardcoding PROMPT_STORAGE_DIR here would show the default
+        // bytes for a profile that overrides the file.
+        const full = promptReadPath(requested);
         if (!existsSync(full)) {
-          return json({ path: requested, kind: PROMPT_FILE_MAP.get(requested)!.kind, content: '', exists: false });
+          return json({ path: requested, kind: PROMPT_FILE_MAP.get(requested)!.kind, content: '', exists: false, profile: getActivePromptProfileId(), overridden: false });
         }
         return json({
           path: requested,
           kind: PROMPT_FILE_MAP.get(requested)!.kind,
           content: await readFile(full, 'utf-8'),
           exists: true,
+          // Where this save will land, which is not always where these bytes came
+          // from: see promptWritePath.
+          profile: getActivePromptProfileId(),
+          overridden: full !== join(PROMPT_STORAGE_DIR, requested),
         });
       }
 
@@ -1239,7 +1412,10 @@ export function startDashboardServer(): DashboardServer | null {
           }
         }
 
-        const full = join(PROMPT_STORAGE_DIR, filePath);
+        // Profile-aware target. Under a non-default profile this is inside that
+        // profile's folder, so an edit to a file the profile inherits creates an
+        // override instead of quietly rewriting the shared default.
+        const full = promptWritePath(filePath);
 
         // Optimistic concurrency. The editor sends the content it loaded as
         // `ifMatch`; if the file changed on disk since then — another tab, a
@@ -1250,10 +1426,18 @@ export function startDashboardServer(): DashboardServer | null {
           return fail('Missing "ifMatch": reload the file and save again', 428);
         }
 
+        // Read the *effective* content, not the file at the write target: the
+        // editor was handed `promptReadPath` bytes, so that is the version the
+        // 409 check has to compare against. Comparing against the write target
+        // instead would make every inherited file answer "not found" here and
+        // reject a perfectly good save with a conflict the operator cannot act
+        // on. It is also the correct scope for the check — two operators editing
+        // the same file under *different* profiles are editing different files.
+        const currentFull = promptReadPath(filePath);
         let current = '';
-        if (existsSync(full)) {
+        if (existsSync(currentFull)) {
           try {
-            current = await readFile(full, 'utf-8');
+            current = await readFile(currentFull, 'utf-8');
           } catch (error) {
             return internalFailure(`Reading ${filePath} before writing failed`, error, 500);
           }
@@ -1279,7 +1463,15 @@ export function startDashboardServer(): DashboardServer | null {
         // cached definition that only `reloadBotDefinition()` clears.
         reloadBotDefinition();
 
-        return json({ ok: true, path: filePath, bytes: Buffer.byteLength(content, 'utf-8'), reloaded: true });
+        return json({
+          ok: true,
+          path: filePath,
+          bytes: Buffer.byteLength(content, 'utf-8'),
+          reloaded: true,
+          // Named so the operator can see the save landed in the profile and not
+          // in the shared default root.
+          profile: getActivePromptProfileId(),
+        });
       }
 
       // ---- Memories ----------------------------------------------------

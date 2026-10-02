@@ -187,9 +187,40 @@ describe('moonshot.ts — every fetch is bounded', () => {
 });
 
 describe('swarmui.ts — config paths are not CWD-relative', () => {
-  test('resolves its prompt-storage anchor from the shared constant', () => {
-    expect(SWARMUI_SRC).toContain("import { PROMPT_STORAGE_DIR } from '../utils/paths'");
-    expect(SWARMUI_SRC).toContain('join(PROMPT_STORAGE_DIR, CONFIG_PATH)');
+  test('resolves its prompt-storage anchor from the shared resolver', () => {
+    // The anchor is not a directory constant, it is a *question*: "where would
+    // the loader look?". `loadJsonFile(CONFIG_PATH)` on the very next line
+    // resolves through `resolvePromptPath()` (`prompts.ts`), which honours the
+    // active prompt profile — so a profile that ships its own
+    // `config/swarm_cfg.json` is read from *its* root, not the default one.
+    //
+    // Probing `join(PROMPT_STORAGE_DIR, CONFIG_PATH)` answered a different
+    // question ("does the *default* root have it?"). Under a profile the two
+    // disagreed: the probe looked in the default root, found nothing, and
+    // reported SwarmUI unconfigured, while the `loadJsonFile` on the next line
+    // would have resolved and read the profile's file. The guard here is that
+    // the probe and the load can never diverge again, because there is exactly
+    // one definition of "the file `getConfig()` is about to load".
+    const code = codeOnly(SWARMUI_SRC);
+
+    // It has to be the *imported* resolver, or a local redefinition would
+    // satisfy the call-site string without resolving anything.
+    expect(SWARMUI_SRC).toMatch(/import \{[^}]*\bresolvePromptPath\b[^}]*\} from '\.\/prompts'/);
+
+    // The probe and the load agree, because they ask the same resolver.
+    expect(code).toContain('existsSync(resolvePromptPath(CONFIG_PATH))');
+    expect(code).toContain('loadJsonFile<SwarmConfig>(CONFIG_PATH)');
+
+    // No hand-rolled or root-anchored path may come back, whatever it is
+    // joined onto — this is the form the bug actually took. Checked against
+    // code only, because the explanatory comments above `CONFIG_PATH` and
+    // above the probe still name the old expression on purpose.
+    expect(code).not.toMatch(/join\([^)]*CONFIG_PATH/);
+    expect(code).not.toContain('PROMPT_STORAGE_DIR');
+
+    // ...and the now-dead import went with it. Asserted on an import regex
+    // over the *raw* source, so those same comments cannot mask a live import.
+    expect(SWARMUI_SRC).not.toMatch(/import \{[^}]*\bPROMPT_STORAGE_DIR\b[^}]*\}/);
   });
 
   test('does not re-derive the prompt_storage root itself', () => {

@@ -69,6 +69,204 @@ const ownerId: string = strEnv('OWNER_ID', strEnv('BOT_OWNER_ID', ''));
 
 const dashboardPassword = strEnv('DASHBOARD_PASSWORD', '');
 
+/**
+ * A prompt profile id is used verbatim as a directory name under
+ * `prompt_storage/profiles/`, so it is restricted to characters that cannot
+ * escape that directory.
+ *
+ * A `..` segment, or an id containing a separator, would let an operator typo
+ * (`PROMPT_PROFILES=../../etc`) point the system prompt at arbitrary files on
+ * the host. Env vars are trusted-but-typed, and this is the one place where a
+ * bad string becomes a path, so it is rejected here rather than trusted to
+ * `join()` downstream. Must start with a letter or digit so `.`, `..` and
+ * dotfiles cannot be expressed.
+ */
+const PROMPT_PROFILE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+/** Shared by both parsers below so they cannot drift apart. */
+function isUsableProfileId(id: string): boolean {
+  return PROMPT_PROFILE_ID_PATTERN.test(id);
+}
+
+/**
+ * Parse `PROMPT_PROFILES`: the comma-separated whitelist of prompt profiles the
+ * dashboard is allowed to activate.
+ *
+ * Semantics that matter:
+ *   - Entries are trimmed and blanks dropped, so a trailing comma or a stray
+ *     space is not a profile.
+ *   - Duplicates are collapsed, preserving first-seen order (the order is the
+ *     order the dashboard renders the picker in).
+ *   - Unset/empty yields `[]`, which turns the whole feature off: only the
+ *     built-in `default` profile remains usable. That is deliberately not an
+ *     error — a bot with no profiles configured must behave exactly as before.
+ *   - Ids that would escape the profile directory are refused loudly (see
+ *     {@link PROMPT_PROFILE_ID_PATTERN}) rather than silently kept.
+ */
+export function parsePromptProfileIds(raw: string | undefined): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+
+  for (const entry of String(raw ?? '').split(',')) {
+    const id = entry.trim();
+    if (!id) continue;
+
+    if (!isUsableProfileId(id)) {
+      console.warn(
+        `⚠️ [Config] PROMPT_PROFILES: "${id}" is not a usable profile id ` +
+          '(letters, digits, dot, dash and underscore, starting with a letter or digit) — dropped.',
+      );
+      continue;
+    }
+
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+
+  return out;
+}
+
+/**
+ * Parse `MODEL_PROMPT_PROFILES`: comma-separated `model=profile` bindings.
+ *
+ * Three classes of bad input are handled differently on purpose:
+ *
+ *   1. **Malformed** (no `=`, more than one `=`, or an empty side) — dropped
+ *      with a warning that *names the offending entry*. A silent drop here is
+ *      how an operator ends up wondering why their bound profile "never
+ *      activates" with no evidence anywhere in the logs.
+ *   2. **Profile not in `PROMPT_PROFILES`** — this is a configuration *error*,
+ *      not a typo to shrug at: the dashboard could never activate it, so the
+ *      binding would look live in config and do nothing at request time. It is
+ *      dropped with a loud multi-line warning and the whole `byModel` map is
+ *      logged alongside.
+ *   3. **Profile whitelisted but with no folder on disk** — not detectable
+ *      here (config must not touch the filesystem); `prompt-selector.ts`
+ *      reconciles that against `listPromptProfiles()` at startup.
+ *
+ * @param available ids from {@link parsePromptProfileIds}. An empty list means
+ *                    every binding is an error, by design.
+ * @param models    `DASHBOARD_MODEL_OPTIONS`, used only to warn about a binding
+ *                  for a model the dashboard cannot switch to.
+ */
+export function parseModelPromptProfiles(
+  raw: string | undefined,
+  available: readonly string[],
+  models: readonly string[] = [],
+): Record<string, string> {
+  const allowed = new Set(available);
+  const knownModels = new Set(models);
+  const out: Record<string, string> = {};
+  const rejected: string[] = [];
+
+  for (const entry of String(raw ?? '').split(',')) {
+    const trimmed = entry.trim();
+    if (!trimmed) continue;
+
+    // Exactly one `=`. `a=b=c` is not a model/profile pair, and guessing which
+    // side was meant is how a binding ends up silently pointing somewhere else.
+    if (trimmed.split('=').length - 1 !== 1) {
+      console.warn(
+        `⚠️ [Config] MODEL_PROMPT_PROFILES: "${trimmed}" is not a model=profile pair — dropped.`,
+      );
+      continue;
+    }
+
+    const separator = trimmed.indexOf('=');
+    const model = trimmed.slice(0, separator).trim();
+    const profile = trimmed.slice(separator + 1).trim();
+
+    if (!model || !profile) {
+      console.warn(
+        `⚠️ [Config] MODEL_PROMPT_PROFILES: "${trimmed}" is missing a model or a profile name — dropped.`,
+      );
+      continue;
+    }
+
+    if (!isUsableProfileId(profile)) {
+      console.warn(
+        `⚠️ [Config] MODEL_PROMPT_PROFILES: "${trimmed}" uses an unusable profile id — dropped.`,
+      );
+      continue;
+    }
+
+    if (!allowed.has(profile)) {
+      // Loud, not a one-liner: the operator has to understand that this binding
+      // is now inert, and why.
+      rejected.push(`${model}=${profile}`);
+      continue;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(out, model)) {
+      console.warn(
+        `⚠️ [Config] MODEL_PROMPT_PROFILES: duplicate binding for "${model}" — ` +
+          `keeping "${out[model]}", ignoring "${profile}".`,
+      );
+      continue;
+    }
+
+    if (knownModels.size > 0 && !knownModels.has(model)) {
+      // A warning, not a drop: DASHBOARD_MODEL_OPTIONS can legitimately be
+      // empty (switching disabled) or out of date relative to this file.
+      console.warn(
+        `⚠️ [Config] MODEL_PROMPT_PROFILES: "${model}" is not in DASHBOARD_MODEL_OPTIONS — ` +
+          'the binding only applies if that model becomes selectable.',
+      );
+    }
+
+    out[model] = profile;
+  }
+
+  if (rejected.length > 0) {
+    console.warn(
+      [
+        '',
+        '='.repeat(72),
+        '  CONFIGURATION ERROR: MODEL_PROMPT_PROFILES names profiles that',
+        '  PROMPT_PROFILES does not allow.',
+        '='.repeat(72),
+        '',
+        '  Dropped:',
+        ...rejected.map((r) => `      - ${r}`),
+        '',
+        `  Allowed by PROMPT_PROFILES: ${available.length > 0 ? available.join(', ') : '(none — the feature is off)'}`,
+        '',
+        '  A dropped binding is NOT a fallback: the model simply has no profile of',
+        '  its own and always resolves to "default". Fix the name, or add it to',
+        '  PROMPT_PROFILES and create prompt_storage/profiles/<id>/.',
+        '='.repeat(72),
+        '',
+      ].join('\n'),
+    );
+  }
+
+  return out;
+}
+
+/**
+ * The dashboard's model list and the prompt-profile tables are parsed here,
+ * before the config object, because both parsers need each other: a binding can
+ * only be validated against the whitelist, and a whitelist entry is useless
+ * without a model list to bind it to.
+ *
+ * Held in locals (rather than re-reading `process.env` inside the object
+ * literal) because `config` is still in its temporal dead zone while it is
+ * being initialised — referencing it from inside its own initialiser throws.
+ */
+const dashboardModelOptions: string[] = strEnv('DASHBOARD_MODEL_OPTIONS', '')
+  .split(',')
+  .map((m) => m.trim())
+  .filter(Boolean);
+
+const promptProfileIds: string[] = parsePromptProfileIds(strEnv('PROMPT_PROFILES', ''));
+
+const modelPromptProfiles: Record<string, string> = parseModelPromptProfiles(
+  strEnv('MODEL_PROMPT_PROFILES', ''),
+  promptProfileIds,
+  dashboardModelOptions,
+);
+
 export const config = {
   discord: {
     token: process.env.DISCORD_TOKEN!,
@@ -262,10 +460,32 @@ export const config = {
     logMaxEntries: intEnv('DASHBOARD_LOG_MAX_ENTRIES', 500, { min: 1 }),
     // Models the dashboard is allowed to switch between. Empty means the
     // switcher stays hidden and the model is fixed by the environment.
-    modelOptions: strEnv('DASHBOARD_MODEL_OPTIONS', '')
-      .split(',')
-      .map((m) => m.trim())
-      .filter(Boolean),
+    modelOptions: dashboardModelOptions,
+  },
+
+  /**
+   * Named prompt profiles.
+   *
+   * A *profile* is a folder of prompt files that partially replaces
+   * `prompt_storage/`. Resolution is per-file with fallback to `default`, so a
+   * profile that only ships `persona/identity.txt` overrides that one file and
+   * inherits every other prompt.
+   *
+   * Precedence, implemented by `services/prompt-selector.ts`:
+   *   manual override  >  the profile bound to the current model  >  `default`
+   *
+   * `available` is a **whitelist**: a profile that is not listed here can never
+   * be activated, however it is named in `byModel`. `[]` means the feature is
+   * off and only `default` is usable.
+   *
+   * Top level rather than nested under `dashboard` because profiles are read by
+   * the bot itself, not only by the dashboard UI.
+   */
+  promptProfiles: {
+    /** Profile ids the dashboard may activate, in configured order. */
+    available: promptProfileIds,
+    /** Model name → profile id, from MODEL_PROMPT_PROFILES. Bindings whose profile is not whitelisted are dropped with a loud warning. */
+    byModel: modelPromptProfiles,
   },
 };
 

@@ -1,6 +1,7 @@
 import { Database } from 'bun:sqlite';
 import { config } from '../utils/config';
 import { dbPath } from '../utils/paths';
+import { promptSelectorService } from './prompt-selector';
 
 export interface ModelState {
   /** The model actually in effect right now. */
@@ -149,6 +150,9 @@ export class ModelSelectorService {
     }
 
     if (trimmed === this.override) {
+      // Nothing actually changed, so this is not a model switch: leave the
+      // prompt profile alone (an operator re-confirming the current model
+      // should not lose their manual prompt override).
       return this.getState();
     }
 
@@ -159,6 +163,9 @@ export class ModelSelectorService {
     this.applyToConfig();
 
     console.log(`🎛️ [MODEL] Switched ${previous} → ${trimmed} (via dashboard)`);
+    // Only reached once the change has succeeded, and never on the throw paths
+    // above, so a rejected model leaves the prompt profile override intact.
+    this.notifyPromptSelector();
     return this.getState();
   }
 
@@ -172,7 +179,36 @@ export class ModelSelectorService {
     this.persist(null);
     this.applyToConfig();
     console.log(`🎛️ [MODEL] Cleared dashboard model selection; now using ${this.getActiveModel()}`);
+    this.notifyPromptSelector();
     return this.getState();
+  }
+
+  /**
+   * Tell the prompt-profile service which model is now in effect.
+   *
+   * That service clears any manual prompt override and activates the profile
+   * bound to this model (or `default`). A reset counts: reverting to the
+   * environment model is as much a model change as picking another one.
+   *
+   * The import is one-directional — `prompt-selector` → `prompts`/`config`/
+   * `paths`, never back to here — so there is no cycle.
+   *
+   * Failures are logged rather than propagated: the model change has already
+   * been persisted and applied, and returning a 500 that claims the switch
+   * failed would strand the operator in a loop where they cannot switch models
+   * at all. The error is loud in the log instead, which is the trade this
+   * makes deliberately.
+   */
+  private notifyPromptSelector(): void {
+    const model = this.getActiveModel();
+    try {
+      promptSelectorService.onModelChanged(model);
+    } catch (error) {
+      console.error(
+        `🎛️ [MODEL] Model is now ${model}, but the prompt profile could not be switched: `,
+        error,
+      );
+    }
   }
 }
 
