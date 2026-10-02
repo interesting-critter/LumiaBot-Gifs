@@ -6,16 +6,16 @@ import type { Command } from '../bot/client';
 const command: Command = {
   data: new SlashCommandBuilder()
     .setName('memories')
-    .setDescription('View users Lumia has formed opinions about')
+    .setDescription('View users Zakira has formed opinions about')
     .addSubcommand((subcommand) =>
       subcommand
         .setName('list')
-        .setDescription('List all users Lumia has opinions about')
+        .setDescription('List all users Zakira has opinions about')
     )
     .addSubcommand((subcommand) =>
       subcommand
         .setName('view')
-        .setDescription('View Lumia\'s opinion about a specific user')
+        .setDescription('View Zakira\'s opinion about a specific user')
         .addStringOption((option) =>
           option
             .setName('username')
@@ -59,7 +59,7 @@ const command: Command = {
         }
 
         const embed = new EmbedBuilder()
-          .setTitle('Users Lumia Has Opinions About')
+          .setTitle('Zakira Has Opinions About')
           .setDescription(`Total: ${users.length} users`)
           .setColor(0xFF69B4)
           .setTimestamp();
@@ -89,14 +89,14 @@ const command: Command = {
 
         if (!opinion) {
           await interaction.reply({
-            content: `Lumia doesn't have any opinions about **${username}** yet.`,
+            content: `Zakira doesn't have any opinions about **${username}** yet.`,
             flags: MessageFlags.Ephemeral,
           });
           return;
         }
 
         const embed = new EmbedBuilder()
-          .setTitle(`Lumia's Opinion About ${opinion.username}`)
+          .setTitle(`Zakira's Opinion About ${opinion.username}`)
           .setDescription(opinion.opinion)
           .addFields(
             { name: 'Sentiment', value: opinion.sentiment, inline: true },
