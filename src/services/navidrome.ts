@@ -12,6 +12,48 @@ export interface NavidromeNowPlayingEntry {
   coverArt?: string;
 }
 
+/**
+ * Minimal shape of the Subsonic JSON API responses this service consumes.
+ * Documenting them keeps the parsed payloads typed instead of `unknown`.
+ */
+interface SubsonicNowPlayingEntry {
+  id: string;
+  title?: string;
+  artist?: string;
+  album?: string;
+  username?: string;
+  minutesAgo?: number;
+  duration?: number;
+  coverArt?: string;
+}
+
+interface SubsonicLyrics {
+  content?: string;
+  value?: string;
+}
+
+interface SubsonicResponseBody {
+  status?: string;
+  error?: { message?: string };
+  nowPlaying?: { entry?: SubsonicNowPlayingEntry | SubsonicNowPlayingEntry[] };
+  lyrics?: string | SubsonicLyrics;
+  version?: string;
+}
+
+interface SubsonicEnvelope {
+  'subsonic-response'?: SubsonicResponseBody;
+}
+
+/** Result of a Navidrome liveness probe. See `NavidromeService.ping`. */
+export interface NavidromeHealth {
+  configured: boolean;
+  reachable: boolean;
+  url: string | null;
+  status: number | null;
+  latencyMs: number | null;
+  detail: string | null;
+}
+
 export class NavidromeService {
   private get baseUrl(): string {
     return (config.navidrome.url || '').replace(/\/+$/, '');
@@ -41,6 +83,86 @@ export class NavidromeService {
   }
 
   /**
+   * Liveness probe for the dashboard's integrations view.
+   *
+   * Uses the Subsonic `ping.view` endpoint, which authenticates but returns no
+   * data, so a health check has no side effects. Distinguishes "not configured"
+   * from "configured but unreachable" so a missing password is not reported as
+   * an outage. Never throws and never hangs: the request is bounded by a timeout.
+   */
+  async ping(timeoutMs = 4000): Promise<NavidromeHealth> {
+    const url = this.baseUrl || null;
+
+    if (!this.isAvailable()) {
+      const missing = [
+        !config.navidrome.url && 'NAVIDROME_URL',
+        !config.navidrome.user && 'NAVIDROME_USER',
+        !config.navidrome.password && 'NAVIDROME_PASSWORD',
+      ].filter(Boolean);
+      return {
+        configured: false,
+        reachable: false,
+        url,
+        status: null,
+        latencyMs: null,
+        detail: `set ${missing.join(', ')}`,
+      };
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const started = Date.now();
+
+    try {
+      const params = this.getAuthParams();
+      const res = await fetch(`${this.baseUrl}/rest/ping.view?${params.toString()}`, {
+        signal: controller.signal,
+      });
+      const latencyMs = Date.now() - started;
+
+      if (!res.ok) {
+        return { configured: true, reachable: false, url, status: res.status, latencyMs, detail: `HTTP ${res.status}` };
+      }
+
+      const json = (await res.json()) as SubsonicEnvelope;
+      const response = json?.['subsonic-response'];
+
+      if (!response || response.status !== 'ok') {
+        return {
+          configured: true,
+          reachable: false,
+          url,
+          status: res.status,
+          latencyMs,
+          detail: response?.error?.message || 'Subsonic API rejected the ping',
+        };
+      }
+
+      const version = response.version ?? null;
+      return {
+        configured: true,
+        reachable: true,
+        url,
+        status: res.status,
+        latencyMs,
+        detail: version ? `Navidrome ${version}` : 'healthy',
+      };
+    } catch (error) {
+      const aborted = error instanceof Error && error.name === 'AbortError';
+      return {
+        configured: true,
+        reachable: false,
+        url,
+        status: null,
+        latencyMs: Date.now() - started,
+        detail: aborted ? `no response after ${timeoutMs}ms` : (error instanceof Error ? error.message : String(error)),
+      };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
    * Fetch currently playing or recently played tracks from Navidrome
    */
   async getNowPlaying(): Promise<NavidromeNowPlayingEntry[]> {
@@ -56,7 +178,7 @@ export class NavidromeService {
       throw new Error(`Navidrome HTTP error: ${res.status} ${res.statusText}`);
     }
 
-    const json = await res.json();
+    const json = (await res.json()) as SubsonicEnvelope;
     const response = json?.['subsonic-response'];
 
     if (!response || response.status !== 'ok') {
@@ -71,7 +193,7 @@ export class NavidromeService {
 
     const list = Array.isArray(entries) ? entries : [entries];
 
-    return list.map((item: any) => ({
+    return list.map((item) => ({
       id: item.id,
       title: item.title || 'Unknown Title',
       artist: item.artist || 'Unknown Artist',
@@ -114,7 +236,7 @@ export class NavidromeService {
       const res = await fetch(url);
       if (!res.ok) return null;
 
-      const json = await res.json();
+      const json = (await res.json()) as SubsonicEnvelope;
       const lyricsData = json?.['subsonic-response']?.lyrics;
       if (!lyricsData) return null;
 
@@ -139,7 +261,10 @@ export class NavidromeService {
       const nowPlaying = await this.getNowPlaying();
       if (!nowPlaying || nowPlaying.length === 0) return null;
 
+      // The length check above guarantees this exists; the guard just satisfies
+      // noUncheckedIndexedAccess and keeps a malformed response from throwing.
       const current = nowPlaying[0];
+      if (!current) return null;
 
       return {
         source: 'spotify', // Set to 'spotify' so existing tool formatters recognize title/artist/album/lyrics

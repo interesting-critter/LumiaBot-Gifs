@@ -1,0 +1,2562 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="robots" content="noindex, nofollow">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%23231f3d'/%3E%3Cg fill='none' stroke='%23b9a6ff' stroke-width='2.6' stroke-linecap='round'%3E%3Ccircle cx='11' cy='11' r='4'/%3E%3Ccircle cx='21' cy='21' r='4'/%3E%3C/g%3E%3C/svg%3E">
+<title>LumiaBot Dashboard</title>
+<style>
+/* ==========================================================================
+   Frosted Glass — design tokens
+   The system ships a Google Fonts @import. The dashboard is served under
+   `default-src 'none'`, so that request would be blocked and the text would
+   fall back silently. --font-geist-sans is bound to the device's own system
+   stack instead, which is the correct choice on a phone anyway and costs no
+   network round trip.
+   ========================================================================== */
+:root {
+  --background: oklch(0.18 0.04 280);
+  --foreground: oklch(0.98 0.005 280);
+  --card: oklch(1 0 0 / 0.07);
+  --card-foreground: oklch(0.98 0.005 280);
+  --popover: oklch(1 0 0 / 0.06);
+  --popover-foreground: oklch(0.98 0.005 280);
+  --primary: oklch(0.8 0.13 285);
+  --primary-foreground: oklch(0.18 0.04 285);
+  --secondary: oklch(1 0 0 / 0.08);
+  --secondary-foreground: oklch(0.74 0.015 280);
+  --muted: oklch(1 0 0 / 0.05);
+  --muted-foreground: oklch(0.72 0.02 280);
+  --accent: oklch(1 0 0 / 0.1);
+  --accent-foreground: oklch(0.98 0.005 280);
+  --destructive: oklch(0.52 0.20 18);
+  --destructive-foreground: oklch(1 0 0);
+  --border: oklch(1 0 0 / 0.14);
+  --input: oklch(1 0 0 / 0.07);
+  --ring: oklch(0.8 0.13 285 / 0.6);
+  --radius: 1.75rem;
+  --fg-fill: oklch(1 0 0 / 0.08);
+  --fg-fill-hover: oklch(1 0 0 / 0.14);
+  --fg-border: oklch(1 0 0 / 0.14);
+  --fg-blur: 1.125rem;
+  --fg-glow: oklch(0.8 0.13 285 / 0.18);
+  --fg-shadow: inset 0 0.0938rem 0.0313rem -0.0313rem oklch(1 0 0 / 0.55), inset 0.0625rem 0.0625rem 0.0938rem -0.0625rem oklch(0.92 0.13 200 / 0.45), inset -0.0625rem -0.0625rem 0.0938rem -0.0625rem oklch(0.82 0.18 350 / 0.4), inset 0 0 0.875rem 0 oklch(1 0 0 / 0.06), 0 0 0 0.0313rem oklch(1 0 0 / 0.18), 0 0.625rem 1.75rem -0.5rem oklch(0 0 0 / 0.55), 0 0 1.375rem -0.125rem var(--fg-glow);
+  --fg-shadow-hover: inset 0 0.125rem 0.0313rem -0.0313rem oklch(1 0 0 / 0.7), inset 0.0625rem 0.0625rem 0.0938rem -0.0625rem oklch(0.92 0.13 200 / 0.55), inset -0.0625rem -0.0625rem 0.0938rem -0.0625rem oklch(0.82 0.18 350 / 0.5), inset 0 0 1rem 0 oklch(1 0 0 / 0.1), 0 0 0 0.0313rem oklch(1 0 0 / 0.28), 0 0.875rem 2.125rem -0.5rem oklch(0 0 0 / 0.6), 0 0 1.875rem -0.125rem var(--fg-glow);
+  --overlay-fill: oklch(0.22 0.04 280 / 0.72);
+  --overlay-border: oklch(1 0 0 / 0.16);
+  --overlay-rim: oklch(1 0 0 / 0.4);
+  --overlay-foreground: oklch(0.96 0.005 280);
+  --overlay-blur: 1.25rem;
+  --overlay-saturate: 1.6;
+  --shadow-overlay: inset 0 0.0625rem 0 0 var(--overlay-rim), 0 1.125rem 2.5rem -0.625rem oklch(0 0 0 / 0.7);
+  --chart-1: var(--primary);
+  --chart-2: oklch(from var(--primary) calc(l - 0.09) calc(c * 0.92) h);
+  --chart-3: oklch(from var(--primary) calc(l - 0.18) calc(c * 0.84) h);
+  --chart-4: oklch(from var(--primary) calc(l - 0.27) calc(c * 0.76) h);
+  --chart-5: oklch(from var(--primary) calc(l - 0.36) calc(c * 0.68) h);
+}
+
+/* Pop surface: the system ships light-mode pop tokens. Measured on the dark
+   glass panels, its pairings land between 3.0:1 and 4.6:1 at badge text sizes,
+   so each foreground is darkened until the pair clears 4.5:1. The light fill
+   is kept, which is what makes a status chip read as a chip on dark glass. */
+:root {
+  --pop-green: oklch(0.88 0.10 150);
+  --pop-green-foreground: oklch(0.33 0.11 152);
+  --pop-orange: oklch(0.90 0.09 50);
+  --pop-orange-foreground: oklch(0.36 0.15 40);
+  --pop-yellow: oklch(0.92 0.11 95);
+  --pop-yellow-foreground: oklch(0.34 0.12 80);
+  --pop-blue: oklch(0.82 0.10 245);
+  --pop-blue-foreground: oklch(0.30 0.13 250);
+}
+
+:root {
+  --font-geist-sans: system-ui;
+  --font-sans: var(--font-geist-sans),
+      ui-sans-serif,
+      system-ui,
+      -apple-system,
+      BlinkMacSystemFont,
+      "Segoe UI",
+      Roboto,
+      "Helvetica Neue",
+      Arial,
+      sans-serif;
+}
+
+:root {
+  --radius-sm: calc(var(--radius) - 0.25rem);
+  --radius-md: calc(var(--radius) - 0.125rem);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 0.25rem);
+  /* Height of the fixed bottom nav on phones. Every scroll clearance below is
+     derived from this, and it is zeroed at the 64rem rail breakpoint. Without a
+     base value the var is invalid at computed-value time, which silently drops
+     main's padding-bottom and lets the last control in a view sit under the
+     nav bar. */
+  --tabbar-h: 62px;
+}
+
+/* ==========================================================================
+   Frosted Glass — component layer
+   ========================================================================== */
+*,*::before,*::after{box-sizing:border-box}
+:where(.ds){font-family:var(--font-sans,ui-sans-serif,system-ui,sans-serif);color:var(--foreground,oklch(0.2 0 0));background:var(--background,oklch(1 0 0));line-height:1.5}
+.ds :where(h1,h2,h3,h4,h5,h6,p,strong,label,legend,li,dt,dd,small){color:inherit}
+.ds h1,.ds h2,.ds h3,.ds h4{font-family:inherit;font-weight:600;margin:0 0 .5em;color:var(--foreground,oklch(0.2 0 0))}
+.ds .ds-display{font-family:inherit;font-size:clamp(1.75rem,4vw,2.5rem);font-weight:700;line-height:1.05;letter-spacing:-.03em;margin:0;color:var(--foreground,oklch(0.2 0 0))}
+.ds .ds-section-title{font-family:inherit;font-size:1.25rem;font-weight:600;line-height:1.2;letter-spacing:-.01em;margin:0;color:var(--foreground,oklch(0.2 0 0))}
+.ds .ds-supporting{font-size:.875rem;font-weight:400;line-height:1.5;color:var(--muted-foreground,oklch(0.55 0 0));margin:0}
+.ds a{color:var(--primary,oklch(0.45 0.15 264));text-decoration:none}
+.ds a.ds-btn{color:inherit}
+.ds a.ds-btn:hover{text-decoration:none}
+.ds p{margin:0 0 1em}
+.ds-muted{color:var(--muted-foreground,oklch(0.55 0 0))}
+
+/* Button */
+.ds-btn{display:inline-flex;align-items:center;justify-content:center;gap:.5rem;font:inherit;font-size:.875rem;font-weight:500;line-height:1;padding:.6rem 1rem;border-radius:var(--radius-md,calc(var(--radius,0.5rem) - 2px));border:1px solid transparent;cursor:pointer;touch-action:manipulation;transition:opacity .15s,background .15s;text-decoration:none}
+.ds-btn:focus-visible{outline:2px solid var(--ring,var(--primary,oklch(0.45 0.15 264)));outline-offset:2px}
+.ds-btn:disabled{background:var(--muted,oklch(0.94 0 0));color:var(--foreground,oklch(0.2 0 0));border-color:var(--border,oklch(0.85 0 0));opacity:1;cursor:not-allowed}
+.ds-btn-primary{background:var(--primary,oklch(0.45 0.15 264));color:var(--primary-foreground,oklch(1 0 0));box-shadow:var(--shadow-sm,var(--shadow-xs,none))}
+.ds-btn-secondary{background:var(--secondary,oklch(0.96 0 0));color:var(--secondary-foreground,oklch(0.25 0 0));box-shadow:var(--shadow-xs,none)}
+.ds-btn-outline{background:transparent;color:var(--foreground,oklch(0.2 0 0));border-color:var(--border,oklch(0.85 0 0))}
+.ds-btn-ghost{background:transparent;color:var(--foreground,oklch(0.2 0 0))}
+.ds .ds-btn[aria-pressed="true"],.ds .ds-btn[aria-pressed="true"]:hover{background:var(--primary,oklch(0.45 0.15 264));color:var(--primary-foreground,oklch(1 0 0));border-color:var(--primary,oklch(0.45 0.15 264));opacity:1}
+.ds-btn-sm{padding:.4rem .7rem;font-size:.8125rem}
+.ds-btn-lg{padding:.75rem 1.4rem;font-size:1rem}
+
+/* Form fields */
+.ds-label{display:block;font-size:.8125rem;font-weight:500;margin-bottom:.4rem;color:var(--foreground,oklch(0.2 0 0))}
+.ds-input,.ds-textarea,.ds-select{width:100%;font:inherit;font-size:.875rem;padding:.55rem .75rem;border-radius:var(--radius-lg,var(--radius,0.5rem));border:1px solid var(--border,oklch(0.85 0 0));background:var(--input,var(--background,oklch(1 0 0)));color:var(--foreground,oklch(0.2 0 0));box-shadow:var(--shadow-inset,var(--shadow-2xs,none));transition:border-color .15s,box-shadow .15s}
+.ds-input::placeholder,.ds-textarea::placeholder{color:var(--muted-foreground,oklch(0.6 0 0))}
+.ds-input:focus,.ds-textarea:focus,.ds-select:focus{outline:none;border-color:var(--ring,var(--primary,oklch(0.45 0.15 264)));box-shadow:var(--shadow-inset,0 0 0 0 transparent),0 0 0 2px color-mix(in oklab,var(--ring,var(--primary,oklch(0.45 0.15 264))) 35%,transparent)}
+.ds-textarea{min-height:5rem;resize:vertical}
+
+/* Card */
+.ds-card{display:flex;flex-direction:column;background:var(--card,var(--background,oklch(1 0 0)));color:var(--card-foreground,var(--foreground,oklch(0.2 0 0)));border:1px solid var(--border,oklch(0.9 0 0));border-radius:var(--radius-xl,calc(var(--radius,0.5rem) + 4px));box-shadow:var(--shadow-glass,var(--shadow-md,var(--shadow-sm,none)));overflow:hidden}
+.ds-card-header{padding:1.1rem 1.25rem .5rem}
+.ds-card-body{padding:.5rem 1.25rem 1.1rem}
+.ds-card-footer{margin-top:auto;padding:.9rem 1.25rem;border-top:1px solid var(--border,oklch(0.92 0 0));display:flex;gap:.5rem;align-items:center}
+.ds-card-title{font-size:1.05rem;margin:0 0 .25rem}
+.ds-card-desc{font-size:.875rem;color:var(--muted-foreground,oklch(0.55 0 0));margin:0}
+
+/* Badge */
+.ds-badge{display:inline-flex;align-items:center;font-size:.6875rem;font-weight:600;padding:.15rem .55rem;border-radius:999px;background:var(--secondary,oklch(0.96 0 0));color:var(--secondary-foreground,oklch(0.25 0 0));line-height:1.4}
+.ds-badge-primary{background:var(--primary,oklch(0.45 0.15 264));color:var(--primary-foreground,oklch(1 0 0))}
+.ds-badge-outline{background:transparent;border:1px solid var(--border,oklch(0.85 0 0));color:var(--foreground,oklch(0.2 0 0))}
+.ds-badge-safe{background:var(--pop-green,oklch(0.92 0.06 150));color:var(--pop-green-foreground,oklch(0.42 0.11 152))}
+.ds-badge-warn{background:var(--pop-orange,oklch(0.93 0.05 40));color:var(--pop-orange-foreground,oklch(0.52 0.18 35))}
+.ds-badge-danger{background:var(--destructive,oklch(0.58 0.22 32));color:var(--destructive-foreground,oklch(0.99 0 0))}
+.ds-badge-unknown{background:var(--pop-yellow,oklch(0.95 0.06 92));color:var(--pop-yellow-foreground,oklch(0.5 0.1 75))}
+.ds-badge-verified{background:var(--pop-blue,oklch(0.92 0.045 245));color:var(--pop-blue-foreground,oklch(0.48 0.14 252))}
+
+/* Alert */
+.ds-alert{border:1px solid var(--border,oklch(0.9 0 0));border-radius:var(--radius-lg,var(--radius,0.5rem));padding:.9rem 1rem;background:var(--card,var(--background,oklch(1 0 0)));color:var(--card-foreground,var(--foreground,oklch(0.2 0 0)));font-size:.875rem}
+.ds-alert-title{font-weight:600;margin:0 0 .2rem}
+
+/* Avatar + misc */
+.ds-avatar{width:2.25rem;height:2.25rem;border-radius:999px;background:var(--muted,oklch(0.95 0 0));color:var(--muted-foreground,oklch(0.45 0 0));display:inline-flex;align-items:center;justify-content:center;font-size:.8125rem;font-weight:600}
+.ds-divider{height:1px;background:var(--border,oklch(0.9 0 0));border:0;margin:1rem 0}
+.ds-row{display:flex;flex-wrap:wrap;gap:.6rem;align-items:center}
+.ds-field{margin-bottom:1rem}
+.ds-control-row{display:grid;grid-template-columns:minmax(8rem,14rem) auto;gap:.75rem;align-items:end;justify-content:start}
+.ds-control-row>.ds-field{margin:0}
+.ds-control-row>.ds-btn,.ds-control-row .ds-input,.ds-control-row .ds-select{min-height:2.75rem}
+.ds-container{max-width:42rem;margin:0 auto;padding:1.5rem}
+
+/* Switch */
+.ds-switch{display:inline-flex;align-items:center;gap:.6rem;font-size:.875rem;cursor:pointer}
+.ds-switch-track{width:2.25rem;height:1.25rem;border-radius:999px;background:var(--muted,oklch(0.9 0 0));position:relative;transition:background .15s;flex:none}
+.ds-switch-track.on{background:var(--primary,oklch(0.45 0.15 264))}
+.ds-switch-thumb{position:absolute;top:2px;left:2px;width:calc(1.25rem - 4px);height:calc(1.25rem - 4px);border-radius:999px;background:var(--background,oklch(1 0 0));box-shadow:var(--shadow-sm,0 1px 2px oklch(0 0 0 / 0.2));transition:transform .15s}
+.ds-switch-track.on .ds-switch-thumb{transform:translateX(1rem)}
+
+/* Tabs */
+.ds-tabs{display:inline-flex;gap:.15rem;padding:.25rem;border-radius:var(--radius-lg,var(--radius,0.5rem));background:var(--muted,oklch(0.96 0 0))}
+.ds-tab{font:inherit;font-size:.8125rem;font-weight:500;padding:.4rem .8rem;border:0;border-radius:var(--radius-md,calc(var(--radius,0.5rem) - 2px));background:transparent;color:var(--muted-foreground,oklch(0.5 0 0));cursor:pointer;touch-action:manipulation}
+.ds-tab.active{background:var(--background,oklch(1 0 0));color:var(--foreground,oklch(0.2 0 0));box-shadow:var(--shadow-sm,var(--shadow-xs,none))}
+
+/* Progress */
+.ds-progress{height:.5rem;border-radius:999px;background:var(--muted,oklch(0.92 0 0));overflow:hidden}
+.ds-progress-bar{height:100%;border-radius:999px;background:var(--primary,oklch(0.45 0.15 264))}
+
+/* Table */
+.ds-table{width:100%;border-collapse:collapse;font-size:.8125rem}
+.ds-table th,.ds-table td{text-align:left;padding:.5rem .75rem;border-bottom:1px solid var(--border,oklch(0.92 0 0))}
+.ds-table th{font-weight:600;color:var(--muted-foreground,oklch(0.5 0 0));font-size:.6875rem;text-transform:uppercase;letter-spacing:.04em}
+
+/* Chip / keyboard key */
+.ds-chip{display:inline-flex;align-items:center;gap:.35rem;font:inherit;font-size:.8125rem;padding:.3rem .7rem;border-radius:999px;border:1px solid var(--border,oklch(0.88 0 0));background:var(--background,oklch(1 0 0));color:var(--foreground,oklch(0.2 0 0));cursor:pointer;touch-action:manipulation;transition:background-color .12s ease,border-color .12s ease,color .12s ease}
+.ds-chip:focus-visible{outline:2px solid var(--ring,var(--primary,oklch(0.45 0.15 264)));outline-offset:2px}
+.ds .ds-chip[aria-pressed="true"],.ds .ds-chip[aria-pressed="true"]:hover{background:var(--primary,oklch(0.45 0.15 264));color:var(--primary-foreground,oklch(1 0 0));border-color:var(--primary,oklch(0.45 0.15 264))}
+.ds-kbd{font-family:var(--font-mono,ui-monospace,monospace);font-size:.75rem;padding:.1rem .4rem;border-radius:var(--radius-sm,4px);border:1px solid var(--border,oklch(0.85 0 0));background:var(--muted,oklch(0.97 0 0));color:var(--foreground,oklch(0.2 0 0))}
+
+@media (pointer:coarse){
+.ds-btn,.ds-tab,.ds-chip{min-height:44px}
+.ds-input,.ds-select{min-height:44px;font-size:1rem}
+}
+@media (max-width:40rem){
+.ds-control-row{grid-template-columns:1fr}
+.ds-control-row>.ds-btn{width:100%}
+}
+
+@media (hover:hover) and (pointer:fine){
+.ds a:hover{text-decoration:underline}
+.ds-btn:hover:not(:disabled):not([aria-pressed="true"]){opacity:.9}
+.ds-btn-ghost:hover:not(:disabled):not([aria-pressed="true"]){background:var(--accent,oklch(0.96 0 0));opacity:1}
+.ds-input:hover:not(:disabled),.ds-textarea:hover:not(:disabled),.ds-select:hover:not(:disabled){border-color:color-mix(in oklab,var(--foreground,oklch(0.2 0 0)) 20%,transparent)}
+.ds .ds-chip:hover:not([aria-pressed="true"]){background:color-mix(in oklab,var(--foreground,oklch(0.2 0 0)) 4%,var(--background,oklch(1 0 0)));color:var(--foreground,oklch(0.2 0 0));border-color:color-mix(in oklab,var(--foreground,oklch(0.2 0 0)) 28%,var(--border,oklch(0.88 0 0)))}
+}
+
+.ds ::selection{background:var(--primary,oklch(0.45 0.15 264));color:var(--primary-foreground,oklch(1 0 0))}
+
+/* ==========================================================================
+   Frosted Glass — material layer
+   ========================================================================== */
+.bd-btn, .bd-view, .ds-btn { border-radius: 9999px; }
+.bd-input, .ds-input, .ds-textarea, .ds-select { border-radius: 9999px; }
+.ds-switch-track.on { background-color: var(--fg-fill-hover); }
+.ds-switch-track.on { box-shadow: var(--fg-shadow); }
+.ds-badge, .ds-badge-primary { border-radius: 9999px; }
+.ds-input, .ds-textarea, .ds-select { border-radius: 9999px; }
+*,::before,::after,::backdrop{--tw-ring-color:currentcolor;--tw-ring-shadow:0 0 0 transparent;--tw-ring-offset-shadow:0 0 0 transparent;--tw-ring-offset-width:0px;--tw-ring-offset-color:oklch(1 0 0);--tw-ring-inset:;--tw-shadow:0 0 0 transparent;--tw-inset-shadow:0 0 0 transparent;--tw-inset-ring-shadow:0 0 0 transparent;--tw-scale-x:1;--tw-scale-y:1;--tw-scale-z:1;--tw-translate-x:0;--tw-translate-y:0;--tw-translate-z:0;--tw-rotate-x:;--tw-rotate-y:;--tw-rotate-z:;--tw-skew-x:;--tw-skew-y:;--tw-gradient-from:transparent;--tw-gradient-to:transparent;--tw-gradient-stops:;--tw-blur:;--tw-brightness:;--tw-contrast:;--tw-saturate:;--tw-content:''}
+.ds-badge { display:inline-flex; align-items:center; justify-content:center; border-radius:calc(infinity * 1px); font-weight:500; transition-property:color,background-color,border-color,text-decoration-color,fill,stroke;transition-timing-function:cubic-bezier(0.4,0,0.2,1);transition-duration:150ms; --tw-backdrop-blur:blur(var(--fg-blur));-webkit-backdrop-filter:var(--tw-backdrop-blur,) var(--tw-backdrop-brightness,) var(--tw-backdrop-contrast,) var(--tw-backdrop-grayscale,) var(--tw-backdrop-hue-rotate,) var(--tw-backdrop-invert,) var(--tw-backdrop-opacity,) var(--tw-backdrop-saturate,) var(--tw-backdrop-sepia,);backdrop-filter:var(--tw-backdrop-blur,) var(--tw-backdrop-brightness,) var(--tw-backdrop-contrast,) var(--tw-backdrop-grayscale,) var(--tw-backdrop-hue-rotate,) var(--tw-backdrop-invert,) var(--tw-backdrop-opacity,) var(--tw-backdrop-saturate,) var(--tw-backdrop-sepia,); backdrop-filter:saturate(150%); background-color:oklch(1 0 0/0.08); color:var(--foreground); box-shadow:inset 0 1px 0 -0.5px oklch(1 0 0/0.4) }
+.ds-badge:focus { outline:2px solid transparent;outline-offset:2px; --tw-ring-shadow:var(--tw-ring-inset,) 0 0 0 calc(2px + var(--tw-ring-offset-width)) var(--tw-ring-color,currentcolor);box-shadow:var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow); --tw-ring-color:color-mix(in oklab, var(--ring) 60%, transparent); --tw-ring-offset-width:0px;--tw-ring-offset-shadow:var(--tw-ring-inset,) 0 0 0 var(--tw-ring-offset-width) var(--tw-ring-offset-color) }
+.ds-btn { position:relative; display:inline-flex; align-items:center; justify-content:center; gap:0.5rem; white-space:nowrap; font-size:15px; font-weight:500; line-height:1; letter-spacing:0.01em; color:var(--foreground); border-radius:calc(infinity * 1px); transition-property:all;transition-timing-function:cubic-bezier(0.4,0,0.2,1);transition-duration:150ms; animation-duration:0.3s; --tw-animation-duration:0.3s; transition-timing-function:cubic-bezier(0,0,0.2,1); user-select:none }
+.ds-btn:focus-visible { outline:2px solid transparent;outline-offset:2px; --tw-ring-shadow:var(--tw-ring-inset,) 0 0 0 calc(2px + var(--tw-ring-offset-width)) var(--tw-ring-color,currentcolor);box-shadow:var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow); --tw-ring-color:color-mix(in oklab, var(--ring) 60%, transparent); --tw-ring-offset-width:0px;--tw-ring-offset-shadow:var(--tw-ring-inset,) 0 0 0 var(--tw-ring-offset-width) var(--tw-ring-offset-color) }
+.ds-btn:disabled { pointer-events:none; opacity:0.4 }
+.ds-btn:active { --tw-scale-x:0.98;--tw-scale-y:0.98;--tw-scale-z:0.98;scale:var(--tw-scale-x) var(--tw-scale-y) var(--tw-scale-z) }
+.ds .ds-btn-secondary { --tw-backdrop-blur:blur(var(--fg-blur));-webkit-backdrop-filter:var(--tw-backdrop-blur,) var(--tw-backdrop-brightness,) var(--tw-backdrop-contrast,) var(--tw-backdrop-grayscale,) var(--tw-backdrop-hue-rotate,) var(--tw-backdrop-invert,) var(--tw-backdrop-opacity,) var(--tw-backdrop-saturate,) var(--tw-backdrop-sepia,);backdrop-filter:var(--tw-backdrop-blur,) var(--tw-backdrop-brightness,) var(--tw-backdrop-contrast,) var(--tw-backdrop-grayscale,) var(--tw-backdrop-hue-rotate,) var(--tw-backdrop-invert,) var(--tw-backdrop-opacity,) var(--tw-backdrop-saturate,) var(--tw-backdrop-sepia,); backdrop-filter:saturate(150%); background-color:oklch(1 0 0/0.05); border-width:1px; border-color:oklch(1 0 0/0.1); color:var(--secondary-foreground); box-shadow:inset 0 1px 0 -0.5px oklch(1 0 0/0.3) }
+.ds .ds-btn-secondary:hover { background-color:var(--fg-fill); color:var(--foreground) }
+.ds .ds-btn-outline { background-color:transparent; border-width:1px; border-color:var(--fg-border) }
+.ds .ds-btn-outline:hover { background-color:oklch(1 0 0/0.06); border-color:oklch(1 0 0/0.24) }
+.ds .ds-btn-ghost { background-color:transparent; color:var(--muted-foreground) }
+.ds .ds-btn-ghost:hover { background-color:oklch(1 0 0/0.06); color:var(--foreground) }
+.ds-input, .ds-textarea, .ds-select { display:flex; height:3rem; border-radius:calc(infinity * 1px); padding-left:1.25rem;padding-right:1.25rem; padding-top:0.5rem;padding-bottom:0.5rem; font-size:15px }
+.ds-input::file-selector-button, .ds-textarea::file-selector-button, .ds-select::file-selector-button { border-width:0; background-color:transparent; font-size:0.875rem;line-height:1.25rem; font-weight:500 }
+
+/* The material layer's bare `.ds-btn` rule lands after `.ds-btn-primary` in
+   the component layer and would paint the primary button's label in the page
+   foreground. Re-assert the variants here, with the badge variants above. */
+.ds-btn-primary{background:var(--primary);color:var(--primary-foreground)}
+.ds-btn-secondary{background:oklch(1 0 0/0.05);color:var(--secondary-foreground)}
+.ds-btn-outline{background:transparent;color:var(--foreground)}
+.ds-btn-ghost{background:transparent;color:var(--foreground)}
+.ds-badge-primary{background:var(--primary);color:var(--primary-foreground)}
+/* The material layer fills neutral badges with 8% white, which measures 4.25:1
+   against the foreground once it composites over the glass cards. Dropped to 5%
+   so the pair clears 4.5:1 without losing the translucent look. */
+.ds-badge{background:oklch(1 0 0/0.05);color:var(--foreground)}
+.ds-badge-outline{background:transparent;border:1px solid var(--border);color:var(--foreground)}
+.ds-badge-safe{background:var(--pop-green);color:var(--pop-green-foreground)}
+.ds-badge-warn{background:var(--pop-orange);color:var(--pop-orange-foreground)}
+.ds-badge-danger{background:var(--destructive);color:var(--destructive-foreground)}
+.ds-badge-unknown{background:var(--pop-yellow);color:var(--pop-yellow-foreground)}
+.ds-badge-verified{background:var(--pop-blue);color:var(--pop-blue-foreground)}
+
+/* ==========================================================================
+   Host isolation
+   ========================================================================== */
+body.ds{color:var(--foreground,oklch(0.2 0 0));background:var(--background,oklch(1 0 0))}
+body.ds :where(h1,h2,h3,h4,h5,h6,p,strong,label,legend,li,dt,dd,small):not(.ds-supporting):not(.ds-card-desc):not(.ds-muted):not(.is-ok):not(.is-bad){color:inherit!important}
+
+/* ==========================================================================
+   App layout
+   Colour, radius, surface and shadow come from the tokens above. Everything
+   below is placement, spacing and sizing only.
+   ========================================================================== */
+html{-webkit-text-size-adjust:100%;text-size-adjust:100%;scroll-padding-bottom:calc(var(--tabbar-h) + env(safe-area-inset-bottom) + 1.5rem);scroll-padding-top:5rem}
+body.ds{
+  margin:0;
+  min-height:100dvh;
+  /* The glass panels need something to blur. This is the system's own
+     background and primary, not a decorative gradient of its own. */
+  background:
+    radial-gradient(120% 60% at 50% 0%, oklch(from var(--primary) calc(l - 0.11) calc(c * 0.5) h / 0.22), transparent 60%),
+    var(--background);
+  background-attachment:fixed;
+  -webkit-tap-highlight-color:transparent;
+  overscroll-behavior-y:contain;
+}
+
+.skip{position:absolute;left:-9999px;top:0;z-index:100;min-height:2.75rem}
+.skip:focus{left:.75rem;top:calc(env(safe-area-inset-top) + .75rem)}
+
+/* ---- App bar ---- */
+.app-bar{
+  position:sticky;top:0;z-index:20;
+  display:flex;align-items:center;gap:.6rem;
+  padding:calc(env(safe-area-inset-top) + .7rem) 1rem .7rem;
+  background:var(--overlay-fill);
+  border-bottom:1px solid var(--overlay-border);
+  backdrop-filter:blur(var(--overlay-blur)) saturate(var(--overlay-saturate));
+  -webkit-backdrop-filter:blur(var(--overlay-blur)) saturate(var(--overlay-saturate));
+}
+.app-mark{
+  display:grid;place-items:center;flex:none;
+  width:2.25rem;height:2.25rem;border-radius:var(--radius-lg);
+  background:var(--card);border:1px solid var(--border);
+  color:var(--primary);font-size:1.15rem;
+  backdrop-filter:blur(var(--fg-blur));-webkit-backdrop-filter:blur(var(--fg-blur));
+}
+.app-name{font-size:1.0625rem;font-weight:600;letter-spacing:-.01em;margin:0}
+.app-bar .ds-badge{flex:none}
+
+main{padding:1rem 1rem calc(var(--tabbar-h) + env(safe-area-inset-bottom) + 1.5rem);max-width:46rem;margin:0 auto}
+.view{display:none}
+.view.active{display:block}
+.stack{display:grid;gap:.875rem}
+
+/* ---- Glass surfaces ---- */
+.ds-card{
+  backdrop-filter:blur(var(--fg-blur)) saturate(150%);
+  -webkit-backdrop-filter:blur(var(--fg-blur)) saturate(150%);
+}
+.card-pad{padding:1.1rem 1.15rem 1.15rem}
+.card-head{display:flex;align-items:baseline;justify-content:space-between;gap:.75rem;margin-bottom:.9rem}
+.card-head .ds-section-title{font-size:1.05rem}
+
+/* ---- Metric tiles ---- */
+.tiles{display:grid;grid-template-columns:repeat(3,1fr);gap:.5rem;margin-top:1rem}
+.tiles-2{grid-template-columns:repeat(2,1fr)}
+.tile{background:var(--muted);border-radius:var(--radius-md);padding:.65rem .7rem;min-width:0}
+.tile dt{font-size:.6875rem;font-weight:500;color:var(--muted-foreground);margin:0}
+.tile dd{margin:.15rem 0 0;font-size:1.125rem;font-weight:600;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+.tile dd.is-bad{color:var(--pop-orange-foreground);background:var(--pop-orange);border-radius:999px;padding:0 .45rem;display:inline-block}
+.tile dd.is-ok{color:var(--pop-green-foreground);background:var(--pop-green);border-radius:999px;padding:0 .45rem;display:inline-block}
+
+/* ---- Activation timeline ----
+   Hour-by-hour volume of the bot's own activations, bucketed from the same
+   log the Log tab reads. Volume only: colour-coding a whole hour because one
+   turn in it failed reads as "this hour is broken" and, with a failure every
+   few hours, paints the chart red. Failures are counted by the Failures tile
+   and badged on the individual entries instead. */
+.strip{display:flex;align-items:flex-end;gap:.3rem;height:3.25rem;margin-top:1.1rem;max-width:24rem}
+.strip-col{flex:1;min-width:0;max-width:1.5rem;height:100%;display:flex;align-items:flex-end}
+.strip-col>span{display:block;width:100%;min-height:2px;border-radius:999px;background:var(--chart-1)}
+.strip-col[data-empty="1"]>span{background:var(--border)}
+
+/* ---- Latest activation ---- */
+.latest{margin-top:1rem;padding-top:.35rem}
+.latest-text{margin:.5rem 0 0;padding:.6rem .75rem;background:var(--muted);border-radius:var(--radius-md);font-size:.875rem;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+
+/* ---- Fact rows ---- */
+.facts{margin:0;display:grid}
+.fact{display:flex;justify-content:space-between;align-items:baseline;gap:1rem;padding:.5rem 0;border-bottom:1px solid var(--border)}
+.fact:last-child{border-bottom:0}
+.fact dt{font-size:.8125rem;color:var(--muted-foreground);flex:0 0 auto}
+.fact dd{margin:0;font-size:.8125rem;text-align:right;overflow-wrap:anywhere}
+.fact dd .warn{color:var(--pop-orange-foreground);background:var(--pop-orange);border-radius:999px;padding:.05rem .5rem;display:inline-block;font-weight:500}
+
+/* ---- Disclosure ---- */
+details.reveal{border:0;background:none;box-shadow:none;backdrop-filter:none;-webkit-backdrop-filter:none;padding:0;margin:0;overflow:visible}
+.reveal>summary{
+  list-style:none;cursor:pointer;
+  display:flex;align-items:center;justify-content:space-between;gap:.6rem;
+  padding:.9rem 1.15rem;
+  background:var(--card);border:1px solid var(--border);border-radius:var(--radius-xl);
+  color:var(--foreground);font-size:.9375rem;font-weight:500;min-height:2.75rem;
+  backdrop-filter:blur(var(--fg-blur)) saturate(150%);-webkit-backdrop-filter:blur(var(--fg-blur)) saturate(150%);
+}
+.reveal>summary::-webkit-details-marker{display:none}
+.reveal>summary:focus-visible{outline:2px solid var(--ring);outline-offset:2px}
+.reveal>summary .chev{width:.5rem;height:.5rem;border-right:1.5px solid currentColor;border-bottom:1.5px solid currentColor;transform:rotate(45deg);flex:none;margin-right:.2rem;transition:transform .15s}
+.reveal[open]>summary .chev{transform:rotate(-135deg)}
+.reveal-body{margin-top:.5rem;background:var(--card);border:1px solid var(--border);border-radius:var(--radius-xl);padding:.4rem 1.15rem 1rem;backdrop-filter:blur(var(--fg-blur)) saturate(150%);-webkit-backdrop-filter:blur(var(--fg-blur)) saturate(150%)}
+
+/* ---- Log entries ---- */
+.entry{margin-bottom:.5rem}
+.entry>summary{
+  list-style:none;cursor:pointer;display:flex;flex-direction:column;gap:.4rem;
+  padding:.85rem 1.15rem;min-height:2.75rem;
+}
+.entry>summary::-webkit-details-marker{display:none}
+.entry>summary:focus-visible{outline:2px solid var(--ring);outline-offset:-2px}
+.entry[open]>summary{border-bottom:1px solid var(--border)}
+.entry[open]>summary .chev{transform:rotate(-135deg)}
+.entry-head{display:flex;flex-wrap:wrap;align-items:center;gap:.4rem;font-size:.75rem;color:var(--muted-foreground)}
+.entry-head .who{color:var(--foreground);font-weight:500;overflow-wrap:anywhere}
+.entry-preview{font-size:.875rem;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.entry-body{padding:.9rem 1.15rem 1rem}
+.bubble{background:var(--muted);border-radius:var(--radius-md);padding:.7rem .85rem;margin-bottom:.6rem;font-size:.875rem;white-space:pre-wrap;overflow-wrap:anywhere}
+.bubble:last-child{margin-bottom:0}
+.bubble .who-label{font-size:.6875rem;font-weight:600;color:var(--muted-foreground);margin-bottom:.3rem}
+.bubble.is-error{background:oklch(from var(--destructive) calc(l - 0.12) calc(c * 0.5) h / 0.22);border:1px solid var(--destructive)}
+
+/* ---- Memory ---- */
+.user-card{margin-bottom:.5rem}
+.user-head{display:flex;align-items:center;gap:.75rem;padding:.9rem 1.15rem;cursor:pointer;min-height:2.75rem}
+.user-head:focus-visible{outline:2px solid var(--ring);outline-offset:-2px}
+.user-id{flex:1;min-width:0}
+.user-name{display:block;font-weight:600;overflow-wrap:anywhere}
+.user-sub{display:block;font-size:.75rem;color:var(--muted-foreground);overflow-wrap:anywhere;margin-top:.1rem}
+.user-body{padding:0 1.15rem 1.1rem;border-top:1px solid var(--border);padding-top:.9rem}
+.mem-entry{background:var(--muted);border-radius:var(--radius-md);padding:.75rem .85rem;margin-bottom:.5rem;font-size:.875rem;overflow-wrap:anywhere}
+.mem-entry .meta{display:flex;flex-wrap:wrap;gap:.5rem;align-items:center;font-size:.75rem;color:var(--muted-foreground);margin-bottom:.4rem}
+.mem-entry .content{white-space:pre-wrap}
+.mem-entry .ds-textarea{height:auto;min-height:5.5rem;margin-bottom:.5rem}
+
+/* ---- Forms ---- */
+.filter-grid{display:grid;gap:.75rem;grid-template-columns:1fr}
+.field-row{display:grid;grid-template-columns:1fr 1fr;gap:.75rem}
+.field-row>.ds-field{margin-bottom:0}
+.hint{font-size:.75rem;color:var(--muted-foreground);margin:.6rem 0 0}
+.empty{text-align:center;color:var(--muted-foreground);padding:1.75rem 1rem;font-size:.875rem}
+
+/* ---- Destructive label + its non-colour cue ---- */
+.btn-danger{color:var(--destructive-foreground)}
+.ds .btn-danger.ds-btn-outline{border-color:var(--destructive);color:var(--destructive-foreground)}
+.ds .btn-danger.ds-btn-outline:hover{background:oklch(from var(--destructive) calc(l - 0.2) calc(c * 0.6) h / 0.2)}
+.ds .btn-danger.ds-btn-ghost{color:var(--destructive-foreground)}
+
+/* ---- Progress ---- */
+.ds-progress-bar.is-warn{background:var(--pop-orange)}
+.ds-progress-bar.is-bad{background:var(--destructive)}
+
+/* ---- Toast ---- */
+#toast{
+  position:fixed;left:50%;transform:translateX(-50%) translateY(1rem);
+  bottom:calc(var(--tabbar-h) + env(safe-area-inset-bottom) + 1rem);
+  z-index:50;max-width:calc(100vw - 2rem);
+  background:var(--overlay-fill);border:1px solid var(--overlay-border);
+  color:var(--overlay-foreground);
+  padding:.7rem 1.1rem;border-radius:999px;
+  font-size:.875rem;font-weight:500;text-align:center;
+  opacity:0;pointer-events:none;transition:opacity .2s,transform .2s;
+  backdrop-filter:blur(var(--overlay-blur)) saturate(var(--overlay-saturate));
+  -webkit-backdrop-filter:blur(var(--overlay-blur)) saturate(var(--overlay-saturate));
+}
+#toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+#toast.ok{background:var(--pop-green);color:var(--pop-green-foreground);border-color:var(--pop-green)}
+#toast.bad{background:var(--destructive);color:var(--destructive-foreground);border-color:var(--destructive)}
+
+/* ---- Switch: the real checkbox stays in the accessibility tree ---- */
+.ds-switch{position:relative}
+.ds-switch input{position:absolute;width:1px;height:1px;margin:0;padding:0;opacity:0}
+.ds-switch input:focus-visible+.ds-switch-track{outline:2px solid var(--ring);outline-offset:2px}
+
+/* ---- Navigation: bottom tab bar on phones, left rail from 64rem ---- */
+.ds-tabs{
+  position:fixed;left:0;right:0;bottom:0;z-index:30;
+  display:flex;width:100%;
+  gap:.15rem;
+  padding:.4rem .5rem calc(.4rem + env(safe-area-inset-bottom));
+  border-radius:0;
+  background:var(--overlay-fill);
+  border:0;border-top:1px solid var(--overlay-border);
+  backdrop-filter:blur(var(--overlay-blur)) saturate(var(--overlay-saturate));
+  -webkit-backdrop-filter:blur(var(--overlay-blur)) saturate(var(--overlay-saturate));
+}
+.ds-tab{
+  flex:1;min-width:0;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.2rem;
+  padding:.4rem .25rem;
+  font-size:.6875rem;font-weight:500;
+  color:var(--muted-foreground);
+  position:relative;
+}
+/* The active tab keeps a visible fill and an accent rail, so "you are here"
+   never depends on the label colour alone. */
+.ds-tab.active{
+  background:var(--card);
+  color:var(--foreground);
+  box-shadow:var(--fg-shadow);
+  backdrop-filter:blur(var(--fg-blur));-webkit-backdrop-filter:blur(var(--fg-blur));
+}
+.ds-tab.active::after{content:"";position:absolute;left:50%;bottom:.2rem;translate:-50% 0;width:1rem;height:2px;border-radius:999px;background:var(--primary)}
+.ds-tab .ico{font-size:1.2rem;line-height:1;display:grid;place-items:center}
+
+@media (hover:hover) and (pointer:fine){
+.reveal>summary:hover{background:var(--fg-fill-hover)}
+.prompt-details>summary:hover{background:var(--fg-fill)}
+.ds .ds-tab:hover:not(.active){background:var(--fg-fill);color:var(--foreground)}
+.ds .ds-tab.active:hover{background:var(--card);color:var(--foreground);opacity:1}
+}
+
+@media (min-width:40rem){
+  .filter-grid{grid-template-columns:1fr 1fr}
+}
+
+/* The kit only raises controls to 44px under (pointer:coarse). This dashboard
+   is mobile-first, so the same figure is applied by screen width as well: a
+   narrow viewport gets finger-sized targets whether or not the browser
+   reports a coarse pointer. Paired fields stack at the same width, because two
+   150px columns leave a document title nowhere to go. */
+@media (max-width:40rem){
+  .ds-btn{min-height:2.75rem}
+  .field-row{grid-template-columns:1fr}
+}
+
+@media (min-width:64rem){
+  :root{--tabbar-h:0px}
+  .ds-tabs{
+    top:0;bottom:0;right:auto;left:0;width:14.5rem;
+    flex-direction:column;align-items:stretch;gap:.2rem;
+    padding:calc(env(safe-area-inset-top) + 1rem) .75rem 1rem;
+    border-top:0;border-right:1px solid var(--overlay-border);
+  }
+  .ds-tab{
+    flex:0 0 auto;flex-direction:row;justify-content:flex-start;
+    gap:.7rem;padding:.7rem .9rem;font-size:.875rem;border-radius:var(--radius-lg);
+  }
+  .ds-tab.active::after{left:.35rem;bottom:auto;top:50%;translate:0 -50%;width:2px;height:1.25rem}
+  .app-bar{padding-left:calc(14.5rem + 1.5rem)}
+  main{
+    margin-left:14.5rem;
+    padding:1.5rem 1.5rem 3rem;
+    max-width:76rem;
+  }
+  .stack{grid-template-columns:1fr 1fr;align-items:start}
+  .stack>.span-2{grid-column:1 / -1}
+  .stack>.align-start{align-self:start}
+  /* A full-bleed hero would stretch the facts and the chart across the whole
+     desktop, so its content keeps a readable measure. */
+  .stack>.span-2>.card-pad{max-width:58rem}
+  /* Every view except the overview is one readable column. Two columns only
+     pay off where two panels are genuine peers, and otherwise leave an empty
+     second column beside a scrolling list. */
+  .stack-list{grid-template-columns:1fr;max-width:56rem}
+  .tiles{grid-template-columns:repeat(3,1fr)}
+  #toast{bottom:1.5rem;left:calc(50% + 7.25rem)}
+}
+
+/* ==========================================================================
+   Added surfaces
+   ========================================================================== */
+
+/* ---- Share bars (per-model usage) ---- */
+.share{display:grid;gap:.55rem;margin-top:.4rem}
+.share-row{display:grid;grid-template-columns:1fr auto;gap:.25rem .6rem;align-items:center}
+.share-name{font-size:.8125rem;overflow-wrap:anywhere;min-width:0}
+.share-val{font-size:.8125rem;color:var(--muted-foreground);font-variant-numeric:tabular-nums;white-space:nowrap}
+.share-track{grid-column:1 / -1;height:.4rem;border-radius:999px;background:var(--muted);overflow:hidden}
+.share-track>span{display:block;height:100%;border-radius:999px;background:var(--chart-1)}
+
+/* ---- Hour-of-day heatmap ----
+   Two rows of twelve so each cell stays large enough to read on a phone.
+   Intensity is carried by the fill and a redundant inset ring on hours that
+   had a failure, with the count spelled out in the accessible label. */
+.heat{display:grid;grid-template-columns:repeat(12,1fr);gap:3px}
+.heat-cell{height:1.75rem;border-radius:var(--radius-sm);background:var(--muted)}
+.heat-cell[data-err="1"]{box-shadow:inset 0 0 0 1.5px var(--destructive)}
+.heat-axis{display:flex;justify-content:space-between;margin-top:.35rem}
+.heat-legend{display:flex;flex-wrap:wrap;gap:.4rem .9rem;margin-top:.7rem;align-items:center}
+.heat-legend i{display:inline-flex;align-items:center;gap:.3rem;font-style:normal;font-size:.75rem;color:var(--muted-foreground)}
+.heat-legend i::before{content:"";width:.7rem;height:.7rem;border-radius:3px;background:var(--muted)}
+.heat-legend i[data-k="low"]::before{background:color-mix(in oklab,var(--primary) 22%,transparent)}
+.heat-legend i[data-k="high"]::before{background:var(--primary)}
+.heat-legend i[data-k="err"]::before{background:var(--muted);box-shadow:inset 0 0 0 1.5px var(--destructive)}
+
+/* ---- Leaderboard ---- */
+.rank{list-style:none;margin:0;padding:0;display:grid;gap:.5rem}
+.rank-row{display:grid;grid-template-columns:1.25rem 1fr auto;gap:.15rem .5rem;align-items:center;font-size:.8125rem}
+.rank-n{color:var(--muted-foreground);font-variant-numeric:tabular-nums}
+.rank-name{overflow-wrap:anywhere;min-width:0}
+.rank-val{font-variant-numeric:tabular-nums;color:var(--muted-foreground);white-space:nowrap}
+.rank-bar{grid-column:2 / -1;height:.3rem;border-radius:999px;background:var(--muted);overflow:hidden;margin-top:.15rem}
+.rank-bar>span{display:block;height:100%;border-radius:999px;background:var(--chart-1)}
+
+/* ---- Expandable rows: memory, knowledge, conversations ---- */
+.xcard{margin-bottom:.5rem}
+.xhead{display:flex;align-items:center;gap:.75rem;padding:.9rem 1.15rem;cursor:pointer;min-height:2.75rem;border-radius:var(--radius-xl)}
+.xhead:focus-visible{outline:2px solid var(--ring);outline-offset:-2px}
+.xid{flex:1;min-width:0}
+.xname{display:block;font-weight:600;overflow-wrap:anywhere}
+.xsub{display:block;font-size:.75rem;color:var(--muted-foreground);overflow-wrap:anywhere;margin-top:.1rem}
+.xbody{padding:0 1.15rem 1.1rem;border-top:1px solid var(--border);padding-top:.9rem}
+
+.mem-entry,.doc-entry{background:var(--muted);border-radius:var(--radius-md);padding:.75rem .85rem;margin-bottom:.5rem;font-size:.875rem;overflow-wrap:anywhere}
+.mem-entry .meta,.doc-entry .meta{display:flex;flex-wrap:wrap;gap:.5rem;align-items:center;font-size:.75rem;color:var(--muted-foreground);margin-bottom:.4rem}
+.mem-entry .content,.doc-entry .content{white-space:pre-wrap}
+.doc-entry .content{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;white-space:normal}
+.mem-entry .ds-textarea,.doc-entry .ds-textarea{height:auto;min-height:5.5rem;margin-bottom:.5rem}
+.kw-row{display:flex;flex-wrap:wrap;gap:.3rem;margin-top:.5rem}
+
+/* ---- Full prompt disclosure ---- */
+.prompt-details{margin:.2rem 0 .8rem;border:1px solid var(--border);border-radius:var(--radius-md);background:oklch(1 0 0/0.03)}
+.prompt-details>summary{list-style:none;cursor:pointer;display:flex;align-items:center;justify-content:space-between;gap:.6rem;padding:.7rem .85rem;min-height:2.75rem;font-size:.8125rem;font-weight:500;color:var(--foreground)}
+.prompt-details>summary::-webkit-details-marker{display:none}
+.prompt-details>summary:focus-visible{outline:2px solid var(--ring);outline-offset:-2px}
+.prompt-details>summary .chev{width:.45rem;height:.45rem;border-right:1.5px solid currentColor;border-bottom:1.5px solid currentColor;transform:rotate(45deg);flex:none;transition:transform .15s}
+.prompt-details[open]>summary .chev{transform:rotate(-135deg)}
+.prompt-details[open]>summary{border-bottom:1px solid var(--border)}
+/* Whitespace and wrapping are the payload's own: pre keeps the persona's line
+   structure, break-anywhere stops a long URL forcing a horizontal scroll. */
+.prompt-body{margin:0;padding:.85rem;font-family:var(--font-mono,ui-monospace,monospace);font-size:.75rem;line-height:1.55;color:var(--foreground);white-space:pre-wrap;overflow-wrap:anywhere;max-height:26rem;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain}
+
+/* ---- Transcript ---- */
+.turn{padding:.6rem 0;border-bottom:1px solid var(--border)}
+.turn:last-child{border-bottom:0}
+.turn .role{font-size:.6875rem;font-weight:500;color:var(--muted-foreground);margin-bottom:.2rem;display:flex;align-items:center;gap:.4rem}
+/* Who spoke is carried by a dot and by weight, not by a dark blue on a dark
+   card. The badge-foreground tokens are tuned to sit on a light chip, so
+   reusing one as body text drops to roughly 1.2:1 here. */
+.turn.is-user .role{font-weight:700;color:var(--foreground)}
+.turn.is-user .role::before{content:"";width:.45rem;height:.45rem;border-radius:999px;background:var(--primary);flex:none}
+.turn .body{font-size:.875rem;white-space:pre-wrap;overflow-wrap:anywhere}
+
+/* ---- Persona editor ---- */
+/* The material layer gives every field a 9999px pill radius. That is right for
+   a single-line control but renders a multi-line textarea as a lozenge, so
+   textareas use the system's own radius scale instead. */
+.ds-textarea{border-radius:var(--radius-md)}
+.pfile-list{
+  display:grid;gap:.4rem;max-height:24rem;overflow-y:auto;-webkit-overflow-scrolling:touch;
+  overscroll-behavior:contain;
+  /* Fade the final row so a clipped entry reads as "scroll for more" rather
+     than as a broken card. */
+  -webkit-mask-image:linear-gradient(to bottom, #000 calc(100% - 1.75rem), transparent);
+  mask-image:linear-gradient(to bottom, #000 calc(100% - 1.75rem), transparent);
+}
+.pfile{display:flex;align-items:center;gap:.6rem;width:100%;text-align:left;padding:.7rem .85rem;border-radius:var(--radius-md);border:1px solid transparent;background:var(--muted);color:var(--foreground);cursor:pointer;font:inherit;min-height:2.75rem}
+.pfile[aria-current="true"]{border-color:var(--primary);background:var(--card)}
+.pfile-id{flex:1;min-width:0}
+.pfile-label{display:block;font-size:.875rem;font-weight:500;overflow-wrap:anywhere}
+.pfile-path{display:block;font-size:.6875rem;color:var(--muted-foreground);overflow-wrap:anywhere}
+.code-area{height:19rem;min-height:12rem;font-family:var(--font-mono,ui-monospace,monospace);font-size:.8125rem;line-height:1.55}
+.dirty-dot{display:inline-block;width:.45rem;height:.45rem;border-radius:999px;background:var(--pop-orange);margin-left:.4rem;vertical-align:middle}
+
+/* ---- More sheet: a native dialog, using the system's overlay tokens ----
+   showModal() supplies the focus trap, Escape handling and focus return, so
+   none of that has to be reimplemented by hand. */
+dialog.sheet{
+  border:1px solid var(--overlay-border);
+  border-radius:var(--radius-xl);
+  background:var(--overlay-fill);
+  color:var(--overlay-foreground);
+  box-shadow:var(--shadow-overlay);
+  backdrop-filter:blur(var(--overlay-blur)) saturate(var(--overlay-saturate));
+  -webkit-backdrop-filter:blur(var(--overlay-blur)) saturate(var(--overlay-saturate));
+  padding:0;margin:auto auto 0;width:100%;max-width:30rem;
+  max-height:82dvh;overflow-y:auto;-webkit-overflow-scrolling:touch;
+  overscroll-behavior:contain;
+}
+dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(--overlay-blur));-webkit-backdrop-filter:blur(var(--overlay-blur))}
+.sheet-head{display:flex;align-items:center;justify-content:space-between;gap:.6rem;padding:1.1rem 1.15rem .4rem;position:sticky;top:0;background:var(--overlay-fill);z-index:1}
+.sheet-list{display:grid;gap:.4rem;padding:.4rem 1.15rem 1.25rem}
+.sheet-item{display:flex;align-items:center;gap:.75rem;width:100%;text-align:left;padding:.8rem .85rem;border-radius:var(--radius-lg);border:1px solid var(--border);background:var(--card);color:var(--foreground);cursor:pointer;font:inherit;min-height:3.5rem}
+.sheet-item .ico{font-size:1.25rem;color:var(--primary);display:grid;place-items:center;flex:none}
+.sheet-item-text{flex:1;min-width:0}
+.sheet-item-label{display:block;font-size:.9375rem;font-weight:500}
+.sheet-item-hint{display:block;font-size:.75rem;color:var(--muted-foreground);margin-top:.1rem}
+
+</style>
+</head>
+<body class="ds">
+
+<a class="ds-btn ds-btn-secondary skip" href="#main">Skip to content</a>
+
+<header class="app-bar">
+  <span class="app-mark" aria-hidden="true">
+    <svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M2.5 6.5C2.5 4.29086 4.29086 2.5 6.5 2.5C8.70914 2.5 10.5 4.29086 10.5 6.5C10.5 8.70914 8.70914 10.5 6.5 10.5C4.29086 10.5 2.5 8.70914 2.5 6.5Z"/><path d="M13.5 17.5C13.5 15.2909 15.2909 13.5 17.5 13.5C19.7091 13.5 21.5 15.2909 21.5 17.5C21.5 19.7091 19.7091 21.5 17.5 21.5C15.2909 21.5 13.5 19.7091 13.5 17.5Z"/><path d="M21.5 6.5C21.5 4.61438 21.5 3.67157 20.9142 3.08579C20.3284 2.5 19.3856 2.5 17.5 2.5C15.6144 2.5 14.6716 2.5 14.0858 3.08579C13.5 3.67157 13.5 4.61438 13.5 6.5C13.5 8.38562 13.5 9.32843 14.0858 9.91421C14.6716 10.5 15.6144 10.5 17.5 10.5C19.3856 10.5 20.3284 10.5 20.9142 9.91421C21.5 9.32843 21.5 8.38562 21.5 6.5Z"/><path d="M10.5 17.5C10.5 15.6144 10.5 14.6716 9.91421 14.0858C9.32843 13.5 8.38562 13.5 6.5 13.5C4.61438 13.5 3.67157 13.5 3.08579 14.0858C2.5 14.6716 2.5 15.6144 2.5 17.5C2.5 19.3856 2.5 20.3284 3.08579 20.9142C3.67157 21.5 4.61438 21.5 6.5 21.5C8.38562 21.5 9.32843 21.5 9.91421 20.9142C10.5 20.3284 10.5 19.3856 10.5 17.5Z"/></svg>
+  </span>
+  <h1 class="app-name">LumiaBot</h1>
+  <span style="flex:1"></span>
+  <span class="ds-badge ds-badge-unknown" id="conn-pill">connecting</span>
+</header>
+
+<main id="main">
+  <!-- ============ OVERVIEW ============ -->
+  <section class="view active" id="view-overview" role="tabpanel" aria-labelledby="tab-overview" tabindex="-1">
+    <div class="stack">
+
+      <article class="ds-card span-2" aria-labelledby="activity-title">
+        <div class="card-pad">
+          <div class="card-head">
+            <h2 class="ds-section-title" id="activity-title">Live activity</h2>
+          </div>
+
+          <p class="ds-display" id="activation-count">—</p>
+          <p class="ds-supporting" id="activation-caption">activations in the rolling window</p>
+
+          <div class="strip" id="activity-strip" role="img" aria-label="Activations per hour"></div>
+
+          <div class="latest" id="latest-block" hidden>
+            <dl class="facts" id="latest-facts"></dl>
+            <p class="latest-text" id="latest-text"></p>
+          </div>
+
+          <dl class="tiles">
+            <div class="tile"><dt>People</dt><dd id="tile-users">—</dd></div>
+            <div class="tile"><dt>Reply time</dt><dd id="tile-avg">—</dd></div>
+            <div class="tile"><dt>Failures</dt><dd id="tile-errors">—</dd></div>
+          </dl>
+        </div>
+      </article>
+
+      <article class="ds-card" aria-labelledby="model-title">
+        <div class="card-pad">
+          <div class="card-head">
+            <h2 class="ds-section-title" id="model-title">Model</h2>
+            <span id="model-badge"></span>
+          </div>
+          <div id="model-block"><div class="empty">Loading…</div></div>
+          <div id="usage-block" style="margin-top:1.1rem;padding-top:1rem;border-top:1px solid var(--border)"><div class="empty">Loading…</div></div>
+        </div>
+      </article>
+
+      <details class="reveal" id="by-model-reveal">
+        <summary>Requests by model<span class="chev" aria-hidden="true"></span></summary>
+        <div class="reveal-body" id="by-model-block"></div>
+      </details>
+
+      <details class="reveal">
+        <summary>Runtime details<span class="chev" aria-hidden="true"></span></summary>
+        <div class="reveal-body">
+          <dl class="facts" id="status-block"></dl>
+        </div>
+      </details>
+
+    </div>
+  </section>
+
+  <!-- ============ LOG ============ -->
+  <section class="view" id="view-log" role="tabpanel" aria-labelledby="tab-log" tabindex="-1">
+    <div class="stack stack-list">
+      <article class="ds-card">
+        <div class="card-pad">
+          <div class="ds-field">
+            <label class="ds-label" for="log-q">Search prompts and responses</label>
+            <input class="ds-input" type="search" id="log-q" placeholder="Search the rolling log" autocomplete="off">
+          </div>
+          <div class="filter-grid">
+            <div class="ds-field">
+              <label class="ds-label" for="log-source">Trigger</label>
+              <select class="ds-select" id="log-source">
+                <option value="">All triggers</option>
+                <option value="mention">Mentions</option>
+                <option value="keyword">Keywords</option>
+                <option value="reply">Replies</option>
+                <option value="orchestrator">Orchestrator</option>
+                <option value="boredom">Boredom</option>
+                <option value="slash-command">Slash commands</option>
+              </select>
+            </div>
+            <div class="ds-field">
+              <label class="ds-label" for="log-limit">Entries</label>
+              <select class="ds-select" id="log-limit">
+                <option value="25">25</option>
+                <option value="50" selected>50</option>
+                <option value="100">100</option>
+                <option value="250">250</option>
+              </select>
+            </div>
+          </div>
+          <div class="ds-row">
+            <button class="ds-btn ds-btn-secondary" id="log-refresh">
+              <svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.67981 13L3.67981 11.3333C3.67981 6.73096 7.4402 3 12.0789 3C15.1178 3 17.7799 4.60136 19.2545 7M2 11.3333L3.67981 13L5.35962 11.3333"/><path d="M20.3139 11V12.6667C20.3139 17.269 16.5391 21 11.8827 21C8.83213 21 6.15995 19.3986 4.67969 17M22.0001 12.6667L20.3139 11L18.6277 12.6667"/></svg>
+              Refresh
+            </button>
+            <button class="ds-btn ds-btn-ghost btn-danger" id="log-clear">
+              <svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M20.5001 6H3.5"/><path d="M18.8332 8.5L18.3732 15.3991C18.1962 18.054 18.1077 19.3815 17.2427 20.1907C16.3777 21 15.0473 21 12.3865 21H11.6132C8.95235 21 7.62195 21 6.75694 20.1907C5.89194 19.3815 5.80344 18.054 5.62644 15.3991L5.1665 8.5"/><path d="M6.5 6C6.55588 6 6.58382 6 6.60915 5.99936C7.43259 5.97849 8.15902 5.45491 8.43922 4.68032C8.44784 4.65649 8.45667 4.62999 8.47434 4.57697L8.57143 4.28571C8.65431 4.03708 8.69575 3.91276 8.75071 3.8072C8.97001 3.38607 9.37574 3.09364 9.84461 3.01877C9.96213 3 10.0932 3 10.3553 3H13.6447C13.9068 3 14.0379 3 14.1554 3.01877C14.6243 3.09364 15.03 3.38607 15.2493 3.8072C15.3043 3.91276 15.3457 4.03708 15.4286 4.28571L15.5257 4.57697C15.5433 4.62992 15.5522 4.65651 15.5608 4.68032C15.841 5.45491 16.5674 5.97849 17.3909 5.99936C17.4162 6 17.4441 6 17.5 6"/></svg>
+              Clear log
+            </button>
+          </div>
+          <p class="hint" id="log-hint"></p>
+          <div id="log-breakdown"></div>
+        </div>
+      </article>
+
+      <details class="reveal" id="analytics-reveal">
+        <summary>Latency and busiest hours<span class="chev" aria-hidden="true"></span></summary>
+        <div class="reveal-body" id="analytics-block"></div>
+      </details>
+
+      <div id="log-list"></div>
+    </div>
+  </section>
+
+  <!-- ============ MEMORY ============ -->
+  <section class="view" id="view-memory" role="tabpanel" aria-labelledby="tab-memory" tabindex="-1">
+    <div class="stack stack-list">
+      <article class="ds-card">
+        <div class="card-pad">
+          <dl class="tiles tiles-2" style="margin-top:0">
+            <div class="tile"><dt>People</dt><dd id="mem-users">—</dd></div>
+            <div class="tile"><dt>Memories</dt><dd id="mem-entries">—</dd></div>
+            <div class="tile"><dt>Opinions</dt><dd id="mem-opinions">—</dd></div>
+            <div class="tile"><dt>Third party</dt><dd id="mem-third">—</dd></div>
+          </dl>
+          <div class="ds-field" style="margin:1rem 0 0">
+            <label class="ds-label" for="mem-q">Search people</label>
+            <input class="ds-input" type="search" id="mem-q" placeholder="Name or user ID" autocomplete="off">
+          </div>
+          <div class="ds-row">
+            <button class="ds-btn ds-btn-secondary" id="mem-refresh">
+              <svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.67981 13L3.67981 11.3333C3.67981 6.73096 7.4402 3 12.0789 3C15.1178 3 17.7799 4.60136 19.2545 7M2 11.3333L3.67981 13L5.35962 11.3333"/><path d="M20.3139 11V12.6667C20.3139 17.269 16.5391 21 11.8827 21C8.83213 21 6.15995 19.3986 4.67969 17M22.0001 12.6667L20.3139 11L18.6277 12.6667"/></svg>
+              Refresh
+            </button>
+          </div>
+        </div>
+      </article>
+
+      <div id="mem-list"></div>
+    </div>
+  </section>
+
+  <!-- ============ SETUP ============ -->
+  <section class="view" id="view-setup" role="tabpanel" aria-labelledby="tab-setup" tabindex="-1">
+    <div class="stack stack-list">
+
+      <article class="ds-card">
+        <div class="card-pad">
+          <div class="card-head">
+            <h2 class="ds-section-title">Auto refresh</h2>
+          </div>
+          <div class="field-row">
+            <label class="ds-switch">
+              <input type="checkbox" id="refresh-toggle">
+              <span class="ds-switch-track" id="refresh-track"><span class="ds-switch-thumb"></span></span>
+              <span>Refresh the overview</span>
+            </label>
+            <div class="ds-field" style="margin:0">
+              <label class="ds-label" for="refresh-interval">Interval</label>
+              <select class="ds-select" id="refresh-interval">
+                <option value="30000">Every 30s</option>
+                <option value="60000" selected>Every 1m</option>
+                <option value="300000">Every 5m</option>
+                <option value="600000">Every 10m</option>
+              </select>
+            </div>
+          </div>
+          <p class="hint">Only the overview polls. Log and Memory load when you open them.</p>
+        </div>
+      </article>
+
+      <article class="ds-card">
+        <div class="card-pad">
+          <div class="card-head">
+            <h2 class="ds-section-title">Add a memory</h2>
+          </div>
+          <div class="ds-field">
+            <label class="ds-label" for="add-userid">User ID</label>
+            <input class="ds-input" type="text" id="add-userid" inputmode="numeric" placeholder="944783522059673691" autocomplete="off">
+          </div>
+          <div class="ds-field">
+            <label class="ds-label" for="add-username">Username, if the person is unknown</label>
+            <input class="ds-input" type="text" id="add-username" placeholder="prolix_oc" autocomplete="off">
+          </div>
+          <div class="field-row">
+            <div class="ds-field">
+              <label class="ds-label" for="add-kind">Type</label>
+              <select class="ds-select" id="add-kind">
+                <option value="opinion">Opinion</option>
+                <option value="third_party">Third party</option>
+              </select>
+            </div>
+            <div class="ds-field" style="display:flex;align-items:flex-end">
+              <button class="ds-btn ds-btn-primary" id="add-submit" style="width:100%">Add memory</button>
+            </div>
+          </div>
+          <div class="ds-field" style="margin-bottom:0">
+            <label class="ds-label" for="add-content">Memory text</label>
+            <textarea class="ds-textarea" id="add-content" placeholder="Likes late-night coding sessions and colder weather."></textarea>
+          </div>
+          <p class="hint" id="add-hint"></p>
+        </div>
+      </article>
+
+      <article class="ds-card">
+        <div class="card-pad">
+          <div class="card-head">
+            <h2 class="ds-section-title">Configuration</h2>
+            <svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true" style="color:var(--muted-foreground);font-size:1.1rem"><path d="M4 18V6"/><path d="M20 6V18"/><path d="M12 10C16.4183 10 20 8.20914 20 6C20 3.79086 16.4183 2 12 2C7.58172 2 4 3.79086 4 6C4 8.20914 7.58172 10 12 10Z"/><path d="M20 12C20 14.2091 16.4183 16 12 16C7.58172 16 4 14.2091 4 12"/><path d="M20 18C20 20.2091 16.4183 22 12 22C7.58172 22 4 20.2091 4 18"/></svg>
+          </div>
+          <dl class="facts" id="storage-block"></dl>
+        </div>
+      </article>
+
+      <article class="ds-card">
+        <div class="card-pad">
+          <div class="card-head">
+            <h2 class="ds-section-title">Maintenance</h2>
+          </div>
+          <div class="ds-row">
+            <button class="ds-btn ds-btn-outline btn-danger" id="reset-usage">
+              <svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M20.5001 6H3.5"/><path d="M18.8332 8.5L18.3732 15.3991C18.1962 18.054 18.1077 19.3815 17.2427 20.1907C16.3777 21 15.0473 21 12.3865 21H11.6132C8.95235 21 7.62195 21 6.75694 20.1907C5.89194 19.3815 5.80344 18.054 5.62644 15.3991L5.1665 8.5"/><path d="M6.5 6C6.55588 6 6.58382 6 6.60915 5.99936C7.43259 5.97849 8.15902 5.45491 8.43922 4.68032C8.44784 4.65649 8.45667 4.62999 8.47434 4.57697L8.57143 4.28571C8.65431 4.03708 8.69575 3.91276 8.75071 3.8072C8.97001 3.38607 9.37574 3.09364 9.84461 3.01877C9.96213 3 10.0932 3 10.3553 3H13.6447C13.9068 3 14.0379 3 14.1554 3.01877C14.6243 3.09364 15.03 3.38607 15.2493 3.8072C15.3043 3.91276 15.3457 4.03708 15.4286 4.28571L15.5257 4.57697C15.5433 4.62992 15.5522 4.65651 15.5608 4.68032C15.841 5.45491 16.5674 5.97849 17.3909 5.99936C17.4162 6 17.4441 6 17.5 6"/></svg>
+              Reset request counter
+            </button>
+          </div>
+          <p class="hint">Clears the recorded LLM call history for every window. Cannot be undone.</p>
+        </div>
+      </article>
+
+    </div>
+  </section>
+
+  <!-- ============ KNOWLEDGE ============ -->
+  <section class="view" id="view-knowledge" role="tabpanel" aria-labelledby="tab-knowledge" tabindex="-1">
+    <div class="stack stack-list">
+      <article class="ds-card">
+        <div class="card-pad">
+          <dl class="tiles tiles-2" style="margin-top:0">
+            <div class="tile"><dt>Documents</dt><dd id="kb-docs">&mdash;</dd></div>
+            <div class="tile"><dt>Topics</dt><dd id="kb-topics">&mdash;</dd></div>
+          </dl>
+          <div class="ds-field" style="margin:1rem 0 0">
+            <label class="ds-label" for="kb-q">Search documents</label>
+            <input class="ds-input" type="search" id="kb-q" placeholder="Keyword, title or body text" autocomplete="off">
+          </div>
+          <div class="filter-grid">
+            <div class="ds-field">
+              <label class="ds-label" for="kb-topic">Topic</label>
+              <select class="ds-select" id="kb-topic"><option value="">All topics</option></select>
+            </div>
+            <div class="ds-field" style="display:flex;align-items:flex-end">
+              <button class="ds-btn ds-btn-primary" id="kb-new" style="width:100%">New document</button>
+            </div>
+          </div>
+          <div class="ds-row">
+            <button class="ds-btn ds-btn-outline" id="kb-sync">
+              <svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.67981 13L3.67981 11.3333C3.67981 6.73096 7.4402 3 12.0789 3C15.1178 3 17.7799 4.60136 19.2545 7M2 11.3333L3.67981 13L5.35962 11.3333"/><path d="M20.3139 11V12.6667C20.3139 17.269 16.5391 21 11.8827 21C8.83213 21 6.15995 19.3986 4.67969 17M22.0001 12.6667L20.3139 11L18.6277 12.6667"/></svg>
+              Reload from files
+            </button>
+          </div>
+          <p class="hint" id="kb-hint"></p>
+        </div>
+      </article>
+      <div id="kb-list"></div>
+    </div>
+  </section>
+
+  <!-- ============ CONVERSATIONS ============ -->
+  <section class="view" id="view-conversations" role="tabpanel" aria-labelledby="tab-more" tabindex="-1">
+    <div class="stack stack-list">
+      <article class="ds-card">
+        <div class="card-pad">
+          <div class="card-head">
+            <h2 class="ds-section-title">Conversations</h2>
+            <span class="ds-badge" id="conv-total">&mdash;</span>
+          </div>
+          <div class="ds-field" style="margin-bottom:0">
+            <label class="ds-label" for="conv-q">Filter by name or ID</label>
+            <input class="ds-input" type="search" id="conv-q" placeholder="All stored conversations" autocomplete="off">
+          </div>
+        </div>
+      </article>
+      <div id="conv-list"></div>
+    </div>
+  </section>
+
+  <!-- ============ INTEGRATIONS ============ -->
+  <section class="view" id="view-integrations" role="tabpanel" aria-labelledby="tab-more" tabindex="-1">
+    <div class="stack stack-list">
+      <article class="ds-card">
+        <div class="card-pad">
+          <div class="card-head">
+            <h2 class="ds-section-title">Web search</h2>
+            <span id="searx-badge"><span class="ds-badge ds-badge-unknown">checking</span></span>
+          </div>
+          <dl class="facts" id="searx-facts"><div class="fact"><dt>Status</dt><dd>Checking the server now</dd></div></dl>
+        </div>
+      </article>
+      <article class="ds-card">
+        <div class="card-pad">
+          <div class="card-head">
+            <h2 class="ds-section-title">Music server</h2>
+            <span id="nav-badge"><span class="ds-badge ds-badge-unknown">checking</span></span>
+          </div>
+          <dl class="facts" id="nav-facts"><div class="fact"><dt>Status</dt><dd>Checking the server now</dd></div></dl>
+        </div>
+      </article>
+      <div class="ds-row">
+        <button class="ds-btn ds-btn-primary" id="integ-recheck">
+          <svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.67981 13L3.67981 11.3333C3.67981 6.73096 7.4402 3 12.0789 3C15.1178 3 17.7799 4.60136 19.2545 7M2 11.3333L3.67981 13L5.35962 11.3333"/><path d="M20.3139 11V12.6667C20.3139 17.269 16.5391 21 11.8827 21C8.83213 21 6.15995 19.3986 4.67969 17M22.0001 12.6667L20.3139 11L18.6277 12.6667"/></svg>
+          Check both again
+        </button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ PERSONA ============ -->
+  <section class="view" id="view-persona" role="tabpanel" aria-labelledby="tab-more" tabindex="-1">
+    <div class="stack stack-list">
+      <article class="ds-card">
+        <div class="card-pad">
+          <div class="card-head">
+            <h2 class="ds-section-title">Prompt files</h2>
+            <span class="ds-badge" id="persona-count">&mdash;</span>
+          </div>
+          <div class="pfile-list" id="persona-list"></div>
+        </div>
+      </article>
+      <article class="ds-card" id="persona-editor" hidden>
+        <div class="card-pad">
+          <div class="card-head">
+            <h2 class="ds-section-title" id="persona-title">—</h2>
+            <span class="ds-badge" id="persona-kind"></span>
+          </div>
+          <p class="hint" id="persona-desc" style="margin:-.4rem 0 .9rem"></p>
+          <div class="ds-field">
+            <label class="ds-label" for="persona-content">File contents</label>
+            <textarea class="ds-textarea code-area" id="persona-content" spellcheck="false" autocomplete="off"></textarea>
+          </div>
+          <div class="ds-row">
+            <button class="ds-btn ds-btn-primary" id="persona-save">Save and reload</button>
+            <button class="ds-btn ds-btn-ghost" id="persona-discard">Discard changes</button>
+          </div>
+          <p class="hint" id="persona-hint"></p>
+        </div>
+      </article>
+    </div>
+  </section>
+
+</main>
+<nav class="ds-tabs" aria-label="Primary">
+  <button type="button" class="ds-tab active" data-view="overview" aria-selected="true" aria-controls="view-overview" role="tab" id="tab-overview">
+    <span class="ico" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M2.5 6.5C2.5 4.29086 4.29086 2.5 6.5 2.5C8.70914 2.5 10.5 4.29086 10.5 6.5C10.5 8.70914 8.70914 10.5 6.5 10.5C4.29086 10.5 2.5 8.70914 2.5 6.5Z"/><path d="M13.5 17.5C13.5 15.2909 15.2909 13.5 17.5 13.5C19.7091 13.5 21.5 15.2909 21.5 17.5C21.5 19.7091 19.7091 21.5 17.5 21.5C15.2909 21.5 13.5 19.7091 13.5 17.5Z"/><path d="M21.5 6.5C21.5 4.61438 21.5 3.67157 20.9142 3.08579C20.3284 2.5 19.3856 2.5 17.5 2.5C15.6144 2.5 14.6716 2.5 14.0858 3.08579C13.5 3.67157 13.5 4.61438 13.5 6.5C13.5 8.38562 13.5 9.32843 14.0858 9.91421C14.6716 10.5 15.6144 10.5 17.5 10.5C19.3856 10.5 20.3284 10.5 20.9142 9.91421C21.5 9.32843 21.5 8.38562 21.5 6.5Z"/><path d="M10.5 17.5C10.5 15.6144 10.5 14.6716 9.91421 14.0858C9.32843 13.5 8.38562 13.5 6.5 13.5C4.61438 13.5 3.67157 13.5 3.08579 14.0858C2.5 14.6716 2.5 15.6144 2.5 17.5C2.5 19.3856 2.5 20.3284 3.08579 20.9142C3.67157 21.5 4.61438 21.5 6.5 21.5C8.38562 21.5 9.32843 21.5 9.91421 20.9142C10.5 20.3284 10.5 19.3856 10.5 17.5Z"/></svg></span>
+    Overview
+  </button>
+  <button type="button" class="ds-tab" data-view="log" aria-selected="false" aria-controls="view-log" role="tab" id="tab-log">
+    <span class="ico" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M12 22C17.5228 22 22 17.5228 22 12C22 6.47715 17.5228 2 12 2C6.47715 2 2 6.47715 2 12C2 13.5997 2.37562 15.1116 3.04346 16.4525C3.22094 16.8088 3.28001 17.2161 3.17712 17.6006L2.58151 19.8267C2.32295 20.793 3.20701 21.677 4.17335 21.4185L6.39939 20.8229C6.78393 20.72 7.19121 20.7791 7.54753 20.9565C8.88837 21.6244 10.4003 22 12 22Z"/></svg></span>
+    Log
+  </button>
+  <button type="button" class="ds-tab" data-view="memory" aria-selected="false" aria-controls="view-memory" role="tab" id="tab-memory">
+    <span class="ico" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="9" cy="9" r="2"/><path d="M13 15C13 16.1046 13 17 9 17C5 17 5 16.1046 5 15C5 13.8954 6.79086 13 9 13C11.2091 13 13 13.8954 13 15Z"/><path d="M2 12C2 8.22876 2 6.34315 3.17157 5.17157C4.34315 4 6.22876 4 10 4H14C17.7712 4 19.6569 4 20.8284 5.17157C22 6.34315 22 8.22876 22 12C22 15.7712 22 17.6569 20.8284 18.8284C19.6569 20 17.7712 20 14 20H10C6.22876 20 4.34315 20 3.17157 18.8284C2 17.6569 2 15.7712 2 12Z"/><path d="M19 12H15"/><path d="M19 9H14"/><path d="M19 15H16"/></svg></span>
+    Memory
+  </button>
+  <button type="button" class="ds-tab" data-view="knowledge" aria-selected="false" aria-controls="view-knowledge" role="tab" id="tab-knowledge">
+    <span class="ico" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M4 19.5C4 20.8807 5.11929 22 6.5 22H20"/><path d="M6.5 2H20V22H6.5C5.11929 22 4 20.8807 4 19.5V4.5C4 3.11929 5.11929 2 6.5 2Z"/><path d="M9 7H16"/><path d="M9 11H16"/></svg></span>
+    Knowledge
+  </button>
+  <button type="button" class="ds-tab" data-view="more" aria-selected="false" aria-haspopup="dialog" role="tab" id="tab-more">
+    <span class="ico" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M12 13C13.6569 13 15 14.3431 15 16C15 17.6569 13.6569 19 12 19C10.3431 19 9 17.6569 9 16C9 14.3431 10.3431 13 12 13Z"/><path d="M12 5C13.6569 5 15 6.34315 15 8C15 9.65685 13.6569 11 12 11C10.3431 11 9 9.65685 9 8C9 6.34315 10.3431 5 12 5Z"/><path d="M12 21C10.3431 21 9 19.6569 9 18C9 16.3431 10.3431 15 12 15C13.6569 15 15 16.3431 15 18C15 19.6569 13.6569 21 12 21Z"/><path d="M12 3C10.3431 3 9 4.34315 9 6C9 7.65685 10.3431 9 12 9C13.6569 9 15 7.65685 15 6C15 4.34315 13.6569 3 12 3Z"/></svg></span>
+    More
+  </button>
+</nav>
+
+<dialog class="ds sheet" id="more-sheet" aria-label="More sections">
+  <div class="sheet-head">
+    <h2 class="ds-section-title" style="font-size:1.05rem">More</h2>
+    <button class="ds-btn ds-btn-ghost ds-btn-sm" id="sheet-close" aria-label="Close">Close</button>
+  </div>
+  <div class="sheet-list">
+    <button type="button" class="sheet-item" data-goto="conversations">
+      <span class="ico" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M12 22C17.5228 22 22 17.5228 22 12C22 6.47715 17.5228 2 12 2C6.47715 2 2 6.47715 2 12C2 13.5997 2.37562 15.1116 3.04346 16.4525C3.22094 16.8088 3.28001 17.2161 3.17712 17.6006L2.58151 19.8267C2.32295 20.793 3.20701 21.677 4.17335 21.4185L6.39939 20.8229C6.78393 20.72 7.19121 20.7791 7.54753 20.9565C8.88837 21.6244 10.4003 22 12 22Z"/></svg></span>
+      <span class="sheet-item-text"><span class="sheet-item-label">Conversations</span><span class="sheet-item-hint">Read or clear stored message history</span></span>
+    </button>
+    <button type="button" class="sheet-item" data-goto="integrations">
+      <span class="ico" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M18.7083 8.5C18.7083 9.8377 17.9683 11.0437 16.8835 11.8215C16.5534 11.9939 16.2104 12.1418 15.8568 12.2628C15.3832 12.4257 15 12.8585 15 13.3666V14.5H9V13.3666C9 12.8585 8.61679 12.4257 8.14319 12.2628C7.7896 12.1418 7.44665 11.9939 7.11649 11.8215C6.03172 11.0437 5.29167 9.8377 5.29167 8.5C5.29167 4.98172 8.00992 2 12 2C15.9901 2 18.7083 4.98172 18.7083 8.5Z"/><path d="M12 15V22"/><path d="M9 18H15"/></svg></span>
+      <span class="sheet-item-text"><span class="sheet-item-label">Integrations</span><span class="sheet-item-hint">Check the search and music servers</span></span>
+    </button>
+    <button type="button" class="sheet-item" data-goto="persona">
+      <span class="ico" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M9 11H15C16.1046 11 17 11.8954 17 13V19C17 20.1046 16.1046 21 15 21H9C7.89543 21 7 20.1046 7 19V13C7 11.8954 7.89543 11 9 11Z"/><path d="M12 7V4"/><path d="M9.5 4H14.5"/></svg></span>
+      <span class="sheet-item-text"><span class="sheet-item-label">Persona</span><span class="sheet-item-hint">Edit the prompt files the bot reads</span></span>
+    </button>
+    <button type="button" class="sheet-item" data-goto="setup">
+      <span class="ico" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M13.7654 2.15224C13.3978 2 12.9319 2 12 2C11.0681 2 10.6022 2 10.2346 2.15224C9.74457 2.35523 9.35522 2.74458 9.15223 3.23463C9.05957 3.45834 9.0233 3.7185 9.00911 4.09799C8.98826 4.65568 8.70226 5.17189 8.21894 5.45093C7.73564 5.72996 7.14559 5.71954 6.65219 5.45876C6.31645 5.2813 6.07301 5.18262 5.83294 5.15102C5.30704 5.08178 4.77518 5.22429 4.35436 5.5472C4.03874 5.78938 3.80577 6.1929 3.33983 6.99993C2.87389 7.80697 2.64092 8.21048 2.58899 8.60491C2.51976 9.1308 2.66227 9.66266 2.98518 10.0835C3.13256 10.2756 3.3397 10.437 3.66119 10.639C4.1338 10.936 4.43789 11.4419 4.43786 12C4.43783 12.5581 4.13375 13.0639 3.66118 13.3608C3.33965 13.5629 3.13248 13.7244 2.98508 13.9165C2.66217 14.3373 2.51966 14.8691 2.5889 15.395C2.64082 15.7894 2.87379 16.193 3.33973 17C3.80568 17.807 4.03865 18.2106 4.35426 18.4527C4.77508 18.7756 5.30694 18.9181 5.83284 18.8489C6.07289 18.8173 6.31632 18.7186 6.65204 18.5412C7.14547 18.2804 7.73556 18.27 8.2189 18.549C8.70224 18.8281 8.98826 19.3443 9.00911 19.9021C9.02331 20.2815 9.05957 20.5417 9.15223 20.7654C9.35522 21.2554 9.74457 21.6448 10.2346 21.8478C10.6022 22 11.0681 22 12 22C12.9319 22 13.3978 22 13.7654 21.8478C14.2554 21.6448 14.6448 21.2554 14.8477 20.7654C14.9404 20.5417 14.9767 20.2815 14.9909 19.902C15.0117 19.3443 15.2977 18.8281 15.781 18.549C16.2644 18.2699 16.8544 18.2804 17.3479 18.5412C17.6836 18.7186 17.927 18.8172 18.167 18.8488C18.6929 18.9181 19.2249 18.7756 19.6457 18.4527C19.9612 18.2105 20.1942 17.807 20.6601 16.9999C21.1261 16.1929 21.3591 15.7894 21.411 15.395C21.4803 14.8691 21.3377 14.3372 21.0148 13.9164C20.8674 13.7243 20.6602 13.5628 20.3387 13.3608C19.8662 13.0639 19.5621 12.558 19.5621 11.9999C19.5621 11.4418 19.8662 10.9361 20.3387 10.6392C20.6603 10.4371 20.8675 10.2757 21.0149 10.0835C21.3378 9.66273 21.4803 9.13087 21.4111 8.60497C21.3592 8.21055 21.1262 7.80703 20.6602 7C20.1943 6.19297 19.9613 5.78945 19.6457 5.54727C19.2249 5.22436 18.693 5.08185 18.167 5.15109C17.927 5.18269 17.6837 5.28136 17.3479 5.4588C16.8545 5.71959 16.2644 5.73002 15.7811 5.45096C15.2977 5.17191 15.0117 4.65566 14.9909 4.09794C14.9767 3.71848 14.9404 3.45833 14.8477 3.23463C14.6448 2.74458 14.2554 2.35523 13.7654 2.15224Z"/></svg></span>
+      <span class="sheet-item-text"><span class="sheet-item-label">Setup</span><span class="sheet-item-hint">Auto refresh, stored data and maintenance</span></span>
+    </button>
+  </div>
+</dialog>
+
+<div id="toast" role="status" aria-live="polite"></div>
+
+<script>
+(function () {
+  'use strict';
+
+  // ---- Utilities ---------------------------------------------------------
+
+  // All server data is user-controlled (prompts, responses, usernames), so
+  // every interpolation goes through this before touching innerHTML.
+  function esc(value) {
+    if (value === null || value === undefined) return '';
+    return String(value)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  var toastTimer = null;
+  function toast(message, kind) {
+    var el = document.getElementById('toast');
+    el.textContent = message;
+    el.className = 'show' + (kind ? ' ' + kind : '');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { el.className = ''; }, 3200);
+  }
+
+  function api(path, options) {
+    return fetch(path, options).then(function (res) {
+      var isJson = (res.headers.get('content-type') || '').indexOf('application/json') >= 0;
+      return (isJson ? res.json() : res.text()).then(function (data) {
+        if (!res.ok) {
+          var msg = (data && data.error) ? data.error : ('HTTP ' + res.status);
+          throw new Error(msg);
+        }
+        return data;
+      });
+    });
+  }
+
+  function timeAgo(iso) {
+    if (!iso) return '—';
+    var seconds = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+    if (seconds < 60) return seconds + 's ago';
+    if (seconds < 3600) return Math.floor(seconds / 60) + 'm ago';
+    if (seconds < 86400) return Math.floor(seconds / 3600) + 'h ago';
+    return Math.floor(seconds / 86400) + 'd ago';
+  }
+
+  function clockTime(iso) {
+    if (!iso) return '—';
+    return new Date(iso).toLocaleString(undefined, {
+      month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit'
+    });
+  }
+
+  function clockTimeShort(iso) {
+    if (!iso) return '—';
+    return new Date(iso).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+  }
+
+  function hourLabel(h) {
+    return (h < 10 ? '0' : '') + h + ':00';
+  }
+
+  function duration(ms) {
+    if (!ms) return '—';
+    if (ms < 1000) return ms + 'ms';
+    return (ms / 1000).toFixed(1) + 's';
+  }
+
+  function plural(n, one, many) {
+    return n + ' ' + (n === 1 ? one : (many || one + 's'));
+  }
+
+  function initials(name) {
+    var clean = String(name || '?').replace(/[^a-zA-Z0-9 ]/g, ' ').trim();
+    if (!clean) return '?';
+    var parts = clean.split(/\s+/);
+    if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
+    return clean.slice(0, 2).toUpperCase();
+  }
+
+  // One fact row. Used for every key/value pair so two surfaces showing the
+  // same data stay identical.
+  function fact(key, value, raw) {
+    return '<div class="fact"><dt>' + esc(key) + '</dt><dd>' +
+      (raw ? value : esc(value)) + '</dd></div>';
+  }
+
+  function factsHtml(pairs) {
+    return pairs.map(function (p) { return fact(p[0], p[1], p[2]); }).join('');
+  }
+
+  var SOURCE_LABEL = {
+    mention: 'mention', keyword: 'keyword', reply: 'reply',
+    orchestrator: 'orchestrator', boredom: 'boredom',
+    'slash-command': 'slash command', unknown: 'unknown'
+  };
+  var SOURCE_BADGE = {
+    mention: 'ds-badge-verified', keyword: 'ds-badge-primary', reply: '',
+    orchestrator: 'ds-badge-safe', boredom: 'ds-badge-warn',
+    'slash-command': '', unknown: ''
+  };
+  function sourceBadge(source) {
+    return '<span class="ds-badge ' + (SOURCE_BADGE[source] || '') + '">' +
+      esc(SOURCE_LABEL[source] || source) + '</span>';
+  }
+
+  // ---- State -------------------------------------------------------------
+
+  var state = {
+    view: 'overview', autoRefresh: false, timer: null, memCache: {},
+    convCache: {}, guildNames: null, conversations: [], convTotal: 0, fullPrompts: {},
+    personaPath: null, personaOriginal: null,
+  };
+
+  // Five destinations is the ceiling for a bottom bar, so the four secondary
+  // views live behind the More sheet rather than becoming unreachable tabs.
+  var PRIMARY_VIEWS = ['overview', 'log', 'memory', 'knowledge'];
+  var MORE_VIEWS = ['conversations', 'integrations', 'persona', 'setup'];
+
+  // ---- Navigation --------------------------------------------------------
+
+  function switchView(name) {
+    if (name === 'more') { openSheet(); return; }
+
+    // Never lose edits silently.
+    if (state.view === 'persona' && name !== 'persona' && personaDirty()) {
+      if (!confirm('Discard unsaved persona changes?')) return;
+      resetPersona();
+    }
+
+    state.view = name;
+    Array.prototype.forEach.call(document.querySelectorAll('.view'), function (v) {
+      v.classList.toggle('active', v.id === 'view-' + name);
+    });
+
+    var tab = PRIMARY_VIEWS.indexOf(name) >= 0 ? name : 'more';
+    Array.prototype.forEach.call(document.querySelectorAll('.ds-tab'), function (b) {
+      var on = b.dataset.view === tab;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+
+    window.scrollTo(0, 0);
+    if (name === 'log') loadLog();
+    if (name === 'memory') loadMemories();
+    if (name === 'knowledge') loadKnowledge();
+    if (name === 'conversations') loadConversations();
+    if (name === 'integrations') loadIntegrations();
+    if (name === 'persona') loadPersona();
+    if (name === 'overview') loadOverview();
+  }
+
+  Array.prototype.forEach.call(document.querySelectorAll('.ds-tab'), function (btn) {
+    btn.addEventListener('click', function () { switchView(btn.dataset.view); });
+  });
+
+  document.querySelector('.ds-tabs').addEventListener('keydown', function (ev) {
+    var tabs = Array.prototype.slice.call(document.querySelectorAll('.ds-tab'));
+    var delta = ev.key === 'ArrowRight' ? 1 : (ev.key === 'ArrowLeft' ? -1 : 0);
+    if (!delta) return;
+    var current = tabs.indexOf(document.activeElement);
+    if (current < 0) return;
+    ev.preventDefault();
+    var next = tabs[(current + delta + tabs.length) % tabs.length];
+    next.focus();
+    switchView(next.dataset.view);
+  });
+
+  // ---- More sheet --------------------------------------------------------
+
+  var sheet = document.getElementById('more-sheet');
+
+  function openSheet() {
+    if (typeof sheet.showModal === 'function') sheet.showModal();
+    else sheet.setAttribute('open', '');
+  }
+  function closeSheet() {
+    if (typeof sheet.close === 'function') sheet.close();
+    else sheet.removeAttribute('open');
+  }
+
+  document.getElementById('sheet-close').addEventListener('click', closeSheet);
+  Array.prototype.forEach.call(sheet.querySelectorAll('.sheet-item'), function (btn) {
+    btn.addEventListener('click', function () {
+      closeSheet();
+      switchView(btn.dataset.goto);
+    });
+  });
+  // A native dialog reports backdrop clicks on the element itself, so only
+  // close when the click did not land inside the panel.
+  sheet.addEventListener('click', function (ev) {
+    if (ev.target === sheet) closeSheet();
+  });
+
+  // ---- Activity timeline -------------------------------------------------
+
+  function renderTimeline(entries, windowHours) {
+    var hours = Math.max(6, Math.min(24, Math.round(windowHours) || 12));
+    var now = Date.now();
+    var buckets = [];
+    for (var i = hours - 1; i >= 0; i--) {
+      buckets.push({ start: now - i * 3600000, count: 0, errors: 0 });
+    }
+    var base = buckets[0].start;
+
+    entries.forEach(function (entry) {
+      var idx = Math.floor((entry.epochMs - base) / 3600000);
+      if (idx < 0) idx = 0;
+      if (idx > buckets.length - 1) idx = buckets.length - 1;
+      buckets[idx].count++;
+      if (entry.error) buckets[idx].errors++;
+    });
+
+    var peak = buckets.reduce(function (m, b) { return Math.max(m, b.count); }, 0);
+
+    var cols = buckets.map(function (b) {
+      var h = peak ? Math.max(2, Math.round((b.count / peak) * 100)) : 2;
+      var label = clockTimeShort(new Date(b.start).toISOString()) + ' — ' + plural(b.count, 'activation') +
+        (b.errors ? ', ' + plural(b.errors, 'failure') : '');
+      return '<div class="strip-col" aria-hidden="true" data-empty="' + (b.count ? 0 : 1) + '" title="' + esc(label) + '">' +
+        '<span style="height:' + h + '%"></span></div>';
+    }).join('');
+
+    var strip = document.getElementById('activity-strip');
+    strip.innerHTML = cols;
+    strip.setAttribute('aria-label',
+      'Activations per hour over the last ' + hours + ' hours. ' +
+      (peak ? 'Busiest hour had ' + plural(peak, 'activation') + '.' : 'No activations recorded.'));
+
+    document.getElementById('activation-caption').textContent =
+      'activations in ' + hours + ' hours';
+  }
+
+  function renderLatest(entries) {
+    var block = document.getElementById('latest-block');
+    if (!entries.length) { block.hidden = true; return; }
+    var e = entries[0];
+    var who = e.username || (e.userId ? 'user ' + e.userId : 'the system');
+    block.hidden = false;
+    document.getElementById('latest-facts').innerHTML =
+      fact('Most recent', timeAgo(e.timestamp) + ', ' + who + ' via ' + (SOURCE_LABEL[e.source] || e.source));
+    document.getElementById('latest-text').textContent = e.prompt || '(no prompt)';
+  }
+
+  // ---- Overview ----------------------------------------------------------
+
+  function renderUsage(stats) {
+    var block = document.getElementById('usage-block');
+
+    if (!stats.dailyLimit) {
+      block.innerHTML =
+        '<div class="ds-progress"><div class="ds-progress-bar" style="width:' +
+          Math.min(100, stats.callsInWindow * 4) + '%"></div></div>' +
+        factsHtml([['Requests in window', stats.callsInWindow + ' over ' + stats.windowHours + 'h']]);
+      return;
+    }
+
+    var pct = stats.usedPercent || 0;
+    var cls = pct >= 90 ? 'is-bad' : (pct >= 70 ? 'is-warn' : '');
+
+    block.innerHTML =
+      '<div class="ds-progress" role="img" aria-label="' + pct + '% of the daily request limit used">' +
+        '<div class="ds-progress-bar ' + cls + '" style="width:' + Math.min(100, pct) + '%"></div>' +
+      '</div>' +
+      factsHtml([
+        ['Used', stats.callsInWindow + ' of ' + stats.dailyLimit],
+        ['Remaining', stats.remaining]
+      ]);
+  }
+
+  /**
+   * Per-model request counts. `byModel` only holds models actually used inside
+   * the rolling window, so a model leaves this list once it falls out of the
+   * window rather than sitting there permanently at zero.
+   */
+  function renderByModel(stats) {
+    var block = document.getElementById('by-model-block');
+    var rows = Object.keys(stats.byModel || {})
+      .map(function (name) { return { name: name, calls: stats.byModel[name] }; })
+      .sort(function (a, b) { return b.calls - a.calls; });
+
+    if (!rows.length) {
+      block.innerHTML = '<p class="hint" style="margin-top:.7rem">No requests recorded in the last ' +
+        esc(stats.windowHours) + ' hours.</p>';
+      return;
+    }
+
+    var peak = rows[0].calls;
+    var top = rows.slice(0, 8).map(function (row) {
+      return '<div class="share-row">' +
+        '<span class="share-name">' + esc(row.name) + '</span>' +
+        '<span class="share-val">' + esc(row.calls) + '</span>' +
+        '<span class="share-track"><span style="width:' + Math.round((row.calls / peak) * 100) + '%"></span></span>' +
+        '</div>';
+    }).join('');
+
+    block.innerHTML =
+      '<h3>Last ' + esc(stats.windowHours) + ' hours</h3>' +
+      '<div class="share">' + top + '</div>' +
+      (rows.length > 8 ? '<p class="hint">and ' + (rows.length - 8) + ' more</p>' : '');
+  }
+
+  function renderModel(model) {
+    var block = document.getElementById('model-block');
+    var badge = document.getElementById('model-badge');
+
+    badge.innerHTML = model.source === 'dashboard'
+      ? '<span class="ds-badge ds-badge-primary">dashboard</span>'
+      : '<span class="ds-badge">environment</span>';
+
+    if (!model.canChange) {
+      block.innerHTML = factsHtml([
+        ['Active', model.active],
+        ['Revert target', model.environmentModel || 'built-in default ' + model.fallbackModel]
+      ]);
+      return;
+    }
+
+    var options = model.options.map(function (name) {
+      return '<option value="' + esc(name) + '"' + (name === model.active ? ' selected' : '') + '>' + esc(name) + '</option>';
+    }).join('');
+
+    var envLine = model.environmentModel
+      ? esc(model.environmentModel)
+      : '<span class="warn">no OPENAI_MODEL set — falls back to ' + esc(model.fallbackModel) + '</span>';
+
+    block.innerHTML =
+      '<div class="ds-control-row">' +
+        '<div class="ds-field">' +
+          '<label class="ds-label" for="model-select">Switch model</label>' +
+          '<select class="ds-select" id="model-select">' + options + '</select>' +
+        '</div>' +
+        '<button class="ds-btn ds-btn-primary" id="model-apply">Apply</button>' +
+      '</div>' +
+      '<dl class="facts" style="margin-top:.9rem">' +
+        fact('Revert to', envLine, true) +
+        (model.changedAt ? fact('Last changed', timeAgo(model.changedAt)) : '') +
+      '</dl>' +
+      (model.source === 'dashboard'
+        ? '<div class="ds-row" style="margin-top:.75rem"><button class="ds-btn ds-btn-ghost" id="model-reset">Revert to environment</button></div>'
+        : '');
+  }
+
+  function applyModel() {
+    var select = document.getElementById('model-select');
+    if (!select) return;
+    var chosen = select.value;
+    var apply = document.getElementById('model-apply');
+    if (apply) apply.disabled = true;
+    select.disabled = true;
+
+    api('/api/models', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: chosen })
+    }).then(function () {
+      toast('Model switched to ' + chosen, 'ok');
+      loadOverview();
+    }).catch(function (err) {
+      toast(err.message, 'bad');
+      loadOverview();
+    });
+  }
+
+  function renderOverview(data, usage, entries) {
+    var pill = document.getElementById('conn-pill');
+    if (data.bot.ready) {
+      pill.textContent = 'online';
+      pill.className = 'ds-badge ds-badge-safe';
+    } else {
+      pill.textContent = 'connecting';
+      pill.className = 'ds-badge ds-badge-warn';
+    }
+
+    var log = data.log;
+
+    document.getElementById('activation-count').textContent = log.total;
+    renderTimeline(entries, log.windowHours);
+    renderLatest(entries);
+
+    document.getElementById('tile-users').textContent = log.uniqueUsers;
+    document.getElementById('tile-avg').textContent = duration(log.avgDurationMs);
+
+    var errorsEl = document.getElementById('tile-errors');
+    errorsEl.textContent = log.errors;
+    errorsEl.className = log.errors ? 'is-bad' : 'is-ok';
+
+    renderUsage(usage);
+    renderByModel(usage);
+
+    var runtime = [
+      ['Bot', data.bot.name],
+      ['Discord account', data.bot.tag || data.bot.id || '—'],
+      ['Guilds', data.bot.guilds],
+      ['Cached channels', data.bot.channels],
+      ['Uptime', duration(data.uptimeSeconds * 1000)],
+      ['Orchestrator', data.orchestrator.enabled
+        ? (data.orchestrator.isConnected ? 'connected' : 'enabled, not connected')
+        : 'disabled']
+    ];
+    var config = [
+      ['AI endpoint', data.ai.baseUrl || 'default'],
+      ['Gemini native', data.ai.geminiNative ? 'yes' : 'no'],
+      ['Secondary vision model', data.ai.visionSecondary ? 'enabled' : 'off'],
+      ['Knowledge mode', data.knowledge.sourceMode],
+      ['Rate limit', data.rateLimit.seconds + 's per request'],
+      ['Rate limit emoji', data.rateLimit.emoji || 'none'],
+      ['Exempt roles', data.rateLimit.exemptRoles.length ? data.rateLimit.exemptRoles.join(', ') : 'none'],
+      ['Owner exempt', data.rateLimit.ownerExempt ? 'yes' : 'no'],
+      ['Oldest entry in window', clockTime(log.windowStart)]
+    ];
+
+    if (data.orchestrator.enabled) runtime.push(['Pending guilds', data.orchestrator.pendingGuildCount]);
+    if (usage.dailyLimit) config.push(['Request limit resets', clockTime(usage.resetsAt)]);
+
+    document.getElementById('status-block').innerHTML = factsHtml(runtime);
+    document.getElementById('storage-block').innerHTML = factsHtml(config);
+  }
+
+  function loadOverview() {
+    return Promise.all([
+      api('/api/status'),
+      api('/api/usage').then(function (d) { return d.stats; }),
+      api('/api/models').then(function (d) { return d.model; }),
+      api('/api/log?limit=200').then(function (d) { return d.entries; }).catch(function () { return []; })
+    ]).then(function (res) {
+      renderModel(res[2]);
+      renderOverview(res[0], res[1], res[3]);
+    }).catch(function (err) {
+      toast(err.message, 'bad');
+      var pill = document.getElementById('conn-pill');
+      pill.textContent = 'unreachable';
+      pill.className = 'ds-badge ds-badge-danger';
+    });
+  }
+
+  // ---- Activity log ------------------------------------------------------
+
+  function entryHtml(entry) {
+    var tags = sourceBadge(entry.source);
+    if (entry.error) tags += ' <span class="ds-badge ds-badge-danger">failed</span>';
+    if (entry.imageCount) tags += ' <span class="ds-badge">' + plural(entry.imageCount, 'image') + '</span>';
+    if (entry.videoCount) tags += ' <span class="ds-badge">' + plural(entry.videoCount, 'video') + '</span>';
+    if (entry.searchEnabled) tags += ' <span class="ds-badge">web</span>';
+    if (entry.knowledgeEnabled) tags += ' <span class="ds-badge">knowledge</span>';
+
+    var where = [entry.guildName, entry.channelName].filter(Boolean).join(' / ') || 'direct message';
+    var who = entry.username || (entry.userId ? 'user ' + entry.userId : 'system');
+
+    var body =
+      '<div class="bubble"><div class="who-label">Prompt from ' + esc(who) + '</div>' + esc(entry.prompt) + '</div>' +
+      '<div class="bubble"><div class="who-label">Response</div>' + esc(entry.response || '(empty)') + '</div>';
+
+    if (entry.error) {
+      body += '<div class="bubble is-error"><div class="who-label">Error</div>' + esc(entry.error) + '</div>';
+    }
+    if (entry.gifUrl) {
+      body += '<div class="bubble"><div class="who-label">GIF</div>' + esc(entry.gifUrl) + '</div>';
+    }
+    if (entry.reactions && entry.reactions.length) {
+      body += '<div class="bubble"><div class="who-label">Reactions</div>' + esc(entry.reactions.join(' ')) + '</div>';
+    }
+
+    // The complete payload the provider received. Kept out of the default view
+    // because it is long and rarely what you are looking for; expand it when
+    // you need to know exactly what the model was told.
+    var full = entry.fullPromptId ? state.fullPrompts[entry.fullPromptId] : null;
+    if (full) {
+      body += '<details class="prompt-details">' +
+        '<summary>Full prompt sent to the model' +
+          '<span class="chev" aria-hidden="true"></span></summary>' +
+        '<pre class="prompt-body">' + esc(full) + '</pre>' +
+      '</details>';
+    }
+
+    body += '<dl class="facts" style="margin-top:.9rem">' +
+      fact('When', clockTime(entry.timestamp) + ' (' + timeAgo(entry.timestamp) + ')') +
+      fact('Took', duration(entry.durationMs)) +
+      fact('Where', where) +
+      (entry.userId ? fact('User ID', entry.userId) : '') +
+      (entry.channelId ? fact('Channel ID', entry.channelId) : '') +
+      (entry.attachmentCount ? fact('Attachments', entry.attachmentCount) : '') +
+      '</dl>';
+
+    return '<details class="ds-card entry">' +
+        '<summary>' +
+          '<div class="entry-head">' + tags +
+            '<span class="who">' + esc(who) + '</span>' +
+            '<span>' + esc(timeAgo(entry.timestamp)) + '</span>' +
+            '<span>' + esc(duration(entry.durationMs)) + '</span>' +
+            '<span class="chev" aria-hidden="true" style="margin-left:auto"></span>' +
+          '</div>' +
+          '<div class="entry-preview">' + esc(entry.prompt || '(no prompt)') + '</div>' +
+        '</summary>' +
+        '<div class="entry-body">' + body + '</div>' +
+      '</details>';
+  }
+
+  // The trigger mix lives on the Log tab, next to the trigger filter it drives.
+  function renderBreakdown(summary) {
+    var block = document.getElementById('log-breakdown');
+    if (!block) return;
+
+    var keys = Object.keys(summary.bySource).filter(function (k) { return summary.bySource[k] > 0; });
+    keys.sort(function (a, b) { return summary.bySource[b] - summary.bySource[a]; });
+
+    var parts = [];
+    if (keys.length) {
+      parts.push('<div class="ds-row" style="margin-top:.9rem">' + keys.map(function (k) {
+        return '<span class="ds-badge">' + esc(SOURCE_LABEL[k] || k) + ' ' + esc(summary.bySource[k]) + '</span>';
+      }).join('') + '</div>');
+    }
+    block.innerHTML = parts.join('');
+  }
+
+  function loadLog() {
+    var params = new URLSearchParams();
+    var q = document.getElementById('log-q').value.trim();
+    var source = document.getElementById('log-source').value;
+    var limit = document.getElementById('log-limit').value;
+    if (q) params.set('q', q);
+    if (source) params.set('source', source);
+    params.set('limit', limit);
+
+    return api('/api/log?' + params.toString()).then(function (data) {
+      var list = document.getElementById('log-list');
+      document.getElementById('log-hint').textContent =
+        data.entries.length + ' shown, ' + data.summary.total + ' in the ' +
+        data.summary.windowHours + 'h window';
+
+      renderBreakdown(data.summary);
+      state.fullPrompts = data.fullPrompts || {};
+
+      list.innerHTML = data.entries.length
+        ? data.entries.map(entryHtml).join('')
+        : '<div class="empty">No activity yet. Mention the bot or use a trigger keyword in Discord.</div>';
+    }).catch(function (err) {
+      toast(err.message, 'bad');
+    });
+  }
+
+  // ---- Log analytics -----------------------------------------------------
+
+  function rankList(rows, labelOf, metaOf) {
+    if (!rows.length) return '<p class="hint">Nothing recorded in this window.</p>';
+    var peak = rows[0].count;
+    return '<ol class="rank">' + rows.slice(0, 10).map(function (row, i) {
+      return '<li class="rank-row">' +
+        '<span class="rank-n">' + (i + 1) + '</span>' +
+        '<span class="rank-name">' + esc(labelOf(row)) + '</span>' +
+        '<span class="rank-val">' + esc(metaOf(row)) + '</span>' +
+        '<span class="rank-bar"><span style="width:' + Math.round((row.count / peak) * 100) + '%"></span></span>' +
+        '</li>';
+    }).join('') + '</ol>';
+  }
+
+  function renderAnalytics(a) {
+    var block = document.getElementById('analytics-block');
+    var l = a.latency;
+
+    // Heatmap. Colour shows volume; the ring shows a failure in that hour, and
+    // the per-hour count is spelled out in the accessible label and title.
+    var peak = a.byHourOfDay.reduce(function (m, b) { return Math.max(m, b.count); }, 0);
+    var cells = a.byHourOfDay.map(function (b) {
+      var pct = peak ? Math.round((b.count / peak) * 100) : 0;
+      var fill = b.count === 0
+        ? 'var(--muted)'
+        : 'color-mix(in oklab, var(--primary) ' + Math.max(18, pct) + '%, transparent)';
+      var title = hourLabel(b.hour) + ' — ' + plural(b.count, 'activation') +
+        (b.errors ? ', ' + plural(b.errors, 'failure') : '');
+      return '<div class="heat-cell" data-err="' + (b.errors ? 1 : 0) + '" style="background:' + fill +
+        '" title="' + esc(title) + '"></div>';
+    }).join('');
+
+    var heatLabel = 'Activations by hour of day across the last ' + a.windowHours + ' hours. ' +
+      (peak ? 'Busiest at ' + hourLabel(a.byHourOfDay.reduce(function (m, b) {
+        return b.count > m.count ? b : m;
+      }, a.byHourOfDay[0]).hour) + ' with ' + plural(peak, 'activation') + '.' : 'No activations.');
+
+    block.innerHTML =
+      '<h3>Reply time</h3>' +
+      factsHtml([
+        ['Typical (p50)', duration(l.p50)],
+        ['Slow (p95)', duration(l.p95)],
+        ['Slowest 1% (p99)', duration(l.p99)],
+        ['Fastest', duration(l.min)],
+        ['Turns timed', l.samples]
+      ]) +
+      '<h3>Busiest hours</h3>' +
+      '<div class="heat" role="img" aria-label="' + esc(heatLabel) + '">' + cells + '</div>' +
+      '<div class="heat-axis ds-supporting"><span>00:00</span><span>12:00</span><span>23:00</span></div>' +
+      '<div class="heat-legend">' +
+        '<i data-k="low">quieter</i><i data-k="high">busier</i><i data-k="err">had a failure</i>' +
+      '</div>' +
+      '<h3>Most active people</h3>' +
+      rankList(a.users, function (r) { return r.username; }, function (r) {
+        return plural(r.count, 'turn') + ', ' + duration(r.avgDurationMs);
+      }) +
+      '<h3>Busiest channels</h3>' +
+      rankList(a.channels, function (r) { return r.channelName + ', ' + r.guildName; },
+        function (r) { return plural(r.count, 'turn'); });
+  }
+
+  function loadAnalytics() {
+    var block = document.getElementById('analytics-block');
+    if (!block.innerHTML) block.innerHTML = '<p class="hint">Loading…</p>';
+    return api('/api/log/analytics')
+      .then(renderAnalytics)
+      .catch(function (err) {
+        block.innerHTML = '<p class="hint">' + esc(err.message) + '</p>';
+      });
+  }
+
+  // ---- Memories ----------------------------------------------------------
+
+  function entryRowHtml(entry) {
+    return '<div class="mem-entry" data-entry-id="' + esc(entry.id) + '">' +
+        '<div class="meta">' +
+          '<span class="ds-badge">' + (entry.kind === 'opinion' ? 'opinion' : 'third party') + '</span>' +
+          '<span>' + esc(clockTime(entry.createdAt)) + '</span>' +
+          (entry.source ? '<span>via ' + esc(entry.source) + '</span>' : '') +
+        '</div>' +
+        '<div class="content">' + esc(entry.content) + '</div>' +
+        '<div class="ds-row" style="margin-top:.6rem">' +
+          '<button class="ds-btn ds-btn-secondary ds-btn-sm" data-act="edit-entry" data-id="' + esc(entry.id) + '">Edit</button>' +
+          '<button class="ds-btn ds-btn-ghost btn-danger ds-btn-sm" data-act="del-entry" data-id="' + esc(entry.id) + '">Delete</button>' +
+        '</div>' +
+      '</div>';
+  }
+
+  function userCardHtml(user) {
+    return '<article class="ds-card xcard" data-user-id="' + esc(user.userId) + '">' +
+      '<div class="xhead" data-act="toggle-user" role="button" tabindex="0" aria-expanded="false">' +
+        '<span class="ds-avatar" aria-hidden="true">' + esc(initials(user.username)) + '</span>' +
+        '<span class="xid">' +
+          '<span class="xname">' + esc(user.username) + '</span>' +
+          '<span class="xsub">' + esc(user.opinionCount) + ' opinion' + (user.opinionCount === 1 ? '' : 's') +
+            ', ' + esc(user.thirdPartyCount) + ' third party, updated ' + esc(timeAgo(user.updatedAt)) + '</span>' +
+        '</span>' +
+        '<span class="ds-badge' + (user.sentiment === 'negative' ? ' ds-badge-warn' : (user.sentiment === 'positive' ? ' ds-badge-safe' : '')) + '">' + esc(user.sentiment) + '</span>' +
+        '<span class="chev" aria-hidden="true"></span>' +
+      '</div>' +
+      '<div class="xbody" hidden></div>' +
+    '</article>';
+  }
+
+  function loadMemories() {
+    var q = document.getElementById('mem-q').value.trim();
+    var params = new URLSearchParams();
+    if (q) params.set('q', q);
+
+    return api('/api/memories?' + params.toString()).then(function (data) {
+      var stats = data.stats;
+      document.getElementById('mem-users').textContent = stats.users;
+      document.getElementById('mem-entries').textContent = stats.entries;
+      document.getElementById('mem-opinions').textContent = stats.opinionEntries;
+      document.getElementById('mem-third').textContent = stats.thirdPartyEntries;
+
+      document.getElementById('mem-list').innerHTML = data.users.length
+        ? data.users.map(userCardHtml).join('')
+        : '<div class="empty">' + (q
+            ? 'No one matches that search. Try part of a name or a user ID.'
+            : 'No memories stored yet. Add one from the Setup tab.') + '</div>';
+    }).catch(function (err) {
+      toast(err.message, 'bad');
+    });
+  }
+
+  function openUser(card) {
+    var body = card.querySelector('.xbody');
+    var head = card.querySelector('.xhead');
+    var expanded = head.getAttribute('aria-expanded') === 'true';
+
+    if (expanded) {
+      body.hidden = true;
+      head.setAttribute('aria-expanded', 'false');
+      return;
+    }
+
+    var userId = card.dataset.userId;
+    body.hidden = false;
+    head.setAttribute('aria-expanded', 'true');
+    body.innerHTML = '<div class="empty">Loading…</div>';
+
+    api('/api/memories/' + encodeURIComponent(userId)).then(function (data) {
+      var m = data.memory;
+      state.memCache[userId] = m;
+
+      var profile =
+        '<div class="field-row">' +
+          '<div class="ds-field"><label class="ds-label" for="p-user-' + esc(userId) + '">Username</label>' +
+            '<input class="ds-input" type="text" id="p-user-' + esc(userId) + '" value="' + esc(m.username) + '"></div>' +
+          '<div class="ds-field"><label class="ds-label" for="p-pro-' + esc(userId) + '">Pronouns</label>' +
+            '<input class="ds-input" type="text" id="p-pro-' + esc(userId) + '" value="' + esc(m.pronouns || '') + '"></div>' +
+        '</div>' +
+        '<div class="field-row">' +
+          '<div class="ds-field"><label class="ds-label" for="p-sen-' + esc(userId) + '">Sentiment</label>' +
+            '<select class="ds-select" id="p-sen-' + esc(userId) + '">' +
+            ['positive', 'negative', 'neutral', 'mixed'].map(function (s) {
+              return '<option value="' + s + '"' + (m.sentiment === s ? ' selected' : '') + '>' + s + '</option>';
+            }).join('') +
+            '</select></div>' +
+          '<div class="ds-field" style="display:flex;align-items:flex-end">' +
+            '<button class="ds-btn ds-btn-primary" data-act="save-profile" data-id="' + esc(userId) + '" style="width:100%">Save profile</button></div>' +
+        '</div>';
+
+      var entries = m.entries.length
+        ? m.entries.map(entryRowHtml).join('')
+        : '<p class="hint" style="margin:0">Nothing stored for this person yet.</p>';
+
+      var adder =
+        '<div class="field-row" style="margin-top:.5rem">' +
+          '<div class="ds-field"><label class="ds-label" for="n-kind-' + esc(userId) + '">New memory type</label>' +
+            '<select class="ds-select" id="n-kind-' + esc(userId) + '">' +
+            '<option value="opinion">Opinion</option><option value="third_party">Third party</option>' +
+            '</select></div>' +
+          '<div class="ds-field" style="display:flex;align-items:flex-end">' +
+            '<button class="ds-btn ds-btn-secondary" data-act="add-entry" data-id="' + esc(userId) + '" style="width:100%">Add memory</button></div>' +
+        '</div>' +
+        '<div class="ds-field" style="margin-bottom:0">' +
+          '<label class="ds-label" for="n-text-' + esc(userId) + '">Memory text</label>' +
+          '<textarea class="ds-textarea" id="n-text-' + esc(userId) + '" placeholder="What should the bot remember?"></textarea>' +
+        '</div>';
+
+      body.innerHTML = profile +
+        '<h3 class="ds-section-title" style="font-size:1rem;margin:1rem 0 .6rem">Memories (' + esc(m.entries.length) + ')</h3>' +
+        entries + adder +
+        '<div class="ds-row" style="margin-top:.9rem">' +
+          '<button class="ds-btn ds-btn-ghost btn-danger" data-act="del-user" data-id="' + esc(userId) + '">Delete this person entirely</button>' +
+        '</div>';
+    }).catch(function (err) {
+      body.innerHTML = '<div class="empty">' + esc(err.message) + '</div>';
+    });
+  }
+
+  // ---- Knowledge ---------------------------------------------------------
+
+  function docCardHtml(doc) {
+    return '<article class="ds-card xcard" data-doc-id="' + esc(doc.id) + '">' +
+      '<div class="xhead" data-act="toggle-doc" role="button" tabindex="0" aria-expanded="false">' +
+        '<span class="xid">' +
+          '<span class="xname">' + esc(doc.title) + '</span>' +
+          '<span class="xsub">' + esc(doc.topic) + ', ' + esc(doc.type) + '</span>' +
+        '</span>' +
+        '<span class="chev" aria-hidden="true"></span>' +
+      '</div>' +
+      '<div class="xbody" hidden></div>' +
+    '</article>';
+  }
+
+  function docEditorHtml(doc) {
+    var kw = (doc.keywords || []).join(', ');
+    return '<div class="field-row">' +
+        '<div class="ds-field"><label class="ds-label" for="d-title-' + esc(doc.id) + '">Title</label>' +
+          '<input class="ds-input" type="text" id="d-title-' + esc(doc.id) + '" value="' + esc(doc.title) + '"></div>' +
+        '<div class="ds-field"><label class="ds-label" for="d-topic-' + esc(doc.id) + '">Topic</label>' +
+          '<input class="ds-input" type="text" id="d-topic-' + esc(doc.id) + '" value="' + esc(doc.topic) + '"></div>' +
+      '</div>' +
+      '<div class="field-row">' +
+        '<div class="ds-field"><label class="ds-label" for="d-type-' + esc(doc.id) + '">Type</label>' +
+          '<select class="ds-select" id="d-type-' + esc(doc.id) + '">' +
+          ['document', 'link', 'snippet'].map(function (t) {
+            return '<option value="' + t + '"' + (doc.type === t ? ' selected' : '') + '>' + t + '</option>';
+          }).join('') + '</select></div>' +
+        '<div class="ds-field"><label class="ds-label" for="d-pri-' + esc(doc.id) + '">Priority (1 to 10)</label>' +
+          '<input class="ds-input" type="number" id="d-pri-' + esc(doc.id) + '" min="1" max="10" value="' + esc(doc.priority) + '"></div>' +
+      '</div>' +
+      '<div class="ds-field">' +
+        '<label class="ds-label" for="d-url-' + esc(doc.id) + '">URL</label>' +
+        '<input class="ds-input" type="text" id="d-url-' + esc(doc.id) + '" value="' + esc(doc.url || '') + '" placeholder="https://example.com/page">' +
+      '</div>' +
+      '<div class="ds-field">' +
+        '<label class="ds-label" for="d-kw-' + esc(doc.id) + '">Keywords</label>' +
+        '<input class="ds-input" type="text" id="d-kw-' + esc(doc.id) + '" value="' + esc(kw) + '" placeholder="origin, history, founders">' +
+      '</div>' +
+      '<div class="ds-field" style="margin-bottom:0">' +
+        '<label class="ds-label" for="d-body-' + esc(doc.id) + '">Content</label>' +
+        '<textarea class="ds-textarea" id="d-body-' + esc(doc.id) + '" style="height:auto;min-height:9rem">' + esc(doc.content) + '</textarea>' +
+      '</div>' +
+      '<div class="ds-row" style="margin-top:.9rem">' +
+        '<button class="ds-btn ds-btn-primary" data-act="save-doc" data-id="' + esc(doc.id) + '">Save document</button>' +
+        '<button class="ds-btn ds-btn-outline btn-danger" data-act="del-doc" data-id="' + esc(doc.id) + '">Delete</button>' +
+      '</div>';
+  }
+
+  function openDoc(card) {
+    var body = card.querySelector('.xbody');
+    var head = card.querySelector('.xhead');
+    if (head.getAttribute('aria-expanded') === 'true') {
+      body.hidden = true;
+      head.setAttribute('aria-expanded', 'false');
+      return;
+    }
+    var id = card.dataset.docId;
+    body.hidden = false;
+    head.setAttribute('aria-expanded', 'true');
+    body.innerHTML = '<div class="empty">Loading…</div>';
+
+    api('/api/knowledge/' + id).then(function (data) {
+      var doc = data.document;
+      var kws = (doc.keywords || []).map(function (k) {
+        return '<span class="ds-badge">' + esc(k) + '</span>';
+      }).join('');
+      body.innerHTML =
+        '<dl class="facts" style="margin:0 0 .9rem">' +
+          fact('Used', plural(doc.usageCount, 'time'), false) +
+          fact('Updated', timeAgo(doc.updatedAt), false) +
+          (doc.lastAccessed ? fact('Last retrieved', timeAgo(doc.lastAccessed), false) : '') +
+        '</dl>' +
+        (kws ? '<div class="kw-row" style="margin:0 0 .9rem">' + kws + '</div>' : '') +
+        docEditorHtml(doc);
+    }).catch(function (err) {
+      body.innerHTML = '<div class="empty">' + esc(err.message) + '</div>';
+    });
+  }
+
+  function currentTopic() {
+    return document.getElementById('kb-topic').value;
+  }
+
+  function loadKnowledge() {
+    var q = document.getElementById('kb-q').value.trim();
+    var topic = currentTopic();
+    var hint = document.getElementById('kb-hint');
+
+    var request;
+    if (q) {
+      request = api('/api/knowledge/search?q=' + encodeURIComponent(q) +
+        (topic ? '&topic=' + encodeURIComponent(topic) : ''));
+    } else {
+      request = api('/api/knowledge').then(function (data) {
+        var docs = data.documents;
+        if (topic) {
+          docs = docs.filter(function (d) { return d.topic === topic; });
+        }
+        return { stats: data.stats, documents: docs, total: data.documents.length, topics: data.topics };
+      });
+    }
+
+    return request.then(function (data) {
+      var docs = data.documents || data.results || [];
+      var stats = data.stats;
+
+      if (stats) {
+        document.getElementById('kb-docs').textContent = stats.totalDocuments;
+        document.getElementById('kb-topics').textContent = stats.totalTopics;
+
+        var select = document.getElementById('kb-topic');
+        var wanted = (data.topics || []).map(function (t) { return t.topic; });
+        var have = Array.prototype.map.call(select.options, function (o) { return o.value; }).slice(1);
+        if (wanted.join('|') !== have.join('|')) {
+          var chosen = select.value;
+          select.innerHTML = '<option value="">All topics</option>' + (data.topics || []).map(function (t) {
+            return '<option value="' + esc(t.topic) + '">' + esc(t.topic) + ' (' + esc(t.count) + ')</option>';
+          }).join('');
+          if (chosen) select.value = chosen;
+        }
+      }
+
+      hint.textContent = docs.length
+        ? plural(docs.length, 'document') + (data.total && data.total !== docs.length ? ' of ' + data.total : '')
+        : '';
+
+      document.getElementById('kb-list').innerHTML = docs.length
+        ? docs.map(docCardHtml).join('')
+        : '<div class="empty">' + (q
+            ? 'Nothing matched that search.'
+            : 'No documents yet. Reload from files or create one.') + '</div>';
+    }).catch(function (err) {
+      toast(err.message, 'bad');
+    });
+  }
+
+  document.getElementById('kb-new').addEventListener('click', function () {
+    api('/api/knowledge', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title: 'Untitled', topic: 'general', type: 'document',
+        content: '', keywords: [], priority: 5,
+      })
+    }).then(function () {
+      toast('Document created. Open it to edit.', 'ok');
+      loadKnowledge();
+    }).catch(function (err) { toast(err.message, 'bad'); });
+  });
+
+  document.getElementById('kb-sync').addEventListener('click', function () {
+    var btn = this;
+    btn.disabled = true;
+    api('/api/knowledge/sync', { method: 'POST' })
+      .then(function (data) {
+        toast('Synced ' + plural(data.stats.totalDocuments, 'document') + ' from files', 'ok');
+        loadKnowledge();
+      })
+      .catch(function (err) { toast(err.message, 'bad'); })
+      .finally(function () { btn.disabled = false; });
+  });
+
+  document.getElementById('kb-list').addEventListener('click', function (ev) {
+    var target = ev.target && ev.target.closest ? ev.target.closest('button, [data-act="toggle-doc"]') : null;
+    if (!target) return;
+    var act = target.dataset.act;
+    var id = target.dataset.id;
+
+    if (act === 'toggle-doc') {
+      openDoc(target.closest('.xcard'));
+      return;
+    }
+
+    if (act === 'save-doc') {
+      var payload = {
+        title: document.getElementById('d-title-' + id).value,
+        topic: document.getElementById('d-topic-' + id).value,
+        type: document.getElementById('d-type-' + id).value,
+        priority: Number(document.getElementById('d-pri-' + id).value),
+        url: document.getElementById('d-url-' + id).value.trim() || null,
+        keywords: document.getElementById('d-kw-' + id).value.split(',')
+          .map(function (k) { return k.trim(); }).filter(Boolean),
+        content: document.getElementById('d-body-' + id).value,
+      };
+      target.disabled = true;
+      api('/api/knowledge/' + id, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      }).then(function () {
+        toast('Document saved', 'ok');
+        loadKnowledge();
+      }).catch(function (err) {
+        target.disabled = false;
+        toast(err.message, 'bad');
+      });
+      return;
+    }
+
+    if (act === 'del-doc') {
+      if (!confirm('Delete this document? The bot will stop retrieving it.')) return;
+      api('/api/knowledge/' + id, { method: 'DELETE' })
+        .then(function () { toast('Document deleted', 'ok'); loadKnowledge(); })
+        .catch(function (err) { toast(err.message, 'bad'); });
+    }
+  });
+
+  document.getElementById('kb-list').addEventListener('keydown', function (ev) {
+    if (ev.key !== 'Enter' && ev.key !== ' ') return;
+    var head = ev.target.closest && ev.target.closest('[data-act="toggle-doc"]');
+    if (!head) return;
+    ev.preventDefault();
+    openDoc(head.closest('.xcard'));
+  });
+
+  // ---- Conversations -----------------------------------------------------
+
+  function guildLabel(guildId) {
+    if (guildId === 'dm') return 'Direct message';
+    if (guildId === 'legacy') return 'Migrated history';
+    var name = state.guildNames && state.guildNames[guildId];
+    return name || 'Unknown server';
+  }
+
+  /** Conversation rows store a raw snowflake; resolve it to a real name once. */
+  function loadGuildNames() {
+    if (state.guildNames) return Promise.resolve(state.guildNames);
+    return api('/api/guilds').then(function (data) {
+      var map = {};
+      data.guilds.forEach(function (g) { map[g.id] = g.name; });
+      state.guildNames = map;
+      return map;
+    }).catch(function () {
+      state.guildNames = {};
+      return state.guildNames;
+    });
+  }
+
+  function convRowHtml(c) {
+    return '<article class="ds-card xcard" data-user-id="' + esc(c.userId) + '" data-guild-id="' + esc(c.guildId) + '">' +
+      '<div class="xhead" data-act="toggle-conv" role="button" tabindex="0" aria-expanded="false">' +
+        '<span class="ds-avatar" aria-hidden="true">' + esc(initials(c.username)) + '</span>' +
+        '<span class="xid">' +
+          '<span class="xname">' + esc(c.username) + '</span>' +
+          '<span class="xsub">' + esc(guildLabel(c.guildId)) + ', ' +
+            plural(c.messageCount, 'message') + ', ' + esc(timeAgo(c.lastActivity)) + '</span>' +
+        '</span>' +
+        '<span class="chev" aria-hidden="true"></span>' +
+      '</div>' +
+      '<div class="xbody" hidden></div>' +
+    '</article>';
+  }
+
+  function openConversation(card) {
+    var body = card.querySelector('.xbody');
+    var head = card.querySelector('.xhead');
+    if (head.getAttribute('aria-expanded') === 'true') {
+      body.hidden = true;
+      head.setAttribute('aria-expanded', 'false');
+      return;
+    }
+
+    var userId = card.dataset.userId;
+    var guildId = card.dataset.guildId;
+    body.hidden = false;
+    head.setAttribute('aria-expanded', 'true');
+    body.innerHTML = '<div class="empty">Loading…</div>';
+
+    api('/api/conversations/' + encodeURIComponent(userId) + '/' + encodeURIComponent(guildId))
+      .then(function (data) {
+        var conv = data.conversation;
+        state.convCache[userId + ':' + guildId] = conv;
+
+        // Newest first reads better for a transcript you are auditing.
+        var turns = conv.messages.slice().reverse().map(function (m) {
+          return '<div class="turn' + (m.role === 'user' ? ' is-user' : '') + '">' +
+            '<div class="role">' + (m.role === 'user' ? 'They said' : 'Bot replied') +
+              '<span>' + esc(clockTimeShort(m.timestamp)) + '</span></div>' +
+            '<div class="body">' + esc(m.content) + '</div>' +
+          '</div>';
+        }).join('');
+
+        body.innerHTML =
+          factsHtml([
+            ['Messages', conv.messages.length],
+            ['Last activity', timeAgo(conv.lastActivity)]
+          ]) +
+          '<div style="margin-top:.7rem">' + turns + '</div>' +
+          '<div class="ds-row" style="margin-top:.9rem">' +
+            '<button class="ds-btn ds-btn-outline btn-danger" data-act="del-conv" data-user-id="' + esc(userId) +
+              '" data-guild-id="' + esc(guildId) + '">Clear this conversation</button>' +
+            '<button class="ds-btn ds-btn-outline btn-danger" data-act="del-conv-user" data-user-id="' + esc(userId) + '">Clear everything for this person</button>' +
+          '</div>';
+      })
+      .catch(function (err) {
+        body.innerHTML = '<div class="empty">' + esc(err.message) + '</div>';
+      });
+  }
+
+  function loadConversations() {
+    var q = document.getElementById('conv-q').value.trim().toLowerCase();
+
+    return Promise.all([api('/api/conversations'), loadGuildNames()]).then(function (res) {
+      state.conversations = res[0].conversations;
+      state.convTotal = res[0].total;
+
+      var rows = state.conversations;
+      if (q) {
+        rows = rows.filter(function (c) {
+          return (c.username || '').toLowerCase().indexOf(q) >= 0 || c.userId.indexOf(q) >= 0;
+        });
+      }
+      document.getElementById('conv-total').textContent = state.convTotal;
+      document.getElementById('conv-list').innerHTML = rows.length
+        ? rows.map(convRowHtml).join('')
+        : '<div class="empty">' + (q
+            ? 'Nobody matches that filter.'
+            : 'No stored conversations. They appear once the bot replies in a server or DM.') + '</div>';
+    }).catch(function (err) {
+      toast(err.message, 'bad');
+    });
+  }
+
+  document.getElementById('conv-list').addEventListener('click', function (ev) {
+    var target = ev.target && ev.target.closest ? ev.target.closest('button, [data-act="toggle-conv"]') : null;
+    if (!target) return;
+    var act = target.dataset.act;
+
+    if (act === 'toggle-conv') {
+      openConversation(target.closest('.xcard'));
+      return;
+    }
+
+    if (act === 'del-conv') {
+      var userId = target.dataset.userId;
+      var guildId = target.dataset.guildId;
+      if (!confirm('Clear this conversation? The bot forgets the last replies.')) return;
+      api('/api/conversations/' + encodeURIComponent(userId) + '/' + encodeURIComponent(guildId), { method: 'DELETE' })
+        .then(function (res) {
+          toast('Cleared ' + plural(res.removed, 'message'), 'ok');
+          loadConversations();
+        })
+        .catch(function (err) { toast(err.message, 'bad'); });
+      return;
+    }
+
+    if (act === 'del-conv-user') {
+      var uid = target.dataset.userId;
+      if (!confirm('Clear every stored conversation for this person, in all servers? This cannot be undone.')) return;
+      api('/api/conversations/' + encodeURIComponent(uid), { method: 'DELETE' })
+        .then(function (res) {
+          toast('Cleared ' + plural(res.removed, 'message'), 'ok');
+          loadConversations();
+        })
+        .catch(function (err) { toast(err.message, 'bad'); });
+    }
+  });
+
+  document.getElementById('conv-list').addEventListener('keydown', function (ev) {
+    if (ev.key !== 'Enter' && ev.key !== ' ') return;
+    var head = ev.target.closest && ev.target.closest('[data-act="toggle-conv"]');
+    if (!head) return;
+    ev.preventDefault();
+    openConversation(head.closest('.xcard'));
+  });
+
+  // ---- Integrations ------------------------------------------------------
+
+  function healthCard(elId, badgeId, h) {
+    var badge;
+    if (!h.configured) {
+      badge = '<span class="ds-badge ds-badge-unknown">not configured</span>';
+    } else if (h.reachable) {
+      badge = '<span class="ds-badge ds-badge-safe">online</span>';
+    } else {
+      badge = '<span class="ds-badge ds-badge-danger">unreachable</span>';
+    }
+
+    var pairs = [['Address', h.url || 'not set']];
+    if (h.latencyMs !== null) pairs.push(['Response time', duration(h.latencyMs)]);
+    if (h.status !== null) pairs.push(['Status code', h.status]);
+    if (h.detail) pairs.push(['Detail', h.detail]);
+
+    document.getElementById(badgeId).innerHTML = badge;
+    document.getElementById(elId).innerHTML = factsHtml(pairs);
+  }
+
+  function loadIntegrations() {
+    return api('/api/integrations').then(function (data) {
+      healthCard('searx-facts', 'searx-badge', data.searxng);
+      healthCard('nav-facts', 'nav-badge', data.navidrome);
+    }).catch(function (err) {
+      toast(err.message, 'bad');
+    });
+  }
+
+  document.getElementById('integ-recheck').addEventListener('click', function () {
+    var btn = this;
+    btn.disabled = true;
+    loadIntegrations().finally(function () { btn.disabled = false; });
+  });
+
+  // ---- Persona -----------------------------------------------------------
+
+  function personaDirty() {
+    if (!state.personaPath) return false;
+    var el = document.getElementById('persona-content');
+    return el.value !== state.personaOriginal;
+  }
+
+  function resetPersona() {
+    state.personaPath = null;
+    state.personaOriginal = null;
+    document.getElementById('persona-editor').hidden = true;
+    document.getElementById('persona-hint').textContent = '';
+    var list = document.querySelectorAll('#persona-list .pfile');
+    Array.prototype.forEach.call(list, function (b) { b.setAttribute('aria-current', 'false'); });
+  }
+
+  function markPersonaSaved() {
+    state.personaOriginal = document.getElementById('persona-content').value;
+    document.getElementById('persona-hint').textContent =
+      'Saved. The bot uses this on its next message, with no restart.';
+  }
+
+  function paintPersonaList() {
+    var list = document.querySelectorAll('#persona-list .pfile');
+    Array.prototype.forEach.call(list, function (b) {
+      var on = b.dataset.path === state.personaPath;
+      b.setAttribute('aria-current', on ? 'true' : 'false');
+      var dot = b.querySelector('.dirty-dot');
+      if (dot) dot.remove();
+      if (on && personaDirty()) {
+        var span = document.createElement('span');
+        span.className = 'dirty-dot';
+        span.title = 'Unsaved changes';
+        b.appendChild(span);
+      }
+    });
+  }
+
+  function openPersonaFile(path) {
+    if (personaDirty() && path !== state.personaPath) {
+      if (!confirm('Discard unsaved changes to ' + state.personaPath + '?')) return;
+    }
+
+    return api('/api/persona?path=' + encodeURIComponent(path)).then(function (data) {
+      state.personaPath = data.path;
+      state.personaOriginal = data.content;
+
+      document.getElementById('persona-title').textContent = path.split('/').pop();
+      document.getElementById('persona-kind').textContent = data.kind === 'json' ? 'JSON' : 'text';
+      var meta = PERSONA_META[path] || {};
+      document.getElementById('persona-desc').textContent = meta.hint || path;
+      document.getElementById('persona-content').value = data.content;
+      document.getElementById('persona-hint').textContent = data.exists
+        ? ''
+        : 'This file does not exist yet. Saving creates it.';
+      document.getElementById('persona-editor').hidden = false;
+      paintPersonaList();
+    }).catch(function (err) { toast(err.message, 'bad'); });
+  }
+
+  var PERSONA_META = {};
+
+  function loadPersona() {
+    return api('/api/persona').then(function (data) {
+      var list = document.getElementById('persona-list');
+      var editable = data.files.filter(function (f) { return f.editable; });
+      PERSONA_META = {};
+      data.files.forEach(function (f) { PERSONA_META[f.path] = f; });
+
+      document.getElementById('persona-count').textContent = editable.length + ' editable';
+
+      list.innerHTML = data.files.map(function (f) {
+        return '<button type="button" class="pfile" data-path="' + esc(f.path) + '"' +
+          (f.editable ? '' : ' aria-disabled="true"') + '>' +
+          '<span class="pfile-id">' +
+            '<span class="pfile-label">' + esc(f.label) + '</span>' +
+            '<span class="pfile-path">' + esc(f.path) +
+              (f.exists ? '' : ', not created yet') + '</span>' +
+          '</span>' +
+          (f.editable ? '' : '<span class="ds-badge">read-only</span>') +
+        '</button>';
+      }).join('');
+
+      // No auto-open: the editor appears once someone picks a file, which keeps
+      // the first view to the list and the save target to something they chose.
+      paintPersonaList();
+    }).catch(function (err) { toast(err.message, 'bad'); });
+  }
+
+  document.getElementById('persona-list').addEventListener('click', function (ev) {
+    var btn = ev.target && ev.target.closest ? ev.target.closest('.pfile') : null;
+    if (!btn || btn.getAttribute('aria-disabled') === 'true') return;
+    openPersonaFile(btn.dataset.path);
+  });
+
+  document.getElementById('persona-content').addEventListener('input', paintPersonaList);
+
+  document.getElementById('persona-discard').addEventListener('click', function () {
+    if (!personaDirty()) { toast('No changes to discard'); return; }
+    document.getElementById('persona-content').value = state.personaOriginal;
+    document.getElementById('persona-hint').textContent = 'Changes discarded.';
+    paintPersonaList();
+  });
+
+  document.getElementById('persona-save').addEventListener('click', function () {
+    var btn = this;
+    var content = document.getElementById('persona-content').value;
+    var kind = (PERSONA_META[state.personaPath] || {}).kind;
+
+    // Catch it before the round trip so the failure is instant.
+    if (kind === 'json') {
+      try {
+        JSON.parse(content);
+      } catch (err) {
+        toast('Not valid JSON: ' + err.message, 'bad');
+        return;
+      }
+    }
+
+    btn.disabled = true;
+    api('/api/persona', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: state.personaPath, content: content })
+    }).then(function () {
+      markPersonaSaved();
+      toast('Saved and reloaded. No restart needed.', 'ok');
+      loadPersona();
+    }).catch(function (err) {
+      toast(err.message, 'bad');
+    }).finally(function () { btn.disabled = false; });
+  });
+
+  // ---- Delegated memory actions -----------------------------------------
+
+  document.getElementById('mem-list').addEventListener('click', function (ev) {
+    var target = ev.target && ev.target.closest ? ev.target.closest('button, [data-act="toggle-user"]') : null;
+    if (!target) return;
+    var act = target.dataset.act;
+    if (!act) return;
+
+    if (act === 'toggle-user') {
+      openUser(target.closest('.xcard'));
+      return;
+    }
+
+    var id = target.dataset.id;
+
+    if (act === 'edit-entry') {
+      var row = target.closest('.mem-entry');
+      var contentEl = row.querySelector('.content');
+      if (row.querySelector('textarea')) return;
+
+      var ta = document.createElement('textarea');
+      ta.className = 'ds-textarea';
+      ta.value = contentEl.textContent;
+      contentEl.replaceWith(ta);
+      target.textContent = 'Save';
+      target.className = 'ds-btn ds-btn-primary ds-btn-sm';
+      target.onclick = function () {
+        target.disabled = true;
+        api('/api/memories/entries/' + id, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content: ta.value })
+        }).then(function () {
+          toast('Memory updated', 'ok');
+          loadMemories();
+        }).catch(function (err) {
+          target.disabled = false;
+          toast(err.message, 'bad');
+        });
+      };
+      ta.focus();
+      return;
+    }
+
+    if (act === 'del-entry') {
+      if (!confirm('Delete this memory?')) return;
+      api('/api/memories/entries/' + id, { method: 'DELETE' })
+        .then(function () { toast('Memory deleted', 'ok'); loadMemories(); })
+        .catch(function (err) { toast(err.message, 'bad'); });
+      return;
+    }
+
+    if (act === 'save-profile') {
+      api('/api/memories/' + id, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: document.getElementById('p-user-' + id).value,
+          pronouns: document.getElementById('p-pro-' + id).value.trim() || null,
+          sentiment: document.getElementById('p-sen-' + id).value
+        })
+      }).then(function () {
+        toast('Profile saved', 'ok');
+        loadMemories();
+      }).catch(function (err) { toast(err.message, 'bad'); });
+      return;
+    }
+
+    if (act === 'add-entry') {
+      var text = document.getElementById('n-text-' + id).value.trim();
+      var kind = document.getElementById('n-kind-' + id).value;
+      if (!text) { toast('Enter the memory text first', 'bad'); return; }
+      api('/api/memories/' + id, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ kind: kind, content: text })
+      }).then(function () {
+        toast('Memory added', 'ok');
+        loadMemories();
+      }).catch(function (err) { toast(err.message, 'bad'); });
+      return;
+    }
+
+    if (act === 'del-user') {
+      if (!confirm('Delete ALL memories for this person? This cannot be undone.')) return;
+      api('/api/memories/' + id, { method: 'DELETE' })
+        .then(function () { toast('Memories deleted', 'ok'); loadMemories(); })
+        .catch(function (err) { toast(err.message, 'bad'); });
+    }
+  });
+
+  document.getElementById('mem-list').addEventListener('keydown', function (ev) {
+    if (ev.key !== 'Enter' && ev.key !== ' ') return;
+    var head = ev.target.closest && ev.target.closest('[data-act="toggle-user"]');
+    if (!head) return;
+    ev.preventDefault();
+    openUser(head.closest('.xcard'));
+  });
+
+  // ---- Controls ----------------------------------------------------------
+
+  var searchTimer = null;
+  document.getElementById('log-q').addEventListener('input', function () {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(loadLog, 300);
+  });
+  document.getElementById('log-source').addEventListener('change', loadLog);
+  document.getElementById('log-limit').addEventListener('change', loadLog);
+  document.getElementById('log-refresh').addEventListener('click', loadLog);
+  document.getElementById('log-clear').addEventListener('click', function () {
+    if (!confirm('Clear the entire activity log?')) return;
+    api('/api/log', { method: 'DELETE' })
+      .then(function () { toast('Log cleared', 'ok'); loadLog(); loadAnalytics(); })
+      .catch(function (err) { toast(err.message, 'bad'); });
+  });
+  document.getElementById('analytics-reveal').addEventListener('toggle', function () {
+    if (this.open) loadAnalytics();
+  });
+
+  var memTimer = null;
+  document.getElementById('mem-q').addEventListener('input', function () {
+    clearTimeout(memTimer);
+    memTimer = setTimeout(loadMemories, 300);
+  });
+  document.getElementById('mem-refresh').addEventListener('click', loadMemories);
+
+  var kbTimer = null;
+  document.getElementById('kb-q').addEventListener('input', function () {
+    clearTimeout(kbTimer);
+    kbTimer = setTimeout(loadKnowledge, 300);
+  });
+  document.getElementById('kb-topic').addEventListener('change', loadKnowledge);
+
+  var convTimer = null;
+  document.getElementById('conv-q').addEventListener('input', function () {
+    clearTimeout(convTimer);
+    convTimer = setTimeout(loadConversations, 300);
+  });
+
+  document.getElementById('add-submit').addEventListener('click', function () {
+    var userId = document.getElementById('add-userid').value.trim();
+    var username = document.getElementById('add-username').value.trim();
+    var kind = document.getElementById('add-kind').value;
+    var content = document.getElementById('add-content').value.trim();
+
+    if (!userId) { toast('A user ID is required', 'bad'); return; }
+    if (!content) { toast('Memory text is required', 'bad'); return; }
+
+    api('/api/memories/' + encodeURIComponent(userId), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kind: kind, content: content, username: username || undefined })
+    }).then(function () {
+      toast('Memory added', 'ok');
+      document.getElementById('add-content').value = '';
+      document.getElementById('add-username').value = '';
+      loadMemories();
+    }).catch(function (err) { toast(err.message, 'bad'); });
+  });
+
+  document.getElementById('reset-usage').addEventListener('click', function () {
+    if (!confirm('Reset the recorded LLM call counter?')) return;
+    api('/api/usage/reset', { method: 'POST' })
+      .then(function () { toast('API counter reset', 'ok'); loadOverview(); })
+      .catch(function (err) { toast(err.message, 'bad'); });
+  });
+
+  // Model switcher and persona save are delegated because their nodes are
+  // replaced on every render.
+  document.addEventListener('click', function (ev) {
+    var id = ev.target && ev.target.id;
+    if (id === 'model-apply') { applyModel(); return; }
+    if (id === 'model-reset') {
+      if (!confirm('Revert to the model configured in the environment?')) return;
+      api('/api/models/reset', { method: 'POST' })
+        .then(function (res) { toast('Reverted to ' + res.model.active, 'ok'); loadOverview(); })
+        .catch(function (err) { toast(err.message, 'bad'); });
+    }
+  });
+
+  var refreshToggle = document.getElementById('refresh-toggle');
+  var refreshTrack = document.getElementById('refresh-track');
+
+  function paintSwitch() {
+    refreshTrack.classList.toggle('on', state.autoRefresh);
+  }
+
+  refreshToggle.addEventListener('change', function () {
+    state.autoRefresh = refreshToggle.checked;
+    paintSwitch();
+    if (state.autoRefresh) {
+      scheduleRefresh();
+      loadOverview();
+    } else {
+      clearInterval(state.timer);
+    }
+  });
+
+  document.getElementById('refresh-interval').addEventListener('change', function () {
+    if (state.autoRefresh) scheduleRefresh();
+  });
+
+  function scheduleRefresh() {
+    clearInterval(state.timer);
+    state.timer = setInterval(function () {
+      if (state.view === 'overview' && !document.hidden) loadOverview();
+    }, Number(document.getElementById('refresh-interval').value));
+  }
+
+  // ---- Boot --------------------------------------------------------------
+
+  paintSwitch();
+  loadOverview();
+
+  document.addEventListener('visibilitychange', function () {
+    if (state.autoRefresh) {
+      if (document.hidden) {
+        clearInterval(state.timer);
+      } else {
+        scheduleRefresh();
+        loadOverview();
+      }
+    }
+  });
+})();
+
+</script>
+</body>
+</html>

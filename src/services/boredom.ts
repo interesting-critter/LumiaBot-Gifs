@@ -15,6 +15,7 @@ import { channelHistoryService } from './channel-history';
 import { getAIService } from './google-genai';
 import { gifService } from './gif';
 import { formatDiscordResponseText } from '../utils/discord-markdown';
+import { dashboardLoggerService } from './dashboard-logger';
 
 interface BoredomState {
   enabled: boolean;
@@ -216,7 +217,12 @@ export class BoredomService {
       const channel = validChannels[Math.floor(Math.random() * validChannels.length)]!;
       console.log(`😴 [BOREDOM] Selected channel #${channel.name} (${channel.id}) in ${channel.guild.name}`);
 
-      const rawMessages = await channelHistoryService.fetchChannelHistory(channel, undefined, config.boredom.historyLimit);
+      const turnStartedAt = Date.now();
+
+      // fetchChannelHistory takes only (channel, beforeMessageId) and applies
+      // its own CHANNEL_MAX_HISTORY limit, so the previous third argument was
+      // silently ignored. config.boredom.historyLimit has never affected this.
+      const rawMessages = await channelHistoryService.fetchChannelHistory(channel);
       const turns = channelHistoryService.convertToTurns(rawMessages, client.user?.id);
 
       const isGifEnabled = channel.guildId ? gifService.isGifEnabled(channel.guildId) : false;
@@ -237,6 +243,9 @@ export class BoredomService {
       }
 
       const aiService = getAIService();
+      // A boredom turn has no user prompt, so the payload the service built is
+      // the only record of what was actually sent. Worth capturing.
+      let fullPrompt: string | undefined;
       const response = await aiService.createChatCompletion({
         messages: turns,
         systemPromptOverride: spontaneousInstructions,
@@ -244,6 +253,7 @@ export class BoredomService {
         enableKnowledgeGraph: false,
         isGifEnabled,
         guildId: channel.guildId,
+        onFullPrompt: (captured: string) => { fullPrompt = captured; },
       });
 
       const { text: textWithoutGif, gifUrl } = isGifEnabled
@@ -270,6 +280,22 @@ export class BoredomService {
       const now = new Date().toISOString();
       this.setStateValue('last_run_at', now);
       console.log(`😴 [BOREDOM] Spontaneous message sent to #${channel.name}`);
+
+      dashboardLoggerService.log({
+        source: 'boredom',
+        prompt: '[spontaneous chatter — no user prompt]',
+        fullPrompt,
+        response: formatted,
+        durationMs: Date.now() - turnStartedAt,
+        channelId: channel.id,
+        channelName: channel.name,
+        guildId: channel.guildId || undefined,
+        guildName: channel.guild?.name,
+        gifUrl,
+        searchEnabled: false,
+        knowledgeEnabled: false,
+      });
+
       return true;
     } catch (error) {
       console.error('❌ [BOREDOM] Error executing spontaneous chat:', error);

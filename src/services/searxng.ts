@@ -20,6 +20,15 @@ export interface SearXNGResponse {
   infoboxes: unknown[];
 }
 
+export interface SearXNGHealth {
+  configured: boolean;
+  reachable: boolean;
+  url: string | null;
+  status: number | null;
+  latencyMs: number | null;
+  detail: string | null;
+}
+
 export class SearXNGService {
   private baseUrl: string;
   private maxResults: number;
@@ -29,6 +38,54 @@ export class SearXNGService {
     this.baseUrl = config.searxng.baseUrl.replace(/\/$/, '');
     this.maxResults = config.searxng.maxResults;
     this.safeSearch = config.searxng.safeSearch;
+  }
+
+  /**
+   * Liveness probe for the dashboard's integrations view.
+   *
+   * Deliberately does not go through `search()`: that method logs a large block
+   * per call and has no timeout, so a hung instance would stall the health
+   * endpoint indefinitely. Any HTTP response counts as reachable — the question
+   * is whether the server answers, not whether the route is `/healthz`.
+   */
+  async ping(timeoutMs = 4000): Promise<SearXNGHealth> {
+    const url = this.baseUrl || null;
+
+    if (!url) {
+      return { configured: false, reachable: false, url: null, status: null, latencyMs: null, detail: 'SEARXNG_URL is not set' };
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const started = Date.now();
+
+    try {
+      const res = await fetch(`${url}/healthz`, {
+        method: 'GET',
+        signal: controller.signal,
+        headers: { Accept: 'application/json, text/plain, */*' },
+      });
+      return {
+        configured: true,
+        reachable: true,
+        url,
+        status: res.status,
+        latencyMs: Date.now() - started,
+        detail: res.ok ? 'healthy' : `answered with HTTP ${res.status}`,
+      };
+    } catch (error) {
+      const aborted = error instanceof Error && error.name === 'AbortError';
+      return {
+        configured: true,
+        reachable: false,
+        url,
+        status: null,
+        latencyMs: Date.now() - started,
+        detail: aborted ? `no response after ${timeoutMs}ms` : (error instanceof Error ? error.message : String(error)),
+      };
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   async search(query: string, options: {

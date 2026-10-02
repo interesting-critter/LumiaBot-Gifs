@@ -19,6 +19,8 @@ const DISCORD_ID_PATTERN = /^\d{17,20}$/;
 interface MigrationPreview {
   sourceOpinions: number;
   destinationOpinions: number;
+  sourceMemoryEntries: number;
+  destinationMemoryEntries: number;
   sourceMessages: number;
   destinationMessages: number;
   sourceBoredomSettings: number;
@@ -27,6 +29,21 @@ interface MigrationPreview {
 
 function countRows(db: Database, table: string, userId: string): number {
   return (db.query(`SELECT COUNT(*) AS count FROM ${table} WHERE user_id = ?`).get(userId) as { count: number }).count;
+}
+
+/**
+ * The individually-addressable memory rows live in a table added after the
+ * original schema, so it may be absent from databases that have not been
+ * opened by the bot since the upgrade.
+ */
+function tableExists(db: Database, table: string): boolean {
+  return (db
+    .query(`SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = ?`)
+    .get(table) as { count: number }).count > 0;
+}
+
+function countRowsIfPresent(db: Database, table: string, userId: string): number {
+  return tableExists(db, table) ? countRows(db, table, userId) : 0;
 }
 
 function collectPreview(oldUserId: string, newUserId: string): MigrationPreview {
@@ -48,6 +65,8 @@ function collectPreview(oldUserId: string, newUserId: string): MigrationPreview 
     return {
       sourceOpinions: countRows(memories, 'user_opinions', oldUserId),
       destinationOpinions: countRows(memories, 'user_opinions', newUserId),
+      sourceMemoryEntries: countRowsIfPresent(memories, 'user_memory_entries', oldUserId),
+      destinationMemoryEntries: countRowsIfPresent(memories, 'user_memory_entries', newUserId),
       sourceMessages: countRows(conversations, 'conversation_messages', oldUserId),
       destinationMessages: countRows(conversations, 'conversation_messages', newUserId),
       sourceBoredomSettings,
@@ -97,6 +116,11 @@ function applyMigration(oldUserId: string, newUserId: string): void {
 
   try {
     memories.run('UPDATE user_opinions SET user_id = ? WHERE user_id = ?', [newUserId, oldUserId]);
+    // Individual memory rows must follow the profile, otherwise they would be
+    // orphaned and invisible to the prompt builder.
+    if (tableExists(memories, 'user_memory_entries')) {
+      memories.run('UPDATE user_memory_entries SET user_id = ? WHERE user_id = ?', [newUserId, oldUserId]);
+    }
     conversations.run('UPDATE conversation_messages SET user_id = ? WHERE user_id = ?', [newUserId, oldUserId]);
     boredom.run('UPDATE boredom_settings SET user_id = ? WHERE user_id = ?', [newUserId, oldUserId]);
   } finally {
@@ -142,6 +166,7 @@ async function main(): Promise<void> {
   console.log(`  Source ID: ${oldUserId}`);
   console.log(`  Target ID: ${newUserId}`);
   console.log(`  Long-term memory records: ${preview.sourceOpinions}`);
+  console.log(`  Individual memory entries: ${preview.sourceMemoryEntries}`);
   console.log(`  Conversation messages: ${preview.sourceMessages}`);
   console.log(`  Boredom settings: ${preview.sourceBoredomSettings}`);
   console.log(`  Target conversation messages (unchanged, then shared under target): ${preview.destinationMessages}`);

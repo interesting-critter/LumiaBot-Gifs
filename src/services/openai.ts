@@ -5,7 +5,6 @@ import { searxngService } from './searxng';
 import { userMemoryService, PRONOUN_FALLBACK } from './user-memory';
 import { conversationHistoryService } from './conversation-history';
 import { guildMemoryService } from './guild-memory';
-import { boredomService } from './boredom';
 import { videoService } from './video';
 import { knowledgeGraphService } from './knowledge-graph';
 import { musicService, type MusicTrackWithDetails } from './music';
@@ -32,6 +31,8 @@ import {
   getSfwGuidelines,
   getNsfwGuidelines
 } from './prompts';
+import { apiUsageService } from './api-usage';
+import { formatPromptForLog } from './dashboard-logger';
 
 // Moonshot pricing (per million tokens)
 const COST_INPUT_PER_M  = 0.90;  // cache miss / regular input
@@ -47,6 +48,17 @@ function logUsageCost(usage: { prompt_tokens?: number; completion_tokens?: numbe
   console.log(
     `💰 [AI] Usage — input: ${uncached} (cached: ${cached}) | output: ${output} | est. cost: $${cost.toFixed(6)}`
   );
+}
+
+/**
+ * Record an outbound LLM request against the rolling requests-per-day counter.
+ *
+ * Every request that can consume provider quota must be counted, including
+ * multi-round tool-call follow-ups and retries, so this is called at each
+ * individual HTTP dispatch rather than once per chat turn.
+ */
+function recordApiCall(kind: string, model: string): void {
+  apiUsageService.recordCall(kind, model);
 }
 
 /**
@@ -134,6 +146,12 @@ export interface ChatCompletionOptions {
   allowNsfwImageGeneration?: boolean;
   isGifEnabled?: boolean;
   onImageGenerated?: (image: GeneratedImageAttachment) => void;
+  /**
+   * Called with the exact payload handed to the provider, rendered as readable
+   * text, once the system prompt and message array are final. Only the
+   * non-streaming path fires it, which is the path the bot turn uses.
+   */
+  onFullPrompt?: (fullPrompt: string) => void;
 }
 
 export interface ToolExecutionSnapshot {
@@ -152,6 +170,28 @@ export interface ToolExecutionSnapshot {
   status: 'success' | 'error';
   reason?: string;
   error?: string;
+}
+
+/**
+ * Flattens a message `content` field, which is either a plain string or an
+ * array of content parts, into text for the dashboard's full-prompt view.
+ */
+function extractTextContent(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => {
+        if (typeof part === 'string') return part;
+        const p = part as { type?: string; text?: string };
+        if (p && typeof p.text === 'string') return p.text;
+        if (p && p.type === 'image_url') return '[image]';
+        if (p && p.type === 'input_audio') return '[audio]';
+        return '';
+      })
+      .filter(Boolean)
+      .join('\n');
+  }
+  return content === undefined || content === null ? '' : String(content);
 }
 
 let lastToolExecutionSnapshot: ToolExecutionSnapshot | null = null;
@@ -201,6 +241,26 @@ export class OpenAIService {
     this.filterReasoning = options?.filterReasoning ?? config.openai.filterReasoning;
     this.extraBody = options?.extraBody ?? config.openai.extraBody;
     this.rawBodyParams = options?.rawBodyParams ?? config.openai.rawBodyParams;
+  }
+
+  /**
+   * Re-point this instance at a different model.
+   *
+   * The exported `openaiService` singleton is constructed once at import time,
+   * so it would otherwise keep using the model that was active back then. The
+   * dashboard's live model switch calls this to keep the singleton in step with
+   * `config.openai.modelAlias`.
+   */
+  setModel(model: string): void {
+    if (!model || model === this.model) {
+      return;
+    }
+    console.log(`🎛️ [AI] OpenAI service switching model ${this.model} → ${model}`);
+    this.model = model;
+  }
+
+  getModel(): string {
+    return this.model;
   }
 
   /**
@@ -481,6 +541,7 @@ export class OpenAIService {
           Object.assign(requestParams, this.rawBodyParams);
         }
 
+        recordApiCall('openai', this.model);
         const completion = await this.client.chat.completions.create(requestParams);
         logUsageCost((completion as any).usage);
 
@@ -1048,6 +1109,25 @@ If they mention @OtherUser, they are talking TO that user, not AS them.`;
 
     // Clean up uploaded videos after use (in finally block later)
 
+    // Hand the caller the final payload for the dashboard log. Taken here,
+    // after the prefix and multimodal conversion, so it is what the provider
+    // actually receives rather than a reconstruction of it.
+    if (options.onFullPrompt) {
+      try {
+        options.onFullPrompt(
+          formatPromptForLog(
+            systemPrompt,
+            enhancedMessages.map((m) => ({
+              role: String((m as { role?: string }).role ?? 'user'),
+              content: extractTextContent((m as { content?: unknown }).content),
+            }))
+          )
+        );
+      } catch (promptLogError) {
+        console.error('⚠️ [OPENAI] Failed to capture full prompt for the dashboard log:', promptLogError);
+      }
+    }
+
     const provider: 'moonshot' | 'other' = isMoonshotProvider() ? 'moonshot' : 'other';
     const moonshotThinkingModel = isMoonshotThinkingModel();
     const knowledgeToolEnabled = enableKnowledgeGraph !== false && knowledgeGraphService.hasDocuments();
@@ -1512,76 +1592,6 @@ If they mention @OtherUser, they are talking TO that user, not AS them.`;
         }
       };
 
-      // Define boredom management functions
-      const setBoredomPreferenceFunction = async (args: { enabled: boolean }) => {
-        if (!userId || !guildId) {
-          return 'Error: Cannot set boredom preference - user or guild information not available.';
-        }
-        
-        console.log(`😴 [TOOL CALL] set_boredom_preference: enabled=${args.enabled}`);
-        
-        try {
-          boredomService.setEnabled(userId, guildId, args.enabled);
-          if (args.enabled) {
-            return 'Boredom pings enabled! I\'ll randomly message you 10-60 minutes after you stop chatting. Get ready for chaos! 🎉';
-          } else {
-            return 'Boredom pings disabled. I\'ll stop randomly bugging you... *sad kitty noises* (◕︵◕)';
-          }
-        } catch (error) {
-          console.error('😴 [AI BOREDOM] Failed to set boredom preference:', error);
-          return 'Error: Failed to set boredom preference.';
-        }
-      };
-
-      const getBoredomStatsFunction = async () => {
-        if (!userId || !guildId) {
-          return 'Error: Cannot get boredom stats - user or guild information not available.';
-        }
-        
-        console.log(`😴 [TOOL CALL] get_boredom_stats: user="${username}"`);
-        
-        try {
-          const stats = boredomService.getStats(userId, guildId);
-          let result = 'Your Boredom Ping Stats:\n';
-          result += `• Enabled: ${stats.enabled ? 'Yes' : 'No'}\n`;
-          result += `• Total pings received: ${stats.pingCount}\n`;
-          result += `• Last interaction: ${new Date(stats.lastInteraction).toLocaleString()}\n`;
-          if (stats.lastPinged) {
-            result += `• Last pinged: ${new Date(stats.lastPinged).toLocaleString()}\n`;
-          }
-          if (stats.hasPendingPing && stats.nextPingAt) {
-            result += `• Next ping scheduled: ${new Date(stats.nextPingAt).toLocaleString()}\n`;
-          }
-          return result;
-        } catch (error) {
-          console.error('😴 [AI BOREDOM] Failed to get boredom stats:', error);
-          return 'Error: Failed to get boredom stats.';
-        }
-      };
-
-      const listGuildUsersWithBoredomFunction = async () => {
-        if (!guildId) {
-          return 'Error: Cannot list guild users - guild information not available.';
-        }
-        
-        console.log(`😴 [TOOL CALL] list_guild_users_with_boredom`);
-        
-        try {
-          const users = boredomService.listGuildUsers(guildId);
-          if (users.length === 0) {
-            return 'No users have boredom settings configured in this server yet.';
-          }
-          const userList = users.map(u => {
-            const enabled = u.enabled ? '✅' : '❌';
-            return `- ${enabled} User ${u.userId.substring(0, 8)}... (${u.pingCount} pings, last active: ${new Date(u.lastInteraction).toLocaleDateString()})`;
-          }).join('\n');
-          return `Users with boredom settings in this server (${users.length} total):\n${userList}`;
-        } catch (error) {
-          console.error('😴 [AI BOREDOM] Failed to list guild users:', error);
-          return 'Error: Failed to list guild users.';
-        }
-      };
-
       // Build tools array
       const now = new Date();
       const currentDate = now.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
@@ -1933,83 +1943,6 @@ If they mention @OtherUser, they are talking TO that user, not AS them.`;
                 properties: {},
               },
             },
-          },
-          {
-            type: 'function',
-            function: {
-              function: setBoredomPreferenceFunction,
-              parse: JSON.parse,
-              description: `CRITICAL: Users are DISABLED by default - they must EXPLICITLY opt-in to receive boredom pings!
-
-Enable or disable random boredom pings for the current user. When enabled, you will send them random chaotic messages 10-60 minutes after they stop chatting.
-
-⚠️ OPT-IN MODEL - EXPLICIT INTENT REQUIRED:
-Users are DISABLED by default. ONLY enable if they EXPLICITLY ask for boredom pings.
-
-EXPLICIT TRIGGER PHRASES FOR OPTING IN (enabled: true):
-- "ping me when you're bored" / "ping me if you get bored"
-- "message me when you're bored"
-- "@ me when you're bored" / "at me when you're bored"
-- "let me know when you're bored"
-- "reach out when you're bored"
-- "talk to me when you're bored"
-- "keep me company when you're bored"
-
-DO NOT enable for vague or indirect phrases like:
-- Just saying "talk to me" (without "when bored")
-- General questions about the feature
-- Casual conversation
-
-TRIGGER PHRASES FOR OPTING OUT (enabled: false):
-- "stop pinging me"
-- "leave me alone"
-- "don't bother me"
-- "stop messaging me"
-- "no more pings"
-- "I'm busy, don't disturb"
-- "turn off notifications"
-- "opt out"
-- "disable boredom"
-
-ONLY use this tool when you detect CLEAR, EXPLICIT intent to change boredom settings. When in doubt, ask for clarification rather than assuming.`,
-              name: 'set_boredom_preference',
-              parameters: {
-                type: 'object',
-                properties: {
-                  enabled: {
-                    type: 'boolean',
-                    description: 'Whether to enable (true) or disable (false) boredom pings.',
-                  },
-                },
-                required: ['enabled'],
-              },
-            },
-          },
-          {
-            type: 'function',
-            function: {
-              function: getBoredomStatsFunction,
-              parse: JSON.parse,
-              description: 'Get statistics about boredom pings for the current user: whether they are enabled, last interaction time, last ping time, total ping count, and when the next ping is scheduled. Use this when they ask about their boredom settings or ping history.',
-              name: 'get_boredom_stats',
-              parameters: {
-                type: 'object',
-                properties: {},
-              },
-            },
-          },
-          {
-            type: 'function',
-            function: {
-              function: listGuildUsersWithBoredomFunction,
-              parse: JSON.parse,
-              description: 'List all users in the current server who have boredom settings configured, along with their enabled status and ping counts. Use this to see who is available for boredom pings in this server.',
-              name: 'list_guild_users_with_boredom',
-              parameters: {
-                type: 'object',
-                properties: {},
-              },
-            },
           }
         );
       }
@@ -2137,6 +2070,7 @@ ONLY use this tool when you detect CLEAR, EXPLICIT intent to change boredom sett
 
           // Use runTools to automatically handle the function calling loop
           // Note: runTools is available in the beta namespace of the OpenAI SDK
+          recordApiCall('openai-tools', this.model);
           const runner = this.client.beta.chat.completions.runTools(runToolsParams);
 
           // Log multi-step tool call progress for observability
@@ -2411,6 +2345,7 @@ ONLY use this tool when you detect CLEAR, EXPLICIT intent to change boredom sett
         Object.assign(streamParams, this.rawBodyParams);
       }
 
+      recordApiCall('openai-stream', this.model);
       const stream = await this.client.chat.completions.create(streamParams as OpenAI.ChatCompletionCreateParamsStreaming);
 
       let accumulatedContent = '';

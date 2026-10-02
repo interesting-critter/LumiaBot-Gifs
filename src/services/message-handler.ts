@@ -6,6 +6,7 @@ import { getTriggerKeywords, getErrorMessage } from './prompts';
 import { knowledgeGraphService } from './knowledge-graph';
 import { config } from '../utils/config';
 import { gifService } from './gif';
+import { dashboardLoggerService, type InteractionSource } from './dashboard-logger';
 import type { ChatMessage } from './openai';
 import type { MusicActivity } from './user-activity';
 import type { ResolveUserMention } from './user-mention-resolver';
@@ -152,6 +153,11 @@ export interface MessageHandlerOptions {
   orchestratorTurnId?: string;
   requestFollowUp?: (eventId: string, turnId: string, targetBotId?: string, reason?: string) => Promise<{ approved: boolean; reason: string }>;
   requestCollectiveKnowledge?: (query: string, maxResults?: number) => Promise<string>;
+  // Dashboard observability
+  source?: InteractionSource;
+  channelId?: string;
+  channelName?: string;
+  guildName?: string;
 }
 
 export interface MessageHandlerResponse {
@@ -251,7 +257,46 @@ async function processVisionContent(
  * @returns The bot's response with potential reactions
  */
 export async function handleMessage(options: MessageHandlerOptions): Promise<MessageHandlerResponse> {
-    const { content, enableSearch, enableKnowledgeGraph, imageUrls, videoUrls, textAttachments, pageContents, userId, username, guildId, mentionedUsers, replyContext, channelMessages, orchestratorContextNote, currentMessageSpeaker, getUserListeningActivity, resolveUserMention, isNsfwChannel, allowNsfwImageGeneration, orchestratorEventId, orchestratorTurnId, requestFollowUp, requestCollectiveKnowledge } = options;
+    const { content, enableSearch, enableKnowledgeGraph, imageUrls, videoUrls, textAttachments, pageContents, userId, username, guildId, mentionedUsers, replyContext, channelMessages, orchestratorContextNote, currentMessageSpeaker, getUserListeningActivity, resolveUserMention, isNsfwChannel, allowNsfwImageGeneration, orchestratorEventId, orchestratorTurnId, requestFollowUp, requestCollectiveKnowledge, source, channelName, guildName } = options;
+
+    // Dashboard observability: measure the full turn so the log shows how long
+    // the bot actually took to answer, not just the model call.
+    const turnStartedAt = Date.now();
+    const logTurn = (
+      response: MessageHandlerResponse | null,
+      error?: string,
+    ): void => {
+      dashboardLoggerService.log({
+        source: source ?? 'unknown',
+        prompt: content,
+        response: response?.text ?? '',
+        durationMs: Date.now() - turnStartedAt,
+        userId,
+        username,
+        channelId: options.channelId,
+        channelName,
+        guildId,
+        guildName,
+        error,
+        imageCount: imageUrls?.length ?? 0,
+        videoCount: videoUrls?.length ?? 0,
+        attachmentCount: response?.attachments.length ?? 0,
+        reactions: response?.reactions ?? [],
+        gifUrl: response?.gifUrl,
+        searchEnabled: shouldSearchForLog,
+        knowledgeEnabled: shouldKnowledgeForLog,
+        fullPrompt: fullPromptForLog,
+      });
+    };
+
+    // Captured before the try block runs so the error path can still log them.
+    let shouldSearchForLog = options.enableSearch;
+    let shouldKnowledgeForLog = options.enableKnowledgeGraph;
+    // The full system prompt is only ever assembled inside the AI service, so
+    // it is handed back through the same callback pattern already used for
+    // generated images. Undefined when the call throws before the service
+    // reaches the send.
+    let fullPromptForLog: string | undefined;
 
   try {
     // Parse message for pronouns and mentions BEFORE processing
@@ -278,6 +323,10 @@ export async function handleMessage(options: MessageHandlerOptions): Promise<Mes
     const shouldQueryLocalKnowledge = enableKnowledgeGraph !== undefined
       ? enableKnowledgeGraph
       : knowledgeGraphService.hasDocuments();
+
+    // Record the resolved values (post-default) on the dashboard entry.
+    shouldSearchForLog = shouldSearch;
+    shouldKnowledgeForLog = shouldQueryLocalKnowledge;
 
     const shouldQueryCollectiveKnowledge = typeof requestCollectiveKnowledge === 'function';
 
@@ -391,6 +440,7 @@ export async function handleMessage(options: MessageHandlerOptions): Promise<Mes
       requestFollowUp,
       requestCollectiveKnowledge,
       onImageGenerated: (image: GeneratedImageAttachment) => generatedImages.push(image),
+      onFullPrompt: (fullPrompt: string) => { fullPromptForLog = fullPrompt; },
     });
 
     // 1. Extract and resolve GIF if present (and remove <gif> tags from the text)
@@ -410,11 +460,18 @@ export async function handleMessage(options: MessageHandlerOptions): Promise<Mes
       conversationHistoryService.addMessage(userId, guildId, username, 'assistant', text);
     }
 
-    return { text, reactions, attachments: generatedImages, gifUrl };
+    const handlerResponse: MessageHandlerResponse = { text, reactions, attachments: generatedImages, gifUrl };
+    logTurn(handlerResponse);
+
+    return handlerResponse;
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     console.error(`❌ [HANDLER] ${errorMessage}`);
-    
+
+    // Record the failure on the dashboard even though the user sees a friendly
+    // error template instead of the raw message.
+    logTurn(null, errorMessage);
+
     if (errorMessage.includes('Failed to generate response after multiple attempts') || 
         errorMessage.includes('Failed to generate response')) {
       return {

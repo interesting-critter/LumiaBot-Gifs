@@ -6,11 +6,12 @@ import { userMemoryService, PRONOUN_FALLBACK } from './user-memory';
 import { knowledgeGraphService } from './knowledge-graph';
 import { musicService } from './music';
 import { videoService } from './video';
-import { boredomService } from './boredom';
 import { conversationHistoryService } from './conversation-history';
 import { guildMemoryService } from './guild-memory';
 import { userActivityService, type MusicActivity } from './user-activity';
 import { lrclibService } from './lrclib';
+import { apiUsageService } from './api-usage';
+import { formatPromptForLog } from './dashboard-logger';
 import type { ResolveUserMention } from './user-mention-resolver';
 import { isNsfwImagePrompt, swarmUIService, type GeneratedImageAttachment } from './swarmui';
 import {
@@ -31,6 +32,15 @@ import {
   getSfwGuidelines,
   getNsfwGuidelines
 } from './prompts';
+
+/**
+ * Record an outbound Gemini request against the rolling requests-per-day counter.
+ * Counts multi-round tool-call follow-ups and retries individually, since each
+ * one is a separate billable request against the provider quota.
+ */
+function recordApiCall(kind: string, model: string): void {
+  apiUsageService.recordCall(kind, model);
+}
 
 /**
  * Music-related keywords for smart detection
@@ -112,6 +122,11 @@ export interface ChatCompletionOptions {
   allowNsfwImageGeneration?: boolean;
   isGifEnabled?: boolean;
   onImageGenerated?: (image: GeneratedImageAttachment) => void;
+  /**
+   * Called with the exact payload handed to Gemini, rendered as readable text,
+   * once the system prompt and contents are final.
+   */
+  onFullPrompt?: (fullPrompt: string) => void;
 }
 
 /**
@@ -891,74 +906,6 @@ Use this sparingly and naturally when a reaction enhances your response.
       });
     }
 
-    // Boredom/ping management tools
-    if (options.userId && options.guildId) {
-      tools.push({
-        name: 'set_boredom_preference',
-        description: `CRITICAL: Users are DISABLED by default - they must EXPLICITLY opt-in to receive boredom pings!
-
-Enable or disable random boredom pings for the current user. When enabled, you will send them random chaotic messages 10-60 minutes after they stop chatting.
-
-⚠️ OPT-IN MODEL - EXPLICIT INTENT REQUIRED:
-Users are DISABLED by default. ONLY enable if they EXPLICITLY ask for boredom pings.
-
-EXPLICIT TRIGGER PHRASES FOR OPTING IN (enabled: true):
-- "ping me when you're bored" / "ping me if you get bored"
-- "message me when you're bored"
-- "@ me when you're bored" / "at me when you're bored"
-- "let me know when you're bored"
-- "reach out when you're bored"
-- "talk to me when you're bored"
-- "keep me company when you're bored"
-
-DO NOT enable for vague or indirect phrases like:
-- Just saying "talk to me" (without "when bored")
-- General questions about the feature
-- Casual conversation
-
-TRIGGER PHRASES FOR OPTING OUT (enabled: false):
-- "stop pinging me"
-- "leave me alone"
-- "don't bother me"
-- "stop messaging me"
-- "no more pings"
-- "I'm busy, don't disturb"
-- "turn off notifications"
-- "opt out"
-- "disable boredom"
-
-ONLY use this tool when you detect CLEAR, EXPLICIT intent to change boredom settings. When in doubt, ask for clarification rather than assuming.`,
-        parameters: {
-          type: Type.OBJECT,
-          properties: {
-            enabled: {
-              type: Type.BOOLEAN,
-              description: 'Whether to enable (true) or disable (false) boredom pings.',
-            },
-          },
-          required: ['enabled'],
-        },
-      });
-
-      tools.push({
-        name: 'get_boredom_stats',
-        description: 'Get statistics about boredom pings for the current user: whether they are enabled, last interaction time, last ping time, total ping count, and when the next ping is scheduled. Use this when they ask about their boredom settings or ping history.',
-        parameters: {
-          type: Type.OBJECT,
-          properties: {},
-        },
-      });
-
-      tools.push({
-        name: 'list_guild_users_with_boredom',
-        description: 'List all users in the current server who have boredom settings configured, along with their enabled status and ping counts. Use this to see who is available for boredom pings in this server.',
-        parameters: {
-          type: Type.OBJECT,
-          properties: {},
-        },
-      });
-    }
-
     // Orchestrator follow-up tool - only available during orchestrated conversations
     if (options.orchestratorEventId && options.orchestratorTurnId && options.requestFollowUp) {
       tools.push({
@@ -1307,54 +1254,6 @@ ONLY use this tool when you detect CLEAR, EXPLICIT intent to change boredom sett
           return `We've exchanged ${count} messages in this server (${totalCount} messages total across all servers).`;
         }
 
-        case 'set_boredom_preference': {
-          if (!options.userId || !options.guildId) {
-            return 'Error: Cannot set boredom preference - user or guild information not available.';
-          }
-          boredomService.setEnabled(options.userId, options.guildId, args.enabled);
-          console.log(`🔧 [Google GenAI] Set boredom preference: ${args.enabled}`);
-          if (args.enabled) {
-            return 'Boredom pings enabled! I\'ll randomly message you 10-60 minutes after you stop chatting. Get ready for chaos! 🎉';
-          } else {
-            return 'Boredom pings disabled. I\'ll stop randomly bugging you... *sad kitty noises* (◕︵◕)';
-          }
-        }
-
-        case 'get_boredom_stats': {
-          if (!options.userId || !options.guildId) {
-            return 'Error: Cannot get boredom stats - user or guild information not available.';
-          }
-          const stats = boredomService.getStats(options.userId, options.guildId);
-          console.log(`🔧 [Google GenAI] Retrieved boredom stats`);
-          let result = 'Your Boredom Ping Stats:\n';
-          result += `• Enabled: ${stats.enabled ? 'Yes' : 'No'}\n`;
-          result += `• Total pings received: ${stats.pingCount}\n`;
-          result += `• Last interaction: ${new Date(stats.lastInteraction).toLocaleString()}\n`;
-          if (stats.lastPinged) {
-            result += `• Last pinged: ${new Date(stats.lastPinged).toLocaleString()}\n`;
-          }
-          if (stats.hasPendingPing && stats.nextPingAt) {
-            result += `• Next ping scheduled: ${new Date(stats.nextPingAt).toLocaleString()}\n`;
-          }
-          return result;
-        }
-
-        case 'list_guild_users_with_boredom': {
-          if (!options.guildId) {
-            return 'Error: Cannot list guild users - guild information not available.';
-          }
-          const users = boredomService.listGuildUsers(options.guildId);
-          console.log(`🔧 [Google GenAI] Listed ${users.length} users with boredom settings`);
-          if (users.length === 0) {
-            return 'No users have boredom settings configured in this server yet.';
-          }
-          const userList = users.map(u => {
-            const enabled = u.enabled ? '✅' : '❌';
-            return `- ${enabled} User ${u.userId.substring(0, 8)}... (${u.pingCount} pings, last active: ${new Date(u.lastInteraction).toLocaleDateString()})`;
-          }).join('\n');
-          return `Users with boredom settings in this server (${users.length} total):\n${userList}`;
-        }
-
         case 'request_follow_up': {
           if (!options.orchestratorEventId || !options.orchestratorTurnId || !options.requestFollowUp) {
             return 'Error: Follow-up requests are only available during orchestrated conversations.';
@@ -1589,6 +1488,7 @@ ONLY use this tool when you detect CLEAR, EXPLICIT intent to change boredom sett
         console.log(`🔄 [Google GenAI] Generation attempt ${attempt}/${maxRetries}`);
 
         // Make the request
+        recordApiCall('gemini', this.model);
         let response = await this.client.models.generateContent({
           model: this.model,
           contents: currentContents,
@@ -1655,6 +1555,7 @@ ONLY use this tool when you detect CLEAR, EXPLICIT intent to change boredom sett
           console.log(`🔧 [Google GenAI] Sending function results back to model (round ${toolRound})...`);
 
           // Re-request from model
+          recordApiCall('gemini-tools', this.model);
           response = await this.client.models.generateContent({
             model: this.model,
             contents: currentContents,
@@ -1774,6 +1675,33 @@ ONLY use this tool when you detect CLEAR, EXPLICIT intent to change boredom sett
         }
       }
 
+
+      // Hand the caller the final payload for the dashboard log. Placed after the
+      // persona directive so the capture matches what Gemini receives. Gemini
+      // carries the persona as a separate systemInstruction, so both halves join.
+      if (options.onFullPrompt) {
+        try {
+          options.onFullPrompt(
+            formatPromptForLog(
+              systemPrompt,
+              contents.map((c) => ({
+                role: c.role === 'model' ? 'assistant' : 'user',
+                content: ((c as { parts?: Array<{ text?: string; inlineData?: unknown }> }).parts ?? [])
+                  .map((part) => {
+                    if (typeof part.text === 'string') return part.text;
+                    if (part.inlineData) return '[attachment]';
+                    return '';
+                  })
+                  .filter(Boolean)
+                  .join('\n'),
+              }))
+            )
+          );
+        } catch (promptLogError) {
+          console.error('⚠️ [GEMINI] Failed to capture full prompt for the dashboard log:', promptLogError);
+        }
+      }
+
       const genConfig = this.buildConfig(options, systemPrompt);
 
       console.log(`🔮 [Google GenAI] Sending ${contents.length} messages to ${this.model}`);
@@ -1839,6 +1767,7 @@ ONLY use this tool when you detect CLEAR, EXPLICIT intent to change boredom sett
       console.log(`🎭 [Google GenAI] System instruction: ${systemPrompt.substring(0, 50)}... (${systemPrompt.length} chars)`);
       console.log(`🧠 [Google GenAI] Thinking disabled via native thinkingConfig`);
 
+      recordApiCall('gemini-stream', this.model);
       const stream = await this.client.models.generateContentStream({
         model: this.model,
         contents,
@@ -1918,13 +1847,17 @@ export function getAIService() {
   const hasGeminiConfig = gemini.enabled && gemini.apiKey;
 
   if (isGemini3 && hasGeminiConfig) {
+    // Constructed fresh per call, so it already picks up the current model.
     console.log(`🔄 [AI Service] Using Google GenAI for ${model}`);
     return new GoogleGenAIService();
   }
 
-  console.log(`🔄 [AI Service] Using OpenAI for ${model}`);
   // Import dynamically to avoid circular dependency
   const { openaiService } = require('./openai');
+  // The singleton captured its model at construction time, so re-point it
+  // whenever the dashboard has switched models since then.
+  openaiService.setModel(openai.modelAlias || openai.model);
+  console.log(`🔄 [AI Service] Using OpenAI for ${model}`);
   return openaiService;
 }
 
