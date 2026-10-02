@@ -46,7 +46,8 @@ export function extractPronouns(content: string): string | null {
 export function extractMentionsWithContext(
   content: string, 
   mentionedUsers: Map<string, string>,
-  authorUsername: string
+  authorUsername: string,
+  guildId?: string
 ): ExtractedMention[] {
   const mentions: ExtractedMention[] = [];
   const timestamp = new Date().toISOString();
@@ -79,6 +80,10 @@ export function extractMentionsWithContext(
       context: cleanContext,
       mentionedBy: authorUsername,
       timestamp: timestamp,
+      // Carried on the mention so a store that only has the ExtractedMention
+      // (this module's own storeParsedInformation) still writes to the right
+      // guild instead of the unreadable legacy bucket.
+      guildId: guildId,
     });
     
     console.log(`📝 [PARSER] Extracted mention context for ${username}: "${cleanContext.substring(0, 50)}..."`);
@@ -141,7 +146,8 @@ export function detectThirdPersonReference(content: string): boolean {
 export function parseMessage(
   content: string,
   mentionedUsers: Map<string, string>,
-  authorUsername: string
+  authorUsername: string,
+  guildId?: string
 ): ParsedMessage {
   console.log(`📝 [PARSER] Parsing message from ${authorUsername}`);
   
@@ -149,7 +155,7 @@ export function parseMessage(
   const pronouns = extractPronouns(content);
   
   // Extract mentions with context
-  const mentions = extractMentionsWithContext(content, mentionedUsers, authorUsername);
+  const mentions = extractMentionsWithContext(content, mentionedUsers, authorUsername, guildId);
   
   const result: ParsedMessage = {
     pronouns: pronouns,
@@ -163,16 +169,23 @@ export function parseMessage(
 }
 
 /**
- * Store extracted information from message parsing
+ * Store extracted information from message parsing.
+ *
+ * `guildId` MUST be threaded in. Every read of user memory is guild-scoped, so
+ * a write that omits it lands in `LEGACY_GUILD_SCOPE` and becomes invisible —
+ * automatic pronoun detection and automatic mention context were write-only
+ * until this was wired through. It is optional only so existing callers keep
+ * compiling; omitting it reproduces that bug.
  */
 export function storeParsedInformation(
   authorId: string,
   authorUsername: string,
-  parsed: ParsedMessage
+  parsed: ParsedMessage,
+  guildId?: string
 ): void {
   // Store author's pronouns if detected
   if (parsed.pronouns) {
-    userMemoryService.storePronouns(authorId, authorUsername, parsed.pronouns);
+    userMemoryService.storePronouns(authorId, authorUsername, parsed.pronouns, guildId);
   }
   
   // Store third-party context for mentioned users
@@ -182,6 +195,8 @@ export function storeParsedInformation(
       continue;
     }
     
-    userMemoryService.storeThirdPartyContext(mention);
+    // The explicit argument wins; `mention.guildId` is the fallback for callers
+    // that only have the parsed mention (see storeThirdPartyContext).
+    userMemoryService.storeThirdPartyContext(mention, guildId ?? mention.guildId);
   }
 }

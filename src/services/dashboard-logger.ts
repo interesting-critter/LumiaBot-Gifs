@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { config } from '../utils/config';
+import { intEnv } from '../utils/env';
 
 export type InteractionSource =
   | 'mention'
@@ -122,7 +123,14 @@ export interface LatencyStats {
 }
 
 export interface HourOfDayBucket {
-  /** 0-23 in the server's local time. */
+  /**
+   * 0-23 in UTC.
+   *
+   * UTC rather than server-local on purpose: `api-usage.ts` buckets its hourly
+   * usage chart by UTC, so the activity heatmap and the usage panel describe
+   * the same axis. They used to disagree (local `getHours()` here vs UTC there),
+   * which made the two panels impossible to read together.
+   */
   hour: number;
   count: number;
   errors: number;
@@ -180,11 +188,26 @@ export class DashboardLoggerService {
   private lastFullPromptKey: string | null = null;
   private static readonly MAX_FULL_PROMPTS = 24;
 
+  /** Upper bound on the rolling window, so the prune can never be a no-op. */
+  private static readonly MAX_WINDOW_HOURS = 24 * 30;
+  /** Upper bound on the hard entry cap. */
+  private static readonly MAX_ENTRIES = 100_000;
+
   constructor() {
-    this.windowMs = Math.max(1, config.dashboard.logWindowHours) * 60 * 60 * 1000;
-    this.maxEntries = Math.max(10, config.dashboard.logMaxEntries);
+    this.windowMs =
+      intEnv('DASHBOARD_LOG_WINDOW_HOURS', config.dashboard.logWindowHours, {
+        min: 1,
+        max: DashboardLoggerService.MAX_WINDOW_HOURS,
+      }) * 60 * 60 * 1000;
+    // `Math.max(10, NaN)` is NaN, which made `entries.length > NaN` false and so
+    // the hard cap below never fired: the buffer grew without limit, holding
+    // every prompt and response ever produced.
+    this.maxEntries = intEnv('DASHBOARD_LOG_MAX_ENTRIES', config.dashboard.logMaxEntries, {
+      min: 10,
+      max: DashboardLoggerService.MAX_ENTRIES,
+    });
     console.log(
-      `📝 [DASHBOARD LOG] Rolling log initialized (${config.dashboard.logWindowHours}h window, max ${this.maxEntries} entries)`
+      `📝 [DASHBOARD LOG] Rolling log initialized (${this.windowMs / 3_600_000}h window, max ${this.maxEntries} entries, UTC buckets)`
     );
   }
 
@@ -390,17 +413,17 @@ export class DashboardLoggerService {
     for (const entry of this.entries) {
       // A turn that never produced a response has no meaningful latency.
       const timed = entry.durationMs > 0;
+      // getUTCHours(), matching api-usage.ts's UTC hour buckets.
+      const hourOfDay = new Date(entry.epochMs).getUTCHours();
       if (timed) {
         durations.push(entry.durationMs);
-        const h = new Date(entry.epochMs).getHours();
-        hourLatencyTotal[h]! += entry.durationMs;
-        hourLatencyCount[h]! += 1;
+        hourLatencyTotal[hourOfDay]! += entry.durationMs;
+        hourLatencyCount[hourOfDay]! += 1;
       }
 
-      const localHour = new Date(entry.epochMs).getHours();
-      hours[localHour]!.count += 1;
+      hours[hourOfDay]!.count += 1;
       if (entry.error) {
-        hours[localHour]!.errors += 1;
+        hours[hourOfDay]!.errors += 1;
       }
 
       if (entry.userId) {

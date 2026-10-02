@@ -50,11 +50,11 @@ const boredomCommand: Command = {
 
   async execute(interaction: ChatInputCommandInteraction) {
     // Gates every subcommand, including `interval` and `trigger`, which write
-    // global state. Guild owner / admin permissions were removed deliberately:
-    // see canRunPrivilegedCommand.
+    // global state. Guild owner / admin permissions and role *names* were both
+    // removed deliberately: see canRunPrivilegedCommand.
     if (!canRunPrivilegedCommand(interaction.user.id, interaction.member)) {
       await interaction.reply({
-        content: '❌ You must be the bot owner or hold a trusted role to use this command.',
+        content: '❌ You must be the bot owner or hold a trusted role (by role ID) to use this command.',
         flags: MessageFlags.Ephemeral,
       });
       return;

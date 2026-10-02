@@ -1,4 +1,5 @@
 import { Database } from 'bun:sqlite';
+import { dbPath } from '../utils/paths';
 
 export interface InsideJoke {
   id?: number;
@@ -21,10 +22,22 @@ export interface GuildPreference {
 export class GuildMemoryService {
   private db: Database;
 
-  constructor() {
-    this.db = new Database('guild_memories.db');
+  constructor(databasePath: string = dbPath('guild_memories.db')) {
+    // Absolute path from utils/paths: a CWD-relative filename silently creates a
+    // brand-new empty database when the bot is started from another directory.
+    this.db = new Database(databasePath);
+    this.applyPragmas();
     this.initDatabase();
     console.log('🏰 [GUILD MEMORY] Service initialized with persistent storage');
+  }
+
+  private applyPragmas(): void {
+    try {
+      this.db.run('PRAGMA journal_mode = WAL');
+      this.db.run('PRAGMA busy_timeout = 5000');
+    } catch (error) {
+      console.warn('🏰 [GUILD MEMORY] Could not enable WAL/busy_timeout:', error);
+    }
   }
 
   private initDatabase(): void {

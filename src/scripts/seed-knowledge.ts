@@ -1,11 +1,27 @@
 /**
  * Example seed script for the knowledge graph
  * Run this to add sample documents for testing
- * 
- * Usage: bun run src/scripts/seed-knowledge.ts
+ *
+ * Usage:
+ *   bun run src/scripts/seed-knowledge.ts            # seed, skipping documents that already exist
+ *   bun run src/scripts/seed-knowledge.ts --force    # overwrite existing documents with the same title+topic
+ *   bun run src/scripts/seed-knowledge.ts --dry-run  # report what would be added, change nothing
+ *
+ * WHY THIS IS GATED
+ * ------------------
+ * The old version printed "Do you want to add example documents anyway? (y/n)"
+ * and then immediately answered itself on the next line ("For automation, just
+ * add them"), and `storeDocument` is a plain INSERT. So every re-run appended a
+ * second copy of all five documents, with nothing to deduplicate them, growing
+ * the knowledge base without bound. Documents are now matched on
+ * `LOWER(title), LOWER(topic)` — the same key `knowledgeGraphService.syncFromFiles`
+ * uses — and existing rows are updated rather than duplicated.
  */
 
+import { Database } from 'bun:sqlite';
 import { knowledgeGraphService } from '../services/knowledge-graph';
+import { dbPath } from '../utils/paths';
+import { parseArgs, wantsHelp } from './safety';
 
 console.log('🌱 Seeding knowledge base with example documents...\n');
 
@@ -111,38 +127,123 @@ Remember: The goal is a character that feels alive, not one that's exhaustively 
   },
 ];
 
-try {
-  // Check if documents already exist
+/**
+ * Look up an existing document by the same case-insensitive (title, topic) key
+ * used for de-duplication, returning its id so it can be updated in place.
+ */
+function findExistingDocumentId(title: string, topic: string): number | null {
+  const db = new Database(dbPath('knowledge_graph.db'), { readonly: true });
+  try {
+    const row = db
+      .query('SELECT id FROM knowledge_documents WHERE LOWER(title) = LOWER(?) AND LOWER(topic) = LOWER(?) LIMIT 1')
+      .get(title, topic) as { id: number } | undefined;
+    return row ? row.id : null;
+  } finally {
+    db.close();
+  }
+}
+
+function main(): void {
+  const parsed = parseArgs(process.argv.slice(2));
+
+  if (wantsHelp(parsed)) {
+    console.log(`
+Seed the knowledge base with the five example "Lucid Loom" documents.
+
+Usage:
+  bun run src/scripts/seed-knowledge.ts            Skip documents that already exist.
+  bun run src/scripts/seed-knowledge.ts --force    Update existing documents in place.
+  bun run src/scripts/seed-knowledge.ts --dry-run  Report only; change nothing.
+`);
+    return;
+  }
+
+  if (parsed.unknownFlags.length > 0) {
+    console.error(`❌ Unknown option(s): ${parsed.unknownFlags.join(', ')}`);
+    process.exitCode = 1;
+    return;
+  }
+
+  const force = parsed.flags.has('--force');
+  const dryRun = parsed.flags.has('--dry-run');
+
+  console.log('🌱 Seeding knowledge base with example documents...\n');
+
   const existingStats = knowledgeGraphService.getStats();
-  
+
   if (existingStats.totalDocuments > 0) {
-    console.log(`⚠️  Knowledge base already has ${existingStats.totalDocuments} documents.`);
-    console.log('Do you want to add example documents anyway? (y/n)');
-    
-    // For automation, just add them
-    console.log('Adding example documents...\n');
+    console.log(`⚠️  Knowledge base already has ${existingStats.totalDocuments} document(s).`);
+    if (force) {
+      console.log('--force was given, so existing Lucid Loom documents will be updated in place.');
+    } else {
+      console.log('Example documents that already exist will be skipped, not duplicated.');
+      console.log('Use --force to overwrite them with the bundled content.');
+    }
+    console.log();
   }
 
-  // Add each document
+  let added = 0;
+  let updated = 0;
+  let skipped = 0;
+
   for (const doc of exampleDocuments) {
-    knowledgeGraphService.storeDocument(doc);
-    console.log(`✅ Added: "${doc.title}" (${doc.topic})`);
+    const existingId = findExistingDocumentId(doc.title, doc.topic);
+
+    if (existingId !== null && !force) {
+      console.log(`⏭️  Skipped: "${doc.title}" (${doc.topic}) — already present`);
+      skipped++;
+      continue;
+    }
+
+    if (dryRun) {
+      console.log(`${existingId !== null ? '🔄 Would update' : '➕ Would add'}: "${doc.title}" (${doc.topic})`);
+      if (existingId !== null) updated++;
+      else added++;
+      continue;
+    }
+
+    if (existingId !== null) {
+      // updateDocument sets `updated_at` and invalidates the document cache.
+      knowledgeGraphService.updateDocument(existingId, {
+        topic: doc.topic,
+        title: doc.title,
+        content: doc.content,
+        keywords: doc.keywords,
+        type: doc.type,
+        url: doc.url,
+        priority: doc.priority,
+      });
+      console.log(`🔄 Updated: "${doc.title}" (${doc.topic})`);
+      updated++;
+    } else {
+      knowledgeGraphService.storeDocument(doc);
+      console.log(`✅ Added: "${doc.title}" (${doc.topic})`);
+      added++;
+    }
   }
 
-  console.log('\n🎉 Successfully seeded knowledge base!');
-  
+  if (dryRun) {
+    console.log('\n🏃 Dry run complete. No changes made to database.');
+    return;
+  }
+
+  console.log(`\n🎉 Seed complete: ${added} added, ${updated} updated, ${skipped} skipped.`);
+
   // Show final stats
   const stats = knowledgeGraphService.getStats();
   console.log(`\n📊 Knowledge Base Stats:`);
   console.log(`   Total Documents: ${stats.totalDocuments}`);
   console.log(`   Topics: ${stats.totalTopics}`);
-  
+
   const topics = knowledgeGraphService.listTopics();
   console.log(`\n📁 Topics: ${topics.join(', ')}`);
-  
+
   console.log('\n💡 Try asking Lumia about "Loom", "Lucid Loom", or "LL" to test!');
-  
+}
+
+try {
+  main();
 } catch (error) {
   console.error('❌ Error seeding knowledge base:', error);
-  process.exit(1);
+  process.exitCode = 1;
 }

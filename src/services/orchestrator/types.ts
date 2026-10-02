@@ -287,6 +287,29 @@ export interface LumiaBotConfig {
   maxReconnectAttempts?: number;
 }
 
+/**
+ * Lifecycle of the outbound orchestrator socket, tracked by
+ * `LumiaBotIntegration` so a stalled socket can never look connected.
+ */
+export type OrchestratorConnectionState =
+  | 'disconnected'
+  | 'connecting'
+  | 'connected'
+  | 'backoff';
+
+/**
+ * An event this bot itself announced via `notifyMention`. A `response_request`
+ * for an event id that never appears here is refused, so a peer holding the API
+ * key cannot name arbitrary turns and force LLM generations.
+ */
+export interface ObservedOrchestratorEvent {
+  eventId: string;
+  guildId?: string;
+  channelId?: string;
+  /** Epoch ms the mention was sent (or queued while disconnected). */
+  observedAt: number;
+}
+
 export type ResponseHandler = (payload: ResponseRequestPayload) => Promise<string>;
 
 // Callback for typing indicator - called when bot should start/stop typing

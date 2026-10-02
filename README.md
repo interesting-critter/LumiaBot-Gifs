@@ -64,7 +64,7 @@ DISCORD_REDIRECT_URI=http://localhost:3000/auth/callback
 # These values are used as template variables in prompt_storage files
 # BOT_NAME=Bad Kitty                    # Bot's display name
 # BOT_OWNER_NAME=Prolix                 # Owner's name
-# BOT_OWNER_ID=944783522059673691       # Owner's Discord ID
+# OWNER_ID=your_discord_user_id_here    # Owner's Discord ID (no default owner; see below)
 # BOT_OWNER_USERNAME=prolix_oc          # Owner's Discord username
 
 # OpenAI Configuration
@@ -93,7 +93,7 @@ You can customize your bot's identity and owner information through environment 
 # Optional - Bot identity (defaults shown)
 BOT_NAME=Bad Kitty                    # Bot's display name
 BOT_OWNER_NAME=Prolix                 # Owner's name
-BOT_OWNER_ID=944783522059673691       # Owner's Discord ID
+OWNER_ID=your_discord_user_id_here    # Owner's Discord ID (no default owner; see below)
 BOT_OWNER_USERNAME=prolix_oc          # Owner's Discord username
 ```
 
@@ -103,6 +103,33 @@ These variables allow you to:
 - Maintain consistent identity across all prompt templates
 
 See `BOT_SETUP.md` for more details on using template variables in your bot's personality files.
+
+#### `OWNER_ID` gates privileges, not just prompts
+
+The rest of these variables only feed template variables into
+`prompt_storage/`. `OWNER_ID` is different: it is the live authorisation check
+behind every owner-only feature — memory wipes, global config changes, and
+`/ratelimit` / `/boredom` when no trusted roles are configured. It also exempts
+the owner from the chat rate limit.
+
+```env
+OWNER_ID=your_discord_user_id_here    # Your Discord user id
+```
+
+The bot reads `OWNER_ID` first and falls back to `BOT_OWNER_ID` only when
+`OWNER_ID` is unset or blank, so a stale `BOT_OWNER_ID` left in an old `.env`
+cannot override the `OWNER_ID` you just added. Use `OWNER_ID` for new setups;
+`BOT_OWNER_ID` remains a working alias so existing deployments keep their owner
+across the upgrade.
+
+> **There is no default owner.** If neither variable is set — or either is left
+> blank — the bot resolves an empty owner id and **every** owner-only command
+> denies, for you as well as for everyone else. That fail-closed default is
+> deliberate: a shipped default owner id would silently grant full privileges,
+> including the ability to erase every user's stored memories, to whoever holds
+> that account. The cost is that the denial raises no error at the call site, so
+> it reads like a permissions problem rather than a missing variable. Set
+> `OWNER_ID` if owner-only commands appear to be denied for everyone.
 
 ### Using Custom AI Providers
 
@@ -439,7 +466,75 @@ LumiaBot/
 └── README.md
 ```
 
+## Upgrading
+
+### Databases moved into `data/`
+
+Every SQLite file used to be opened with a bare CWD-relative name
+(`new Database('user_memories.db')`). That worked, but it meant the databases
+lived next to whichever directory you started the bot from — start it somewhere
+else and Bun quietly creates a brand-new empty file and uses *that*. All paths
+are now anchored to the repository instead, and the databases live in `data/`
+by default (override with `DATA_DIR`).
+
+**Read this before your first start after upgrading.** Because SQLite creates a
+missing file rather than failing, the upgrade itself will not error. It will
+simply come up with an empty memory store and an empty knowledge base while
+your real data sits in the old location looking untouched.
+
+So, on the first run after pulling this change, the bot checks for each known
+database at its old CWD-relative location and prints a loud warning naming every
+file it found there and not in `data/`. If you see that warning:
+
+```bash
+# Option 1 — move the databases into the new location
+mv ./user_memories.db ./conversations.db ./guild_memories.db \
+   ./knowledge_graph.db ./api_usage.db ./boredom.db \
+   ./dashboard_settings.db ./data/
+
+# Option 2 — leave them where they are and point DATA_DIR at their parent
+echo 'DATA_DIR=.' >> .env
+```
+
+Nothing is moved or deleted automatically. A file that exists in *both* places
+is treated as a deliberate copy and is not reported, and a wrong automatic move
+could clobber the copy you meant to keep.
+
+The check runs once per process, on the first database open, and is a no-op on
+every subsequent start.
+
+### Crashes no longer stop the bot
+
+`uncaughtException` and `unhandledRejection` are now logged and the process
+**continues** instead of exiting. This is a deliberate
+availability-over-crash-safety trade: for an interactive bot, dying mid-turn is
+worse than surviving a degraded one. The trade-off is real, though — after an
+uncaught exception the process state is not guaranteed to be consistent, so run
+the bot under a supervisor (`systemd`, Docker with `restart: unless-stopped`,
+`tmux`) and watch the logs for `🚨 [FATAL-GUARD]`. If you would rather have the
+old fail-fast behaviour, the two handlers are `installProcessGuards()` in
+`src/index.ts`.
+
 ## Development
+
+### Running the tests
+
+```bash
+bun test
+```
+
+The suite is safe to run against a live deployment. `bunfig.toml` preloads
+`src/__tests__/setup.ts` before any test module is evaluated, which points
+`DATA_DIR` at a throwaway directory under the system temp dir. That matters
+because several services open, migrate and sweep their SQLite file as a
+**module-load side effect**, so without it merely *collecting* a test file would
+run migrations and a retention `DELETE` against the real databases. Any
+`DATA_DIR` you have exported in your shell is overridden for the duration of the
+run and restored on exit.
+
+`src/__tests__/test-isolation.test.ts` asserts this, plus the laziness of the
+orchestrator turn journal, so a regression fails the suite rather than quietly
+touching production data.
 
 ### Adding New Commands
 
@@ -580,6 +675,15 @@ OPENAI_FILTER_REASONING=false
   `DASHBOARD_PASSWORD`; set the password or use the default `127.0.0.1`
 - The browser prompts for a username/password when `DASHBOARD_PASSWORD` is set
   (default username is `admin`)
+
+### Owner-only commands are denied for everyone
+- Check the boot log for `🚨 OWNER_ID is not set`. Both `validateConfig()` and the
+  startup banner warn when the owner is missing, and `/ratelimit set`, `/boredom`
+  and memory wipes then deny without an error, so it looks like a permissions bug
+- Set `OWNER_ID` to your Discord user id. `BOT_OWNER_ID` still works as a
+  deprecated fallback, but `OWNER_ID` wins when both are set
+- To share access, list numeric role IDs in `TRUSTED_ROLE_IDS` rather than
+  adding a second name-based role to `RATE_LIMIT_EXEMPT_ROLES`
 
 ### OpenAI errors
 - Check your API key is valid and has available credits

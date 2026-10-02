@@ -6,15 +6,47 @@
  * documents, and bulk-imports them after clearing the existing DB.
  *
  * Usage:
- *   bun run src/scripts/import-lumiverse-docs.ts
+ *   bun run import-docs --dry-run     # collect and report, change nothing
+ *   bun run import-docs               # print the plan and refuse (exit 1)
+ *   bun run import-docs --force       # back up, clear, and import
+ *
+ * WHY THE EXPLICIT GATE
+ * ---------------------
+ * This script used to call `clearAll()` and then `bulkImport()` unconditionally,
+ * while `collectDocs()` merely logged and continued when a source directory was
+ * missing. The doc root was a hardcoded developer path built from `HOME`, with
+ * a literal `'~'` fallback when `HOME` was unset. Running it anywhere that path
+ * did not exist therefore wiped the whole knowledge base and replaced it with
+ * half the documents, with no dry run, no backup and no confirmation.
+ *
+ * Now: a missing source directory is a hard error, `--dry-run` previews the
+ * plan, the destructive step requires `--force`, and `knowledge_graph.db` is
+ * backed up with `VACUUM INTO` before anything is cleared.
  */
 
 import { readFile, readdir } from 'fs/promises';
 import { join, relative, dirname, basename, extname } from 'path';
 import { existsSync } from 'node:fs';
+import { Database } from 'bun:sqlite';
 import { knowledgeGraphService } from '../services/knowledge-graph';
+import { dbPath } from '../utils/paths';
+import { strEnv } from '../utils/env';
+import { parseArgs, wantsHelp } from './safety';
 
-const LUMIVERSE_ROOT = join(process.env.HOME || '~', 'Projects', 'Lumiverse-Backend');
+const KNOWLEDGE_DB_PATH = dbPath('knowledge_graph.db');
+
+/**
+ * Root of the Lumiverse-Backend checkout. Overridable with `LUMIVERSE_ROOT`
+ * because the previous value was hardcoded to one developer's `$HOME`.
+ */
+const HOME_DIR = process.env.HOME ?? '';
+if (!HOME_DIR) {
+  console.error('❌ HOME is not set, so the Lumiverse docs location cannot be derived.');
+  console.error('   Set HOME, or set LUMIVERSE_ROOT to the Lumiverse-Backend checkout.');
+  process.exit(1);
+}
+
+const LUMIVERSE_ROOT = strEnv('LUMIVERSE_ROOT', join(HOME_DIR, 'Projects', 'Lumiverse-Backend'));
 
 const SOURCES = [
   {
@@ -143,17 +175,33 @@ async function walkDir(dir: string): Promise<string[]> {
   return files;
 }
 
+/**
+ * Collect documents from every source.
+ *
+ * A missing source directory used to be logged and skipped, which is how a
+ * half-populated knowledge base came to replace a full one. It is now a hard
+ * failure: importing a partial set after a destructive clear is never the
+ * intended outcome.
+ */
 async function collectDocs(): Promise<DocEntry[]> {
   const docs: DocEntry[] = [];
+  const missing: string[] = [];
 
   for (const source of SOURCES) {
     if (!existsSync(source.docsDir)) {
       console.error(`❌ Directory not found: ${source.docsDir}`);
+      missing.push(source.docsDir);
       continue;
     }
 
     const files = await walkDir(source.docsDir);
     console.log(`📂 Found ${files.length} markdown files in ${source.docSet}`);
+
+    if (files.length === 0) {
+      console.error(`❌ No markdown files found in ${source.docsDir}`);
+      missing.push(source.docsDir);
+      continue;
+    }
 
     for (const filePath of files) {
       const content = await readFile(filePath, 'utf-8');
@@ -182,13 +230,74 @@ async function collectDocs(): Promise<DocEntry[]> {
     }
   }
 
+  if (missing.length > 0) {
+    console.error('\n❌ Refusing to import: some source directories were missing or empty.');
+    for (const dir of missing) console.error(`   - ${dir}`);
+    console.error(`\nDocs root in use: ${LUMIVERSE_ROOT}`);
+    console.error('Set LUMIVERSE_ROOT to the Lumiverse-Backend checkout if it lives elsewhere.');
+    console.error('Importing now would replace the knowledge base with a partial set.');
+    process.exit(1);
+  }
+
   return docs;
 }
 
+/**
+ * Consistent backup of the knowledge base.
+ *
+ * `VACUUM INTO` writes a single self-contained file that includes anything
+ * still sitting in the WAL, unlike a raw byte copy of the main file.
+ */
+function backupKnowledgeBase(): string | null {
+  if (!existsSync(KNOWLEDGE_DB_PATH)) return null;
+
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const backup = `${KNOWLEDGE_DB_PATH}.predocsimport-${timestamp}.bak`;
+  const source = new Database(KNOWLEDGE_DB_PATH, { readonly: true });
+  try {
+    source.run(`VACUUM INTO '${backup.replace(/'/g, "''")}'`);
+  } finally {
+    source.close();
+  }
+  return backup;
+}
+
 async function main() {
+  const parsed = parseArgs(process.argv.slice(2));
+
+  if (wantsHelp(parsed)) {
+    console.log(`
+Import Lumiverse documentation into the knowledge graph.
+
+Usage:
+  bun run import-docs --dry-run   Collect documents and report; change nothing.
+  bun run import-docs --force     Back up knowledge_graph.db, clear it, and import.
+  bun run import-docs             Prints the plan and exits non-zero without importing.
+
+Environment:
+  LUMIVERSE_ROOT   Path to the Lumiverse-Backend checkout.
+                   Default: $HOME/Projects/Lumiverse-Backend
+
+--force is required because the import replaces the entire knowledge base.
+`);
+    return;
+  }
+
+  if (parsed.unknownFlags.length > 0) {
+    console.error(`❌ Unknown option(s): ${parsed.unknownFlags.join(', ')}`);
+    process.exitCode = 1;
+    return;
+  }
+
+  const dryRun = parsed.flags.has('--dry-run');
+  const force = parsed.flags.has('--force');
+
   console.log('📚 Lumiverse Documentation Importer');
   console.log('====================================\n');
+  console.log(`Docs root: ${LUMIVERSE_ROOT}\n`);
 
+  // collectDocs() exits(1) on a missing or empty source directory, so reaching
+  // this point means every source contributed documents.
   const docs = await collectDocs();
 
   if (docs.length === 0) {
@@ -199,6 +308,36 @@ async function main() {
   console.log(`\n📊 Summary: ${docs.length} documents ready to import`);
   console.log(`   User guides:    ${docs.filter(d => d.topic.includes('User Guide') || d.topic === 'Lumiverse User Guides').length}`);
   console.log(`   Developer docs: ${docs.filter(d => d.topic.includes('Developer Docs') || d.topic === 'Lumiverse Developer Docs').length}`);
+
+  const existing = knowledgeGraphService.getStats();
+  console.log(`\n⚠️  This replaces the whole knowledge base: ${existing.totalDocuments} existing document(s) will be deleted.`);
+  console.log(`   Database: ${KNOWLEDGE_DB_PATH}`);
+
+  if (dryRun) {
+    console.log('\n📋 Documents that would be imported:');
+    for (const doc of docs) {
+      console.log(`   - "${doc.title}" (${doc.topic})`);
+    }
+    console.log(`\n🏃 Dry run complete. Nothing was changed.`);
+    console.log('To import for real: bun run import-docs --force');
+    return;
+  }
+
+  if (!force) {
+    console.error('\n❌ Not importing: replacing the knowledge base requires --force.');
+    console.error('   Preview the exact document list first:  bun run import-docs --dry-run');
+    console.error('   Then import, keeping a backup:          bun run import-docs --force');
+    process.exitCode = 1;
+    return;
+  }
+
+  console.log('\n💾 Backing up the current knowledge base...');
+  const backup = backupKnowledgeBase();
+  if (backup) {
+    console.log(`   Backup written: ${backup}`);
+  } else {
+    console.log(`   No existing database at ${KNOWLEDGE_DB_PATH}; nothing to back up.`);
+  }
 
   // Clear existing knowledge base
   const cleared = knowledgeGraphService.clearAll();
@@ -216,6 +355,11 @@ async function main() {
   console.log('\nDocuments by topic:');
   for (const t of topicStats) {
     console.log(`   ${t.topic}: ${t.count} docs (avg priority: ${t.avgPriority})`);
+  }
+
+  if (backup) {
+    console.log(`\n↩️  To restore the previous knowledge base, stop the bot and replace`);
+    console.log(`   ${KNOWLEDGE_DB_PATH} with ${backup}`);
   }
 }
 

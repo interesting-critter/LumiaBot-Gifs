@@ -1,5 +1,7 @@
 import { Database } from 'bun:sqlite';
 import { config } from '../utils/config';
+import { intEnv } from '../utils/env';
+import { dbPath } from '../utils/paths';
 
 /**
  * Tracks every outbound LLM API request so the dashboard can show how many
@@ -9,6 +11,11 @@ import { config } from '../utils/config';
  * Storage is SQLite rather than an in-memory counter so restarts do not reset
  * the tally mid-window. Rows older than the window are pruned on every insert,
  * which keeps the table bounded at a few hundred rows for typical bot volume.
+ *
+ * TIMEZONE: every bucket and label here is UTC. `dashboard-logger.ts` was moved
+ * from local `getHours()` to UTC to match, so a single request cannot appear in
+ * one hour bucket on the usage panel and a different one on the activity
+ * heatmap.
  */
 export interface ApiUsageStats {
   windowHours: number;
@@ -22,9 +29,9 @@ export interface ApiUsageStats {
   resetsAt: string | null;
   byProvider: Record<string, number>;
   byModel: Record<string, number>;
-  /** Calls per hour, oldest first, covering the window. */
+  /** Calls per hour, oldest first, covering the window. Hour keys are UTC. */
   hourly: Array<{ hour: string; calls: number }>;
-  /** Hour with the highest call count inside the window. */
+  /** UTC hour with the highest call count inside the window. */
   peakHour: { hour: string; calls: number } | null;
   totalRecorded: number;
 }
@@ -40,12 +47,22 @@ export class ApiUsageService {
   private windowHours: number;
   private insertedCount = 0;
 
+  /**
+   * Upper bound on the rolling window. 30 days keeps `DASHBOARD_USAGE_WINDOW_HOURS`
+   * from being set to something absurd that silently turns the prune into a
+   * no-op and lets the table grow without bound.
+   */
+  private static readonly MAX_WINDOW_HOURS = 24 * 30;
+
   constructor() {
-    this.db = new Database('api_usage.db');
-    this.windowHours = Math.max(1, config.dashboard.usageWindowHours);
+    this.db = new Database(dbPath('api_usage.db'));
+    this.windowHours = intEnv('DASHBOARD_USAGE_WINDOW_HOURS', config.dashboard.usageWindowHours, {
+      min: 1,
+      max: ApiUsageService.MAX_WINDOW_HOURS,
+    });
     this.initDatabase();
     console.log(
-      `📊 [API USAGE] Tracker initialized (${this.windowHours}h rolling window, db: api_usage.db)`
+      `📊 [API USAGE] Tracker initialized (${this.windowHours}h rolling window, UTC buckets, db: api_usage.db)`
     );
   }
 
@@ -108,7 +125,8 @@ export class ApiUsageService {
     for (const row of rows) {
       byProvider[row.provider] = (byProvider[row.provider] || 0) + 1;
       byModel[row.model] = (byModel[row.model] || 0) + 1;
-      // Floor to the hour for a stable bucketing key.
+      // Floor to the hour for a stable bucketing key. UTC on purpose: this is
+      // the timezone `dashboard-logger.ts` also uses.
       const hourKey = new Date(Math.floor(row.epoch_ms / 3_600_000) * 3_600_000).toISOString();
       hourBuckets.set(hourKey, (hourBuckets.get(hourKey) || 0) + 1);
       if (row.epoch_ms < oldest) {
@@ -173,7 +191,16 @@ export class ApiUsageService {
   }
 
   setWindowHours(hours: number): void {
-    this.windowHours = Math.max(1, hours);
+    // A dashboard-supplied value can be NaN (e.g. an unparseable query string).
+    // `Math.max(1, NaN)` is NaN, and every later `epoch_ms < cutoff` comparison is
+    // false — which silently disables the prune entirely.
+    const parsed = Math.trunc(hours);
+    this.windowHours = Number.isFinite(parsed)
+      ? Math.min(Math.max(1, parsed), ApiUsageService.MAX_WINDOW_HOURS)
+      : intEnv('DASHBOARD_USAGE_WINDOW_HOURS', config.dashboard.usageWindowHours, {
+          min: 1,
+          max: ApiUsageService.MAX_WINDOW_HOURS,
+        });
     this.prune();
   }
 }

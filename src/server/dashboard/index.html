@@ -833,7 +833,7 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
           </div>
           <div class="ds-field">
             <label class="ds-label" for="add-userid">User ID</label>
-            <input class="ds-input" type="text" id="add-userid" inputmode="numeric" placeholder="944783522059673691" autocomplete="off">
+            <input class="ds-input" type="text" id="add-userid" inputmode="numeric" placeholder="Discord user ID (17-20 digits)" autocomplete="off">
           </div>
           <div class="ds-field">
             <label class="ds-label" for="add-username">Username, if the person is unknown</label>
@@ -1055,7 +1055,7 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
 
 <div id="toast" role="status" aria-live="polite"></div>
 
-<script>
+<script nonce="__CSP_NONCE__">
 (function () {
   'use strict';
 
@@ -1082,13 +1082,60 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
     toastTimer = setTimeout(function () { el.className = ''; }, 3200);
   }
 
+  /**
+ * Re-render a list in place, reusing the DOM nodes that already exist.
+ *
+ * Assigning `container.innerHTML` throws away every node in the container, so
+ * anything the operator had typed into an expanded card, its `open` state and
+ * the scroll offset all went with it. Matching on a stable key keeps the nodes
+ * that survived the update and only creates or drops the ones that changed,
+ * which is what makes "add a memory" leave the rest of the page alone.
+ *
+ * Keys are read from `data-key` on each child, which every card renderer below
+ * sets.
+ */
+  function patchList(container, items, keyOf, htmlOf, emptyHtml, updateFn) {
+    var existing = {};
+    Array.prototype.forEach.call(container.children, function (node) {
+      var key = node.dataset ? node.dataset.key : null;
+      if (key) existing[key] = node;
+    });
+
+    if (!items.length) {
+      container.innerHTML = emptyHtml || '';
+      return;
+    }
+
+    var frag = document.createDocumentFragment();
+    items.forEach(function (item) {
+      var key = String(keyOf(item));
+      var node = existing[key];
+      if (node) {
+        delete existing[key];
+        if (updateFn) updateFn(node, item);
+      } else {
+        var holder = document.createElement('div');
+        holder.innerHTML = htmlOf(item);
+        node = holder.firstElementChild;
+      }
+      if (node) frag.appendChild(node);
+    });
+
+    container.textContent = '';
+    container.appendChild(frag);
+  }
+
   function api(path, options) {
     return fetch(path, options).then(function (res) {
       var isJson = (res.headers.get('content-type') || '').indexOf('application/json') >= 0;
       return (isJson ? res.json() : res.text()).then(function (data) {
         if (!res.ok) {
           var msg = (data && data.error) ? data.error : ('HTTP ' + res.status);
-          throw new Error(msg);
+          var err = new Error(msg);
+          // Callers branch on the status (409 on a lost edit, 413 on an
+          // oversized write), so it has to survive the trip.
+          err.status = res.status;
+          throw err;
         }
         return data;
       });
@@ -1116,8 +1163,17 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
     return new Date(iso).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
   }
 
+  /**
+   * An hour-of-day bucket label.
+   *
+   * Always UTC: the server buckets `byHourOfDay` with `getUTCHours()` and the
+   * per-model usage panel buckets with UTC hours too, so the only place the
+   * timezone was recorded was a comment in the service. Say it on the label.
+   * `clockTimeShort` above is deliberately NOT this — it renders a real instant
+   * in the reader's own locale, which is a different thing from an hour bucket.
+   */
   function hourLabel(h) {
-    return (h < 10 ? '0' : '') + h + ':00';
+    return (h < 10 ? '0' : '') + h + ':00 UTC';
   }
 
   function duration(ms) {
@@ -1139,14 +1195,21 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
   }
 
   // One fact row. Used for every key/value pair so two surfaces showing the
-  // same data stay identical.
-  function fact(key, value, raw) {
-    return '<div class="fact"><dt>' + esc(key) + '</dt><dd>' +
-      (raw ? value : esc(value)) + '</dd></div>';
+  // same data stay identical. The value is ALWAYS escaped.
+  function fact(key, value) {
+    return '<div class="fact"><dt>' + esc(key) + '</dt><dd>' + esc(value) + '</dd></div>';
+  }
+
+  // The escape hatch, named so it stands out in grep. It takes markup, never
+  // data: the value must already be escaped or be a literal the page owns.
+  // This previously rode along as an invisible third argument on fact(), where
+  // one caller passed `true` and it read like an ordinary flag.
+  function rawFact(key, html) {
+    return '<div class="fact"><dt>' + esc(key) + '</dt><dd>' + html + '</dd></div>';
   }
 
   function factsHtml(pairs) {
-    return pairs.map(function (p) { return fact(p[0], p[1], p[2]); }).join('');
+    return pairs.map(function (p) { return fact(p[0], p[1]); }).join('');
   }
 
   var SOURCE_LABEL = {
@@ -1166,9 +1229,15 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
 
   // ---- State -------------------------------------------------------------
 
+  // The single inline script block is stamped with the per-boot nonce the server
+  // substituted, so it matches `script-src 'nonce-…'` and nothing else on the
+  // page can execute.
   var state = {
-    view: 'overview', autoRefresh: false, timer: null, memCache: {},
-    convCache: {}, guildNames: null, conversations: [], convTotal: 0, fullPrompts: {},
+    view: 'overview', autoRefresh: false, timer: null,
+    // No client-side cache of user details or transcripts. Both were written on
+    // every expand and never read, so they only grew for the life of the tab —
+    // a full memory dump plus every transcript the operator opened.
+    guildNames: null, conversations: [], convTotal: 0, fullPrompts: {},
     personaPath: null, personaOriginal: null,
   };
 
@@ -1254,32 +1323,25 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
 
   // ---- Activity timeline -------------------------------------------------
 
-  function renderTimeline(entries, windowHours) {
-    var hours = Math.max(6, Math.min(24, Math.round(windowHours) || 12));
-    var now = Date.now();
-    var buckets = [];
-    for (var i = hours - 1; i >= 0; i--) {
-      buckets.push({ start: now - i * 3600000, count: 0, errors: 0 });
-    }
-    var base = buckets[0].start;
-
-    entries.forEach(function (entry) {
-      var idx = Math.floor((entry.epochMs - base) / 3600000);
-      if (idx < 0) idx = 0;
-      if (idx > buckets.length - 1) idx = buckets.length - 1;
-      buckets[idx].count++;
-      if (entry.error) buckets[idx].errors++;
-    });
-
+  /**
+   * The server pre-buckets the hourly profile, so this no longer needs the
+   * entries themselves. The overview used to pull `limit=200` rows here purely
+   * to count them, which on a phone meant transferring every prompt, every
+   * response and up to 24 copies of the full system prompt every tick.
+   */
+  function renderTimeline(timeline) {
+    var buckets = timeline || [];
     var peak = buckets.reduce(function (m, b) { return Math.max(m, b.count); }, 0);
 
     var cols = buckets.map(function (b) {
       var h = peak ? Math.max(2, Math.round((b.count / peak) * 100)) : 2;
-      var label = clockTimeShort(new Date(b.start).toISOString()) + ' — ' + plural(b.count, 'activation') +
+      var label = clockTimeShort(new Date(b.startMs).toISOString()) + ' — ' + plural(b.count, 'activation') +
         (b.errors ? ', ' + plural(b.errors, 'failure') : '');
       return '<div class="strip-col" aria-hidden="true" data-empty="' + (b.count ? 0 : 1) + '" title="' + esc(label) + '">' +
         '<span style="height:' + h + '%"></span></div>';
     }).join('');
+
+    var hours = buckets.length;
 
     var strip = document.getElementById('activity-strip');
     strip.innerHTML = cols;
@@ -1291,15 +1353,14 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
       'activations in ' + hours + ' hours';
   }
 
-  function renderLatest(entries) {
+  function renderLatest(latest) {
     var block = document.getElementById('latest-block');
-    if (!entries.length) { block.hidden = true; return; }
-    var e = entries[0];
-    var who = e.username || (e.userId ? 'user ' + e.userId : 'the system');
+    if (!latest) { block.hidden = true; return; }
+    var who = latest.username || (latest.userId ? 'user ' + latest.userId : 'the system');
     block.hidden = false;
     document.getElementById('latest-facts').innerHTML =
-      fact('Most recent', timeAgo(e.timestamp) + ', ' + who + ' via ' + (SOURCE_LABEL[e.source] || e.source));
-    document.getElementById('latest-text').textContent = e.prompt || '(no prompt)';
+      fact('Most recent', timeAgo(latest.timestamp) + ', ' + who + ' via ' + (SOURCE_LABEL[latest.source] || latest.source));
+    document.getElementById('latest-text').textContent = latest.prompt || '(no prompt)';
   }
 
   // ---- Overview ----------------------------------------------------------
@@ -1393,7 +1454,7 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
         '<button class="ds-btn ds-btn-primary" id="model-apply">Apply</button>' +
       '</div>' +
       '<dl class="facts" style="margin-top:.9rem">' +
-        fact('Revert to', envLine, true) +
+        rawFact('Revert to', envLine) +
         (model.changedAt ? fact('Last changed', timeAgo(model.changedAt)) : '') +
       '</dl>' +
       (model.source === 'dashboard'
@@ -1422,7 +1483,7 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
     });
   }
 
-  function renderOverview(data, usage, entries) {
+  function renderOverview(data, usage, logSummary) {
     var pill = document.getElementById('conn-pill');
     if (data.bot.ready) {
       pill.textContent = 'online';
@@ -1435,8 +1496,8 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
     var log = data.log;
 
     document.getElementById('activation-count').textContent = log.total;
-    renderTimeline(entries, log.windowHours);
-    renderLatest(entries);
+    renderTimeline(logSummary && logSummary.timeline);
+    renderLatest(logSummary && logSummary.latest);
 
     document.getElementById('tile-users').textContent = log.uniqueUsers;
     document.getElementById('tile-avg').textContent = duration(log.avgDurationMs);
@@ -1477,26 +1538,68 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
     document.getElementById('storage-block').innerHTML = factsHtml(config);
   }
 
+  /**
+   * One overview refresh.
+   *
+   * `scheduleRefresh` used to be a bare `setInterval(loadOverview, interval)`
+   * with three consequences on a slow phone, where the minimum interval (60s)
+   * is shorter than one cold tick can take:
+ *
+   *   - ticks overlapped without bound, so requests piled up;
+   *   - responses came back out of order and the last one to arrive won, even
+   *     when it carried the oldest data — the overview looked live while
+   *     showing data from minutes ago;
+   *   - hiding the tab only stopped the *next* tick, never what was in flight.
+   *
+   * So: one request set at a time (`refreshInFlight`), an AbortController that
+   * cancels the previous cycle when a new one starts, and the same abort fired
+   * on `visibilitychange`. The status pill is deliberately not touched on an
+   * abort — an intentional cancellation is not an outage.
+   */
+  var refreshInFlight = false;
+  var refreshAbort = null;
+
   function loadOverview() {
+    if (refreshInFlight) return Promise.resolve();
+    refreshInFlight = true;
+
+    if (refreshAbort) refreshAbort.abort();
+    var controller = new AbortController();
+    refreshAbort = controller;
+    var signal = controller.signal;
+
     return Promise.all([
-      api('/api/status'),
-      api('/api/usage').then(function (d) { return d.stats; }),
-      api('/api/models').then(function (d) { return d.model; }),
-      api('/api/log?limit=200').then(function (d) { return d.entries; }).catch(function () { return []; })
+      api('/api/status', { signal: signal }),
+      api('/api/usage', { signal: signal }).then(function (d) { return d.stats; }),
+      api('/api/models', { signal: signal }).then(function (d) { return d.model; }),
+      // Summary only: counters, the hourly strip and the newest prompt. Not the
+      // 200-entry log dump, which was the heaviest thing the page did.
+      api('/api/log/summary', { signal: signal }).catch(function () { return null; })
     ]).then(function (res) {
       renderModel(res[2]);
       renderOverview(res[0], res[1], res[3]);
     }).catch(function (err) {
+      if (err && err.name === 'AbortError') return;
       toast(err.message, 'bad');
       var pill = document.getElementById('conn-pill');
       pill.textContent = 'unreachable';
       pill.className = 'ds-badge ds-badge-danger';
+    }).then(function () {
+      if (refreshAbort === controller) {
+        refreshAbort = null;
+        refreshInFlight = false;
+      }
     });
+  }
+
+  function cancelOverviewRefresh() {
+    if (refreshAbort) refreshAbort.abort();
   }
 
   // ---- Activity log ------------------------------------------------------
 
   function entryHtml(entry) {
+    var key = 'e:' + entry.id;
     var tags = sourceBadge(entry.source);
     if (entry.error) tags += ' <span class="ds-badge ds-badge-danger">failed</span>';
     if (entry.imageCount) tags += ' <span class="ds-badge">' + plural(entry.imageCount, 'image') + '</span>';
@@ -1542,7 +1645,7 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
       (entry.attachmentCount ? fact('Attachments', entry.attachmentCount) : '') +
       '</dl>';
 
-    return '<details class="ds-card entry">' +
+    return '<details class="ds-card entry" data-key="' + esc(key) + '">' +
         '<summary>' +
           '<div class="entry-head">' + tags +
             '<span class="who">' + esc(who) + '</span>' +
@@ -1591,9 +1694,15 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
       renderBreakdown(data.summary);
       state.fullPrompts = data.fullPrompts || {};
 
-      list.innerHTML = data.entries.length
-        ? data.entries.map(entryHtml).join('')
-        : '<div class="empty">No activity yet. Mention the bot or use a trigger keyword in Discord.</div>';
+      // Nodes are reused by entry id, so an expanded entry (and the multi-kilobyte
+      // prompt inside it) survives a filter change or a refresh.
+      patchList(
+        list,
+        data.entries,
+        function (entry) { return 'e:' + entry.id; },
+        entryHtml,
+        '<div class="empty">No activity yet. Mention the bot or use a trigger keyword in Discord.</div>'
+      );
     }).catch(function (err) {
       toast(err.message, 'bad');
     });
@@ -1632,7 +1741,7 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
         '" title="' + esc(title) + '"></div>';
     }).join('');
 
-    var heatLabel = 'Activations by hour of day across the last ' + a.windowHours + ' hours. ' +
+    var heatLabel = 'Activations by hour of day (UTC) across the last ' + a.windowHours + ' hours. ' +
       (peak ? 'Busiest at ' + hourLabel(a.byHourOfDay.reduce(function (m, b) {
         return b.count > m.count ? b : m;
       }, a.byHourOfDay[0]).hour) + ' with ' + plural(peak, 'activation') + '.' : 'No activations.');
@@ -1648,7 +1757,7 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
       ]) +
       '<h3>Busiest hours</h3>' +
       '<div class="heat" role="img" aria-label="' + esc(heatLabel) + '">' + cells + '</div>' +
-      '<div class="heat-axis ds-supporting"><span>00:00</span><span>12:00</span><span>23:00</span></div>' +
+      '<div class="heat-axis ds-supporting"><span>00:00</span><span>12:00</span><span>23:00 (UTC)</span></div>' +
       '<div class="heat-legend">' +
         '<i data-k="low">quieter</i><i data-k="high">busier</i><i data-k="err">had a failure</i>' +
       '</div>' +
@@ -1689,7 +1798,7 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
   }
 
   function userCardHtml(user) {
-    return '<article class="ds-card xcard" data-user-id="' + esc(user.userId) + '">' +
+    return '<article class="ds-card xcard" data-key="u:' + esc(user.userId) + '" data-user-id="' + esc(user.userId) + '">' +
       '<div class="xhead" data-act="toggle-user" role="button" tabindex="0" aria-expanded="false">' +
         '<span class="ds-avatar" aria-hidden="true">' + esc(initials(user.username)) + '</span>' +
         '<span class="xid">' +
@@ -1704,6 +1813,22 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
     '</article>';
   }
 
+  /** Refresh a card's collapsed header without touching its expanded body. */
+  function updateUserCardHeader(card, user) {
+    var name = card.querySelector('.xname');
+    if (name) name.textContent = user.username;
+    var sub = card.querySelector('.xsub');
+    if (sub) {
+      sub.textContent = user.opinionCount + ' opinion' + (user.opinionCount === 1 ? '' : 's') +
+        ', ' + user.thirdPartyCount + ' third party, updated ' + timeAgo(user.updatedAt);
+    }
+    var badge = card.querySelector('.xhead > .ds-badge');
+    if (badge) {
+      badge.className = 'ds-badge' + (user.sentiment === 'negative' ? ' ds-badge-warn' : (user.sentiment === 'positive' ? ' ds-badge-safe' : ''));
+      badge.textContent = user.sentiment;
+    }
+  }
+
   function loadMemories() {
     var q = document.getElementById('mem-q').value.trim();
     var params = new URLSearchParams();
@@ -1716,13 +1841,106 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
       document.getElementById('mem-opinions').textContent = stats.opinionEntries;
       document.getElementById('mem-third').textContent = stats.thirdPartyEntries;
 
-      document.getElementById('mem-list').innerHTML = data.users.length
-        ? data.users.map(userCardHtml).join('')
-        : '<div class="empty">' + (q
-            ? 'No one matches that search. Try part of a name or a user ID.'
-            : 'No memories stored yet. Add one from the Setup tab.') + '</div>';
+      // Nodes are reused, so an expanded card stays expanded and text already
+      // typed into it survives a refresh. Only the list membership is rebuilt.
+      patchList(
+        document.getElementById('mem-list'),
+        data.users,
+        function (u) { return 'u:' + u.userId; },
+        userCardHtml,
+        '<div class="empty">' + (q
+          ? 'No one matches that search. Try part of a name or a user ID.'
+          : 'No memories stored yet. Add one from the Setup tab.') + '</div>',
+        updateUserCardHeader
+      );
     }).catch(function (err) {
       toast(err.message, 'bad');
+    });
+  }
+
+  function userProfileHtml(userId, m) {
+    return '<div class="field-row">' +
+          '<div class="ds-field"><label class="ds-label" for="p-user-' + esc(userId) + '">Username</label>' +
+            '<input class="ds-input" type="text" id="p-user-' + esc(userId) + '" value="' + esc(m.username) + '"></div>' +
+          '<div class="ds-field"><label class="ds-label" for="p-pro-' + esc(userId) + '">Pronouns</label>' +
+            '<input class="ds-input" type="text" id="p-pro-' + esc(userId) + '" value="' + esc(m.pronouns || '') + '"></div>' +
+        '</div>' +
+        '<div class="field-row">' +
+          '<div class="ds-field"><label class="ds-label" for="p-sen-' + esc(userId) + '">Sentiment</label>' +
+            '<select class="ds-select" id="p-sen-' + esc(userId) + '">' +
+            ['positive', 'negative', 'neutral', 'mixed'].map(function (s) {
+              return '<option value="' + s + '"' + (m.sentiment === s ? ' selected' : '') + '>' + s + '</option>';
+            }).join('') +
+            '</select></div>' +
+          '<div class="ds-field" style="display:flex;align-items:flex-end">' +
+            '<button class="ds-btn ds-btn-primary" data-act="save-profile" data-id="' + esc(userId) + '" style="width:100%">Save profile</button></div>' +
+        '</div>';
+  }
+
+  function userEntriesHtml(m) {
+    return m.entries.length
+      ? m.entries.map(entryRowHtml).join('')
+      : '<p class="hint" style="margin:0">Nothing stored for this person yet.</p>';
+  }
+
+  function userAdderHtml(userId) {
+    return '<div class="field-row" style="margin-top:.5rem">' +
+          '<div class="ds-field"><label class="ds-label" for="n-kind-' + esc(userId) + '">New memory type</label>' +
+            '<select class="ds-select" id="n-kind-' + esc(userId) + '">' +
+            '<option value="opinion">Opinion</option><option value="third_party">Third party</option>' +
+            '</select></div>' +
+          '<div class="ds-field" style="display:flex;align-items:flex-end">' +
+            '<button class="ds-btn ds-btn-secondary" data-act="add-entry" data-id="' + esc(userId) + '" style="width:100%">Add memory</button></div>' +
+        '</div>' +
+        '<div class="ds-field" style="margin-bottom:0">' +
+          '<label class="ds-label" for="n-text-' + esc(userId) + '">Memory text</label>' +
+          '<textarea class="ds-textarea" id="n-text-' + esc(userId) + '" placeholder="What should the bot remember?"></textarea>' +
+        '</div>';
+  }
+
+  /**
+   * Render an expanded user card.
+   *
+   * The entry list lives in its own container so a mutation can replace just
+   * that. Previously every action — add, edit, delete, save profile — called
+   * `loadMemories()`, which rebuilt the whole container: the card collapsed, the
+   * textarea holding the text just typed was destroyed, and the scroll position
+   * jumped back to the top.
+   */
+  function renderUserBody(body, userId, m) {
+    body.innerHTML =
+      '<div data-role="profile">' + userProfileHtml(userId, m) + '</div>' +
+      '<h3 class="ds-section-title" style="font-size:1rem;margin:1rem 0 .6rem">Memories (<span data-role="count">' +
+        esc(m.entries.length) + '</span>)</h3>' +
+      '<div data-role="entries">' + userEntriesHtml(m) + '</div>' +
+      userAdderHtml(userId) +
+      '<div class="ds-row" style="margin-top:.9rem">' +
+        '<button class="ds-btn ds-btn-ghost btn-danger" data-act="del-user" data-id="' + esc(userId) + '">Delete this person entirely</button>' +
+      '</div>';
+  }
+
+  /**
+   * Re-fetch one user and patch only the entry list, header and count in an
+   * already-expanded card. Everything the operator typed — the memory textarea,
+   * the profile fields — is left untouched.
+   */
+  function refreshUserEntries(card) {
+    var userId = card.dataset.userId;
+    return api('/api/memories/' + encodeURIComponent(userId)).then(function (data) {
+      var m = data.memory;
+      var body = card.querySelector('.xbody');
+
+      var entries = body.querySelector('[data-role="entries"]');
+      if (entries) entries.innerHTML = userEntriesHtml(m);
+
+      var count = body.querySelector('[data-role="count"]');
+      if (count) count.textContent = m.entries.length;
+
+      // The detail endpoint returns the summary fields too, so the collapsed
+      // header stays honest without a second request or a rebuild.
+      updateUserCardHeader(card, m);
+
+      return m;
     });
   }
 
@@ -1743,51 +1961,7 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
     body.innerHTML = '<div class="empty">Loading…</div>';
 
     api('/api/memories/' + encodeURIComponent(userId)).then(function (data) {
-      var m = data.memory;
-      state.memCache[userId] = m;
-
-      var profile =
-        '<div class="field-row">' +
-          '<div class="ds-field"><label class="ds-label" for="p-user-' + esc(userId) + '">Username</label>' +
-            '<input class="ds-input" type="text" id="p-user-' + esc(userId) + '" value="' + esc(m.username) + '"></div>' +
-          '<div class="ds-field"><label class="ds-label" for="p-pro-' + esc(userId) + '">Pronouns</label>' +
-            '<input class="ds-input" type="text" id="p-pro-' + esc(userId) + '" value="' + esc(m.pronouns || '') + '"></div>' +
-        '</div>' +
-        '<div class="field-row">' +
-          '<div class="ds-field"><label class="ds-label" for="p-sen-' + esc(userId) + '">Sentiment</label>' +
-            '<select class="ds-select" id="p-sen-' + esc(userId) + '">' +
-            ['positive', 'negative', 'neutral', 'mixed'].map(function (s) {
-              return '<option value="' + s + '"' + (m.sentiment === s ? ' selected' : '') + '>' + s + '</option>';
-            }).join('') +
-            '</select></div>' +
-          '<div class="ds-field" style="display:flex;align-items:flex-end">' +
-            '<button class="ds-btn ds-btn-primary" data-act="save-profile" data-id="' + esc(userId) + '" style="width:100%">Save profile</button></div>' +
-        '</div>';
-
-      var entries = m.entries.length
-        ? m.entries.map(entryRowHtml).join('')
-        : '<p class="hint" style="margin:0">Nothing stored for this person yet.</p>';
-
-      var adder =
-        '<div class="field-row" style="margin-top:.5rem">' +
-          '<div class="ds-field"><label class="ds-label" for="n-kind-' + esc(userId) + '">New memory type</label>' +
-            '<select class="ds-select" id="n-kind-' + esc(userId) + '">' +
-            '<option value="opinion">Opinion</option><option value="third_party">Third party</option>' +
-            '</select></div>' +
-          '<div class="ds-field" style="display:flex;align-items:flex-end">' +
-            '<button class="ds-btn ds-btn-secondary" data-act="add-entry" data-id="' + esc(userId) + '" style="width:100%">Add memory</button></div>' +
-        '</div>' +
-        '<div class="ds-field" style="margin-bottom:0">' +
-          '<label class="ds-label" for="n-text-' + esc(userId) + '">Memory text</label>' +
-          '<textarea class="ds-textarea" id="n-text-' + esc(userId) + '" placeholder="What should the bot remember?"></textarea>' +
-        '</div>';
-
-      body.innerHTML = profile +
-        '<h3 class="ds-section-title" style="font-size:1rem;margin:1rem 0 .6rem">Memories (' + esc(m.entries.length) + ')</h3>' +
-        entries + adder +
-        '<div class="ds-row" style="margin-top:.9rem">' +
-          '<button class="ds-btn ds-btn-ghost btn-danger" data-act="del-user" data-id="' + esc(userId) + '">Delete this person entirely</button>' +
-        '</div>';
+      renderUserBody(body, userId, data.memory);
     }).catch(function (err) {
       body.innerHTML = '<div class="empty">' + esc(err.message) + '</div>';
     });
@@ -1796,7 +1970,7 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
   // ---- Knowledge ---------------------------------------------------------
 
   function docCardHtml(doc) {
-    return '<article class="ds-card xcard" data-doc-id="' + esc(doc.id) + '">' +
+    return '<article class="ds-card xcard" data-key="d:' + esc(doc.id) + '" data-doc-id="' + esc(doc.id) + '">' +
       '<div class="xhead" data-act="toggle-doc" role="button" tabindex="0" aria-expanded="false">' +
         '<span class="xid">' +
           '<span class="xname">' + esc(doc.title) + '</span>' +
@@ -1863,9 +2037,9 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
       }).join('');
       body.innerHTML =
         '<dl class="facts" style="margin:0 0 .9rem">' +
-          fact('Used', plural(doc.usageCount, 'time'), false) +
-          fact('Updated', timeAgo(doc.updatedAt), false) +
-          (doc.lastAccessed ? fact('Last retrieved', timeAgo(doc.lastAccessed), false) : '') +
+          fact('Used', plural(doc.usageCount, 'time')) +
+          fact('Updated', timeAgo(doc.updatedAt)) +
+          (doc.lastAccessed ? fact('Last retrieved', timeAgo(doc.lastAccessed)) : '') +
         '</dl>' +
         (kws ? '<div class="kw-row" style="margin:0 0 .9rem">' + kws + '</div>' : '') +
         docEditorHtml(doc);
@@ -1921,11 +2095,21 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
         ? plural(docs.length, 'document') + (data.total && data.total !== docs.length ? ' of ' + data.total : '')
         : '';
 
-      document.getElementById('kb-list').innerHTML = docs.length
-        ? docs.map(docCardHtml).join('')
-        : '<div class="empty">' + (q
-            ? 'Nothing matched that search.'
-            : 'No documents yet. Reload from files or create one.') + '</div>';
+      patchList(
+        document.getElementById('kb-list'),
+        docs,
+        function (d) { return 'd:' + d.id; },
+        docCardHtml,
+        '<div class="empty">' + (q
+          ? 'Nothing matched that search.'
+          : 'No documents yet. Reload from files or create one.') + '</div>',
+        function (card, doc) {
+          var name = card.querySelector('.xname');
+          if (name) name.textContent = doc.title;
+          var sub = card.querySelector('.xsub');
+          if (sub) sub.textContent = doc.topic + ', ' + doc.type;
+        }
+      );
     }).catch(function (err) {
       toast(err.message, 'bad');
     });
@@ -2034,7 +2218,7 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
   }
 
   function convRowHtml(c) {
-    return '<article class="ds-card xcard" data-user-id="' + esc(c.userId) + '" data-guild-id="' + esc(c.guildId) + '">' +
+    return '<article class="ds-card xcard" data-key="c:' + esc(c.userId) + ':' + esc(c.guildId) + '" data-user-id="' + esc(c.userId) + '" data-guild-id="' + esc(c.guildId) + '">' +
       '<div class="xhead" data-act="toggle-conv" role="button" tabindex="0" aria-expanded="false">' +
         '<span class="ds-avatar" aria-hidden="true">' + esc(initials(c.username)) + '</span>' +
         '<span class="xid">' +
@@ -2066,7 +2250,6 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
     api('/api/conversations/' + encodeURIComponent(userId) + '/' + encodeURIComponent(guildId))
       .then(function (data) {
         var conv = data.conversation;
-        state.convCache[userId + ':' + guildId] = conv;
 
         // Newest first reads better for a transcript you are auditing.
         var turns = conv.messages.slice().reverse().map(function (m) {
@@ -2108,11 +2291,22 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
         });
       }
       document.getElementById('conv-total').textContent = state.convTotal;
-      document.getElementById('conv-list').innerHTML = rows.length
-        ? rows.map(convRowHtml).join('')
-        : '<div class="empty">' + (q
-            ? 'Nobody matches that filter.'
-            : 'No stored conversations. They appear once the bot replies in a server or DM.') + '</div>';
+      patchList(
+        document.getElementById('conv-list'),
+        rows,
+        function (c) { return 'c:' + c.userId + ':' + c.guildId; },
+        convRowHtml,
+        '<div class="empty">' + (q
+          ? 'Nobody matches that filter.'
+          : 'No stored conversations. They appear once the bot replies in a server or DM.') + '</div>',
+        function (card, c) {
+          var sub = card.querySelector('.xsub');
+          if (sub) {
+            sub.textContent = guildLabel(c.guildId) + ', ' + plural(c.messageCount, 'message') +
+              ', ' + timeAgo(c.lastActivity);
+          }
+        }
+      );
     }).catch(function (err) {
       toast(err.message, 'bad');
     });
@@ -2321,12 +2515,24 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
     api('/api/persona', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path: state.personaPath, content: content })
+      // `ifMatch` is the content this editor loaded. If the file changed on disk
+      // since — another tab, a hand edit, a second device — the server answers
+      // 409 rather than silently overwriting it.
+      body: JSON.stringify({
+        path: state.personaPath,
+        content: content,
+        ifMatch: state.personaOriginal,
+      })
     }).then(function () {
       markPersonaSaved();
       toast('Saved and reloaded. No restart needed.', 'ok');
       loadPersona();
     }).catch(function (err) {
+      if (err.status === 409) {
+        toast('This file changed on disk. Reload it before saving.', 'bad');
+        openPersonaFile(state.personaPath);
+        return;
+      }
       toast(err.message, 'bad');
     }).finally(function () { btn.disabled = false; });
   });
@@ -2351,34 +2557,51 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
       var contentEl = row.querySelector('.content');
       if (row.querySelector('textarea')) return;
 
+      // The button flips into a Save action rather than getting its own onclick
+      // handler, so it keeps working after the list is patched.
       var ta = document.createElement('textarea');
       ta.className = 'ds-textarea';
       ta.value = contentEl.textContent;
       contentEl.replaceWith(ta);
+
       target.textContent = 'Save';
       target.className = 'ds-btn ds-btn-primary ds-btn-sm';
-      target.onclick = function () {
-        target.disabled = true;
-        api('/api/memories/entries/' + id, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ content: ta.value })
-        }).then(function () {
-          toast('Memory updated', 'ok');
-          loadMemories();
-        }).catch(function (err) {
-          target.disabled = false;
-          toast(err.message, 'bad');
-        });
-      };
+      target.dataset.act = 'save-entry';
       ta.focus();
+      return;
+    }
+
+    if (act === 'save-entry') {
+      var row2 = target.closest('.mem-entry');
+      var box = row2 && row2.querySelector('textarea');
+      if (!box) return;
+      target.disabled = true;
+      api('/api/memories/entries/' + id, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: box.value })
+      }).then(function () {
+        toast('Memory updated', 'ok');
+        // Patch this card's entry list only. A full reload would collapse the
+        // card and destroy the "new memory" textarea along with it.
+        refreshUserEntries(target.closest('.xcard'))
+          .catch(function () { loadMemories(); });
+      }).catch(function (err) {
+        target.disabled = false;
+        toast(err.message, 'bad');
+      });
       return;
     }
 
     if (act === 'del-entry') {
       if (!confirm('Delete this memory?')) return;
+      var delRow = target.closest('.mem-entry');
+      var delCard = delRow.closest('.xcard');
       api('/api/memories/entries/' + id, { method: 'DELETE' })
-        .then(function () { toast('Memory deleted', 'ok'); loadMemories(); })
+        .then(function () {
+          toast('Memory deleted', 'ok');
+          refreshUserEntries(delCard).catch(function () { loadMemories(); });
+        })
         .catch(function (err) { toast(err.message, 'bad'); });
       return;
     }
@@ -2394,22 +2617,30 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
         })
       }).then(function () {
         toast('Profile saved', 'ok');
-        loadMemories();
+        // The card header is the only part that changed; the profile inputs keep
+        // what the operator typed.
+        refreshUserEntries(target.closest('.xcard'))
+          .catch(function () { loadMemories(); });
       }).catch(function (err) { toast(err.message, 'bad'); });
       return;
     }
 
     if (act === 'add-entry') {
-      var text = document.getElementById('n-text-' + id).value.trim();
+      var textEl = document.getElementById('n-text-' + id);
+      var text = textEl.value.trim();
       var kind = document.getElementById('n-kind-' + id).value;
       if (!text) { toast('Enter the memory text first', 'bad'); return; }
+      var card2 = target.closest('.xcard');
       api('/api/memories/' + id, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ kind: kind, content: text })
       }).then(function () {
         toast('Memory added', 'ok');
-        loadMemories();
+        textEl.value = '';
+        // Only the entry list is re-rendered; the textarea and every other
+        // expanded card are left exactly as they are.
+        refreshUserEntries(card2).catch(function () { loadMemories(); });
       }).catch(function (err) { toast(err.message, 'bad'); });
       return;
     }
@@ -2526,6 +2757,7 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
       loadOverview();
     } else {
       clearInterval(state.timer);
+      cancelOverviewRefresh();
     }
   });
 
@@ -2549,6 +2781,10 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
     if (state.autoRefresh) {
       if (document.hidden) {
         clearInterval(state.timer);
+        // Stop the in-flight cycle too. The interval going away only prevented
+        // the next tick; requests already on the wire kept the radio (and the
+        // server) busy in the background.
+        cancelOverviewRefresh();
       } else {
         scheduleRefresh();
         loadOverview();

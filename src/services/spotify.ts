@@ -1,5 +1,33 @@
 import SpotifyWebApi from 'spotify-web-api-node';
 import { config } from '../utils/config';
+import { intEnv } from '../utils/env';
+
+/**
+ * Hard ceiling on how many playlist items are pulled from the Spotify API.
+ *
+ * The cap is on the pagination cursor (total items *offered* by the API), not on
+ * the number of usable tracks: filtering out removed/local tracks must not let
+ * the loop run forever.
+ */
+const MAX_PLAYLIST_TRACKS = intEnv('SPOTIFY_MAX_PLAYLIST_TRACKS', 1000, { min: 1, max: 10_000 });
+
+/** Artist-genre batch size (Spotify allows 50 ids per request). */
+const ARTIST_BATCH_SIZE = intEnv('SPOTIFY_ARTIST_BATCH_SIZE', 50, { min: 1, max: 50 });
+
+/** How long to honour a 429 `Retry-After` before giving up on a batch. */
+const RATE_LIMIT_MAX_WAIT_MS = intEnv('SPOTIFY_RATE_LIMIT_MAX_WAIT_MS', 10_000, { min: 0, max: 60_000 });
+
+/**
+ * How many times a rate-limited request is re-issued before the error is
+ * allowed to propagate.
+ *
+ * One retry is the minimum that makes a 429 survivable; two means a request that
+ * is caught by a second, separate rate-limit window also recovers. Spotify bills
+ * a single playlist import as `1 + ceil(tracks/100) + ceil(artists/50)` requests
+ * issued back to back, so hitting the limit once is common and hitting it
+ * repeatedly on one call is not rare.
+ */
+const RATE_LIMIT_MAX_RETRIES = intEnv('SPOTIFY_RATE_LIMIT_MAX_RETRIES', 2, { min: 0, max: 5 });
 
 export interface SpotifyTrack {
   id: string;
@@ -123,10 +151,15 @@ export class SpotifyService {
    * Extract playlist ID from various Spotify URL formats
    */
   extractPlaylistId(url: string): string | null {
-    // Match various Spotify playlist URL formats
+    // Match various Spotify playlist URL formats.
+    //
+    // The patterns are anchored: an unanchored `open.spotify.com/playlist/...`
+    // also matched `https://evil.com/open.spotify.com/playlist/xyz`, and the
+    // unbounded `[a-zA-Z0-9]+` accepted ids of any length. Spotify playlist ids
+    // are exactly 22 base62 characters, so the URL forms require that too.
     const patterns = [
-      /open\.spotify\.com\/playlist\/([a-zA-Z0-9]+)/,
-      /spotify:playlist:([a-zA-Z0-9]+)/,
+      /^https?:\/\/open\.spotify\.com\/playlist\/([a-zA-Z0-9]{22})(?:[/?#].*)?$/,
+      /^spotify:playlist:([a-zA-Z0-9]{22})$/,
       /^([a-zA-Z0-9]{22})$/, // Direct ID (22 chars)
     ];
 
@@ -148,7 +181,10 @@ export class SpotifyService {
 
     try {
       // Get playlist info
-      const playlistResponse = await this.api.getPlaylist(playlistId);
+      const playlistResponse = await this.withRateLimitRetry(
+        () => this.api.getPlaylist(playlistId),
+        'getPlaylist',
+      );
       const playlist = playlistResponse.body;
 
       // Fetch all tracks (pagination)
@@ -158,11 +194,14 @@ export class SpotifyService {
       let hasMore = true;
 
       while (hasMore) {
-        const tracksResponse = await this.api.getPlaylistTracks(playlistId, {
-          offset,
-          limit,
-          fields: 'items(added_at,added_by.id,track(id,name,duration_ms,explicit,popularity,preview_url,track_number,artists(id,name),album(id,name,release_date,total_tracks,images))),next',
-        });
+        const tracksResponse = await this.withRateLimitRetry(
+          () => this.api.getPlaylistTracks(playlistId, {
+            offset,
+            limit,
+            fields: 'items(added_at,added_by.id,track(id,name,duration_ms,explicit,popularity,preview_url,track_number,artists(id,name),album(id,name,release_date,total_tracks,images))),next',
+          }),
+          'getPlaylistTracks',
+        );
 
         const items = tracksResponse.body.items
           .filter((item: any) => {
@@ -176,13 +215,19 @@ export class SpotifyService {
           .map((item: any) => this.mapPlaylistTrack(item));
 
         tracks.push(...items);
-        
+
         hasMore = tracksResponse.body.next !== null;
+        // `offset` is the API's pagination cursor, so it counts *every* item
+        // Spotify returned — including the null-id ones filtered out above.
+        // The old cap tested `tracks.length`, which never grows for a playlist
+        // made entirely of removed/local tracks, so such a playlist paged
+        // forever against the API until it 404'd or rate-limited us.
         offset += limit;
 
-        // Safety limit - don't fetch more than 1000 tracks
-        if (tracks.length >= 1000) {
-          console.warn(`🎵 [SPOTIFY] Playlist ${playlistId} has more than 1000 tracks, truncating`);
+        if (offset >= MAX_PLAYLIST_TRACKS) {
+          if (hasMore) {
+            console.warn(`🎵 [SPOTIFY] Playlist ${playlistId} exceeds ${MAX_PLAYLIST_TRACKS} tracks, truncating`);
+          }
           break;
         }
       }
@@ -240,17 +285,14 @@ export class SpotifyService {
    */
   private async getArtistGenres(artistIds: string[]): Promise<Map<string, string[]>> {
     const genres = new Map<string, string[]>();
-    
+
     if (artistIds.length === 0) return genres;
 
-    // Spotify allows up to 50 artists per request
-    const batchSize = 50;
-    
-    for (let i = 0; i < artistIds.length; i += batchSize) {
-      const batch = artistIds.slice(i, i + batchSize);
-      
+    for (let i = 0; i < artistIds.length; i += ARTIST_BATCH_SIZE) {
+      const batch = artistIds.slice(i, i + ARTIST_BATCH_SIZE);
+
       try {
-        const response = await this.api.getArtists(batch);
+        const response = await this.getArtistsWithBackoff(batch);
         response.body.artists.forEach((artist: any) => {
           genres.set(artist.id, artist.genres || []);
         });
@@ -260,6 +302,83 @@ export class SpotifyService {
     }
 
     return genres;
+  }
+
+  /**
+   * Run a Spotify request, honouring `Retry-After` when it is rate-limited.
+   *
+   * WHY THIS IS ONE HELPER AND NOT AN ARTIST-ONLY ONE
+   * --------------------------------------------------
+   * The 429 handling used to exist only on `getArtists`. `getPlaylist` and
+   * `getPlaylistTracks` called the API raw, so a 429 anywhere in the pagination
+   * of a large playlist threw `SpotifyWebApiException` straight out of
+   * `getPlaylist`. That aborted the whole import (correctly — it rolls back),
+   * but `handleRefresh` iterates the saved playlists with no retry of its own,
+   * so one rate-limited playlist also killed every playlist *after* it in the
+   * loop: a single Spotify rate-limit window silently emptied the refresh.
+   *
+   * The wait is `Retry-After`-derived and capped by
+   * `SPOTIFY_RATE_LIMIT_MAX_WAIT_MS`, so a hostile or absurd header cannot stall
+   * a command indefinitely. Non-429 errors are rethrown immediately — retrying
+   * a 404 or a 401 just burns the budget.
+   *
+   * @param operation the request to issue; called at most `1 + retries` times
+   * @param label short name used in the warning log, so the operator can see
+   *   which call was throttled
+   */
+  private async withRateLimitRetry<T>(operation: () => Promise<T>, label: string): Promise<T> {
+    let lastError: unknown;
+
+    for (let attempt = 0; attempt <= RATE_LIMIT_MAX_RETRIES; attempt++) {
+      try {
+        return await operation();
+      } catch (error: any) {
+        if (error?.statusCode !== 429) throw error;
+        lastError = error;
+
+        if (attempt === RATE_LIMIT_MAX_RETRIES) break;
+
+        const waitMs = this.parseRetryAfter(error);
+        console.warn(
+          `🎵 [SPOTIFY] Rate limited during ${label}; retrying in ${waitMs}ms ` +
+            `(attempt ${attempt + 1}/${RATE_LIMIT_MAX_RETRIES})`,
+        );
+        await this.sleep(waitMs);
+      }
+    }
+
+    // Every attempt was rate-limited. Rethrow the original exception so callers
+    // keep seeing Spotify's own status/headers rather than a vague wrapper.
+    throw lastError;
+  }
+
+  /**
+   * `getArtists` with 429 handling, via {@link withRateLimitRetry}.
+   *
+   * A 1000-track playlist means up to 20 serial artist batches. A single rate
+   * limit response used to be swallowed by this method's own `catch`, so every
+   * remaining artist silently lost its genres and nothing said so.
+   */
+  private async getArtistsWithBackoff(batch: string[]) {
+    return this.withRateLimitRetry(() => this.api.getArtists(batch), 'getArtists');
+  }
+
+  /**
+   * Indirection over `setTimeout` so tests can assert the honoured wait without
+   * actually sleeping for it.
+   */
+  protected sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  /** `Retry-After` is seconds; anything malformed falls back to a 1s wait. */
+  private parseRetryAfter(error: any): number {
+    const header = error?.headers?.['retry-after'] ?? error?.headers?.['Retry-After'];
+    const seconds = Number.parseFloat(String(header ?? ''));
+    if (!Number.isFinite(seconds) || seconds <= 0) {
+      return Math.min(1000, RATE_LIMIT_MAX_WAIT_MS);
+    }
+    return Math.min(Math.round(seconds * 1000), RATE_LIMIT_MAX_WAIT_MS);
   }
 
   /**

@@ -11,6 +11,8 @@ import {
   type GuildTextBasedChannel,
 } from 'discord.js';
 import { config } from '../utils/config';
+import { dbPath } from '../utils/paths';
+import { buildAllowedMentions } from '../utils/permissions';
 import { channelHistoryService } from './channel-history';
 import { getAIService } from './google-genai';
 import { gifService } from './gif';
@@ -32,7 +34,7 @@ export class BoredomService {
   private isExecuting = false;
 
   constructor() {
-    this.db = new Database('boredom.db');
+    this.db = new Database(dbPath('boredom.db'));
     this.initDatabase();
   }
 
@@ -267,9 +269,20 @@ export class BoredomService {
       }
 
       if (formatted.trim()) {
+        // The text is model output over whatever the channel was talking about, so
+        // it can contain anything the prompt did — including a `@everyone`
+        // copied out of a linked page. `buildAllowedMentions` is the shared form
+        // every other untrusted-text path now uses.
+        //
+        // NOTE for the next reader: the helper also sets `repliedUser: false`,
+        // which is a no-op here (a `channel.send` has no replied message to
+        // suppress), so this is behaviourally identical to the inline
+        // `{ parse: [] }` it replaces. The semantics deliberately match; the
+        // consolidation is what is being bought here, so please do not "fix"
+        // this back into a private shape.
         await channel.send({
           content: formatted,
-          allowedMentions: { parse: [] },
+          allowedMentions: buildAllowedMentions(),
         });
       }
 

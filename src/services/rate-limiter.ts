@@ -1,5 +1,6 @@
 import { Database } from 'bun:sqlite';
 import { config } from '../utils/config';
+import { dbPath } from '../utils/paths';
 import type { APIInteractionGuildMember, GuildMember } from 'discord.js';
 
 /**
@@ -10,7 +11,14 @@ import type { APIInteractionGuildMember, GuildMember } from 'discord.js';
  */
 export type RoleHolder = GuildMember | APIInteractionGuildMember | null | undefined;
 
-/** Shared with `model-selector`, which creates the same table. */
+/**
+ * Shared with `model-selector`, which creates the same table.
+ *
+ * Resolved through {@link dbPath} rather than used as a bare relative name: a
+ * CWD-relative `new Database('dashboard_settings.db')` silently opens a *new,
+ * empty* file when the process is started from anywhere other than the repo
+ * root, which would reset the persisted `/ratelimit set` window with no error.
+ */
 const SETTINGS_DB = 'dashboard_settings.db';
 const RATE_LIMIT_SECONDS_KEY = 'rate_limit_seconds';
 
@@ -26,7 +34,7 @@ export class RateLimiterService {
   private db: Database;
 
   constructor() {
-    this.db = new Database(SETTINGS_DB);
+    this.db = new Database(dbPath(SETTINGS_DB));
     this.initDatabase();
 
     const persisted = this.loadPersistedSeconds();
@@ -93,10 +101,23 @@ export class RateLimiterService {
   }
 
   /**
-   * Whether this member holds one of the trusted roles in
-   * `RATE_LIMIT_EXEMPT_ROLES`, matched by snowflake ID or by exact name
-   * (case-insensitive). That list doubles as the privileged-command allowlist,
-   * so this is the single place the trusted set is interpreted.
+   * Whether this member holds one of the roles in `RATE_LIMIT_EXEMPT_ROLES`,
+   * matched by snowflake ID **or** by exact name (case-insensitive).
+   *
+   * THIS IS A RATE-LIMIT BYPASS ONLY — it is not an authorisation check.
+   *
+   * Matching a role by name looks unsafe, and for a permission gate it is:
+   * role names are not unique and not operator-controlled, so any guild admin
+   * anywhere can mint a role called `Moderator` and hand it to their own
+   * member. That is why {@link canRunPrivilegedCommand} in
+   * `utils/permissions.ts` does **not** use this method, and instead matches
+   * snowflake IDs from `TRUSTED_ROLE_IDS`.
+   *
+   * It is acceptable here because the granted capability is strictly
+   * self-limiting: a bypass grants the holder more of *their own* chat quota
+   * in the current guild. It cannot write bot configuration, cannot reach
+   * another guild's state, and cannot affect any other user. The worst outcome
+   * of a name collision is that one member of one guild is not rate limited.
    *
    * Name matching only works for a cached `GuildMember`: the raw API shape
    * carries snowflakes alone, so an uncached guild can only match on ID.
@@ -129,6 +150,12 @@ export class RateLimiterService {
    * Drop expired entries once the map grows past the threshold. Entries are
    * never removed otherwise, so without this the map — the limiter's entire
    * state — would grow monotonically for the life of the process.
+   *
+   * Called from both the allow and the reject path (see `isRateLimited`), so
+   * the sweep is not skipped by a burst of over-limit traffic. The size of the
+   * map is bounded by the threshold plus the number of ids that are genuinely
+   * inside the current window; ids outside the window are always removed on the
+   * next request.
    */
   private pruneIfNeeded(now: number, windowMs: number): void {
     if (this.lastRequestTimes.size <= PRUNE_THRESHOLD) {
@@ -155,17 +182,48 @@ export class RateLimiterService {
 
     const now = Date.now();
     const windowMs = this.rateLimitSeconds * 1000;
+
+    // Prune BEFORE the early return, not after it.
+    //
+    // When this ran only on the allow path, a burst of *rejected* requests never
+    // swept the map, so entries accumulated without bound under exactly the
+    // traffic shape (many distinct ids, all over their limit) that most needs
+    // the sweep. Sweeping on every path makes the map track "ids active within
+    // the current window" instead of "ids ever seen since the last allow".
+    this.pruneIfNeeded(now, windowMs);
+
     const lastTime = this.lastRequestTimes.get(userId) || 0;
 
     if (now - lastTime < windowMs) {
+      // The timestamp is deliberately NOT refreshed on a rejected attempt.
+      //
+      // Refreshing would make the limit stricter (a user who keeps trying
+      // cannot retry at all until they go quiet for a full window), but it
+      // also converts every accidental double-tap or client retry into a full
+      // window lockout: the user cannot escape it by waiting, only by stopping
+      // entirely. Keeping the window anchored to the last *allowed* request is
+      // the standard fixed-window behaviour, is self-healing, and cannot be
+      // used to permanently deny anyone — including yourself.
       return true; // Rate limited
     }
 
-    this.pruneIfNeeded(now, windowMs);
     this.lastRequestTimes.set(userId, now);
     return false;
   }
 
+  /**
+   * Number of tracked ids. Exposed for tests and diagnostics that assert the
+   * in-memory map stays bounded; not part of any command's behaviour.
+   */
+  public getTrackedUserCount(): number {
+    return this.lastRequestTimes.size;
+  }
+
+  /**
+   * The configured rate-limit bypass list (`RATE_LIMIT_EXEMPT_ROLES`), which
+   * may contain names as well as snowflakes. See {@link hasExemptRole} for why
+   * name entries are safe in *this* list and must never authorise a command.
+   */
   public getExemptRoles(): string[] {
     return config.rateLimit.exemptRoles;
   }

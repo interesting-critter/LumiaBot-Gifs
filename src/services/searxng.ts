@@ -29,6 +29,13 @@ export interface SearXNGHealth {
   detail: string | null;
 }
 
+/**
+ * Wall-clock ceiling for a search request. Generous relative to `ping()`'s 4s
+ * health probe, because a real search fans out to many engines and legitimately
+ * takes longer than a liveness check — but still finite.
+ */
+const SEARCH_TIMEOUT_MS = 15_000;
+
 export class SearXNGService {
   private baseUrl: string;
   private maxResults: number;
@@ -131,6 +138,11 @@ export class SearXNGService {
         headers: {
           'Accept': 'application/json',
         },
+        // Bounded, matching the `ping()` pattern. `search()` runs inside the LLM
+        // tool loop, so a hung instance pinned the turn — and the per-channel
+        // serialization queue behind it — forever. The file's own comment above
+        // `ping()` admitted this; only `ping()` had actually been fixed.
+        signal: AbortSignal.timeout(SEARCH_TIMEOUT_MS),
       });
 
       if (!response.ok) {

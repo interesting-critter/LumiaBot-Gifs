@@ -1,6 +1,6 @@
 import { SlashCommandBuilder, ChatInputCommandInteraction, MessageFlags } from 'discord.js';
 import { rateLimiterService } from '../services/rate-limiter';
-import { canRunPrivilegedCommand } from '../utils/permissions';
+import { canRunPrivilegedCommand, getAuthorisedRoleIds } from '../utils/permissions';
 import type { Command } from '../bot/client';
 
 const rateLimitCommand: Command = {
@@ -28,7 +28,7 @@ const rateLimitCommand: Command = {
   async execute(interaction: ChatInputCommandInteraction) {
     if (!canRunPrivilegedCommand(interaction.user.id, interaction.member)) {
       await interaction.reply({
-        content: '❌ You must be the bot owner or hold a trusted role to use this command.',
+        content: '❌ You must be the bot owner or hold a trusted role (by role ID) to use this command.',
         flags: MessageFlags.Ephemeral,
       });
       return;
@@ -43,16 +43,24 @@ const rateLimitCommand: Command = {
         const exemptFormatted = exemptRoles.length > 0
           ? exemptRoles.map((r) => `\`${r}\``).join(', ')
           : '_None configured (set RATE_LIMIT_EXEMPT_ROLES)_';
+        // Authorisation is a separate, ID-only list: the exempt list can name
+        // roles, the trusted list cannot. Showing both keeps the two
+        // capabilities distinguishable instead of implying one list.
+        const trustedIds = getAuthorisedRoleIds();
+        const trustedFormatted = trustedIds.length > 0
+          ? trustedIds.map((id) => `\`${id}\``).join(', ')
+          : '_None configured (set TRUSTED_ROLE_IDS)_';
 
         await interaction.reply({
           content: `⏱️ **Rate Limiting Status**
 
 **Window:** ${seconds} second(s) per request
 **Max Requests:** 1 per window
-**Exempt Roles:** ${exemptFormatted}
+**Rate-Limit Exempt:** ${exemptFormatted}
+**Privileged Command Roles:** ${trustedFormatted}
 **Owner Exempt:** Yes
 
-_These roles also grant access to \`/ratelimit\` and \`/boredom\`._`,
+_Only role **IDs** grant \`/ratelimit\` and \`/boredom\`; the exempt list above may also use role names, which bypass rate limiting only._`,
           flags: MessageFlags.Ephemeral,
         });
         break;

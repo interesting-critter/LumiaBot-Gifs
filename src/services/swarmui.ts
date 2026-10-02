@@ -1,9 +1,7 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { loadJsonFile, loadTextFile } from './prompts';
-
-const __dirname = fileURLToPath(new URL('.', import.meta.url));
+import { getPromptCacheGeneration, loadJsonFile, loadTextFile } from './prompts';
+import { PROMPT_STORAGE_DIR } from '../utils/paths';
 
 export interface GeneratedImageAttachment {
   data: Buffer;
@@ -35,6 +33,27 @@ interface SessionEntry {
 }
 
 const SESSION_TTL_MS = 25 * 60 * 1000;
+/**
+ * How long the SwarmUI config file is trusted without touching the disk.
+ *
+ * `isConfigured()` runs on every turn (it decides whether to offer
+ * `generate_selfie` at all), and it used to do an `existsSync` plus an uncached
+ * `readJsonFile` every time — three synchronous syscalls per turn for a value
+ * that changes when an operator edits a file.
+ */
+const CONFIG_CACHE_TTL_MS = 30_000;
+
+/**
+ * These three are **relative to `prompt_storage`**, not to `process.cwd()`.
+ *
+ * `loadJsonFile` / `loadTextFile` (`prompts.ts`) join them onto their own
+ * absolute prompt-storage root, so a bot started from any directory reads the
+ * same three files the dashboard's persona editor writes to. The existence
+ * probe in `getConfig()` used to re-derive that root here as
+ * `join(__dirname, '..', '..', 'prompt_storage')` — a second copy of the same
+ * anchor, which is how the two drifts apart. It now uses `PROMPT_STORAGE_DIR`
+ * from `utils/paths.ts` so there is exactly one definition.
+ */
 const CONFIG_PATH = 'config/swarm_cfg.json';
 const POSITIVE_PROMPT_PATH = 'config/image_prompt_pos.txt';
 const NEGATIVE_PROMPT_PATH = 'config/image_prompt_neg.txt';
@@ -87,9 +106,10 @@ export function isNsfwImagePrompt(tags: string): boolean {
 
 class SwarmUIService {
   private sessions = new Map<string, SessionEntry>();
+  private configCache: { value: SwarmConfig | null; expiresAt: number; generation: number } | null = null;
 
   isConfigured(): boolean {
-    const cfg = this.getConfig(false);
+    const cfg = this.getConfig();
     return !!cfg && cfg.enabled !== false && !!this.getBaseUrl(cfg);
   }
 
@@ -112,7 +132,11 @@ class SwarmUIService {
     try {
       const sessionId = await this.getSession(baseUrl, token, controller.signal);
       const prompt = this.buildPositivePrompt(cfg, toolTags);
-      const negativePrompt = loadTextFile(NEGATIVE_PROMPT_PATH, false) || '';
+      // Cached (`useCache: true`): re-reading these from disk on every image was
+      // pure syscall cost, and the dashboard's persona hot-reload calls
+      // `reloadPrompts()` → `clearCache()`, so an edit still takes effect
+      // immediately.
+      const negativePrompt = loadTextFile(NEGATIVE_PROMPT_PATH) || '';
       const body = this.buildGenerateBody(sessionId, cfg, prompt, negativePrompt);
 
       const res = await fetch(`${baseUrl}/API/GenerateText2Image`, {
@@ -148,12 +172,27 @@ class SwarmUIService {
     }
   }
 
-  private getConfig(useCache: boolean = false): SwarmConfig | null {
-    if (!existsSync(join(__dirname, '..', '..', 'prompt_storage', CONFIG_PATH))) {
-      return null;
+  /**
+   * Read `config/swarm_cfg.json`, served from a short-TTL cache.
+   *
+   * The cache is dropped as soon as the prompt cache is cleared, so the
+   * dashboard's persona hot-reload (`reloadBotDefinition()` →
+   * `reloadPrompts()` → `clearCache()`) still takes effect on the very next
+   * call rather than after the TTL.
+   */
+  private getConfig(): SwarmConfig | null {
+    const generation = getPromptCacheGeneration();
+    const cached = this.configCache;
+    if (cached && cached.generation === generation && cached.expiresAt > Date.now()) {
+      return cached.value;
     }
 
-    return loadJsonFile<SwarmConfig>(CONFIG_PATH, useCache);
+    let value: SwarmConfig | null = null;
+    if (existsSync(join(PROMPT_STORAGE_DIR, CONFIG_PATH))) {
+      value = loadJsonFile<SwarmConfig>(CONFIG_PATH);
+    }
+    this.configCache = { value, expiresAt: Date.now() + CONFIG_CACHE_TTL_MS, generation };
+    return value;
   }
 
   private getBaseUrl(cfg: SwarmConfig): string {
@@ -203,7 +242,7 @@ class SwarmUIService {
 
   private buildPositivePrompt(cfg: SwarmConfig, toolTags: string): string {
     const { toolTags: normalizedTags, nsfwTags, removeOutfit } = this.preparePromptTags(cfg, toolTags);
-    const template = loadTextFile(POSITIVE_PROMPT_PATH, false);
+    const template = loadTextFile(POSITIVE_PROMPT_PATH);
     if (!template) {
       return [normalizedTags, nsfwTags].filter(Boolean).join(', ');
     }
