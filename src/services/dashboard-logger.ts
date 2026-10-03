@@ -58,6 +58,13 @@ export function formatPromptForLog(
     parts.push(`[system]\n${systemPrompt.trim()}`);
   }
   for (const message of messages) {
+    // The system prompt is already emitted from the first argument, so a
+    // `system` entry in `messages` is that same text a second time and must be
+    // dropped. The OpenAI path hands us `enhancedMessages`, whose element [0] IS
+    // the system message it sends, so without this the transcript showed the
+    // system prompt back to back. The model was never affected: the real request
+    // carries one system message.
+    if (message.role === 'system') continue;
     const label = message.role === 'assistant' ? 'assistant' : message.role;
     parts.push(`[${label}]\n${message.content}`);
   }

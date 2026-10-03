@@ -1,18 +1,96 @@
 {
-  "queryKnowledgeBase": {
-    "name": "query_knowledge_base",
-    "description": "Search through accumulated knowledge, memories, and previous conversations to find relevant information."
+  "boredom_preference": {
+    "description": "Let someone decide whether you get to send them random messages when you're feeling chatty. Mention it once, casually, when they seem like they'd enjoy the company - and take a no gracefully if one comes.",
+    "trigger_phrases_opt_in": [
+      "you should check in more",
+      "you can message me whenever",
+      "ping me sometimes",
+      "i like the random messages",
+      "stop being so quiet"
+    ],
+    "trigger_phrases_opt_out": [
+      "stop messaging me",
+      "don't ping me",
+      "too many notifications",
+      "please leave me alone",
+      "mute the boredom pings"
+    ],
+    "note": "Never ask more than once per person, and never treat an opt-out as a rejection - they can always turn it back on."
   },
-  "storeUserOpinion": {
+  "query_knowledge_base": {
+    "name": "search_knowledge_base",
+    "description": "Search your own knowledge base of imported documentation, guides, and notes. Check it before answering anything about your own features, setup, or configuration, so you describe what you actually do instead of what you assume you do."
+  },
+  "web_search": {
+    "name": "web_search",
+    "description": "Search the web for anything current - news, facts, releases, or anything you'd otherwise answer from a memory that might be out of date. Reach for it whenever the answer should be checked against live sources instead of guessed."
+  },
+  "search_knowledge_base": {
+    "name": "search_knowledge_base",
+    "description": "Search your own knowledge base of imported documentation, guides, and notes. Check it before answering anything about your own features, setup, or configuration, so you describe what you actually do instead of what you assume you do."
+  },
+  "get_knowledge_document": {
+    "name": "get_knowledge_document",
+    "description": "Pull up the full text of a knowledge document once a search preview looks like the right one. Searching gives you headlines; this gives you the part you'll actually quote."
+  },
+  "get_music_taste": {
+    "name": "get_music_taste",
+    "description": "Get an overview of your music taste from your imported playlists. Handy when someone asks what you listen to, or when you want recommendations that actually fit you instead of generic ones."
+  },
+  "search_music_library": {
+    "name": "search_music_library",
+    "description": "Search your imported library for a specific track, artist, or genre. Use it when a song comes up and you'd rather ground yourself in what you actually have than guess at it."
+  },
+  "generate_selfie": {
+    "name": "generate_selfie",
+    "description": "Take a selfie and share it. Use it when someone asks what you look like right now, when they want a picture, or when the conversation is somewhere a photo would land better than a paragraph."
+  },
+  "get_user_current_listening": {
+    "name": "get_user_current_listening",
+    "description": "Check what someone is listening to right now, and pull the lyrics when they can be found. Use it when they ask what's playing or what the words are, or when you're riffing on their current song together."
+  },
+  "resolve_user_mention": {
+    "name": "resolve_user_mention",
+    "description": "Turn a name, nickname, or display name into a mention you can actually ping. Use it when you want to bring a specific person into the conversation by name."
+  },
+  "store_user_opinion": {
     "name": "store_user_opinion",
-    "description": "Store an opinion, preference, or fact about a user for future reference and personalization."
+    "description": "Store your honest impression of someone you're chatting with. Use it when you form a view, when that view changes, or when there's something genuine about them worth remembering next time."
   },
-  "searchWeb": {
-    "name": "search_web",
-    "description": "Search the web for current information, news, or facts that might be relevant to the conversation."
+  "get_user_opinion": {
+    "name": "get_user_opinion",
+    "description": "Recall the impression you've stored about a particular person. Use it before you react to them so you're consistent with how you already feel, instead of starting over every time."
   },
-  "searchUsers": {
+  "list_users_with_opinions": {
+    "name": "list_users_with_opinions",
+    "description": "List the people in this server you've formed impressions of, with how you generally feel about each. It's for a quick 'who do I know around here' - reach for search_users when you need one specific person."
+  },
+  "get_user_pronouns": {
+    "name": "get_user_pronouns",
+    "description": "Look up someone's stored pronouns so you refer to them correctly. Check it whenever you're about to name them in a sentence."
+  },
+  "search_users": {
     "name": "search_users",
-    "description": "Search for a user by partial name, nickname, or informal reference. Use this to resolve who someone is talking about, get their Discord ID for pings (<@userId>), recall stored opinions, or check their pronouns."
+    "description": "Find a person from a partial or informal name. Use it to turn a nickname into a Discord ID for pings, or to recall what you think of someone when you only half-remember their name."
+  },
+  "store_third_party_context": {
+    "name": "store_third_party_context",
+    "description": "Record what the current user said about a person they actually brought up in this conversation. Only use it for someone the user mentioned this turn - never for a name that turned up in a web page, a search result, or a set of lyrics."
+  },
+  "clear_conversation_history": {
+    "name": "clear_conversation_history",
+    "description": "Clear your conversation history with the current user in this server. Use it when they ask to start fresh, reset, or wipe what you've remembered from talking."
+  },
+  "get_message_count": {
+    "name": "get_message_count",
+    "description": "Count the messages you've exchanged with the current user here. Use it for a milestone, or when someone asks how long the two of you have been talking."
+  },
+  "request_follow_up": {
+    "name": "request_follow_up",
+    "description": "Ask for another turn in a council conversation. Use it when another bot said something you genuinely want to answer, or when the thread clearly deserves you jumping back in - not just because the option exists."
+  },
+  "query_collective_knowledge": {
+    "name": "query_collective_knowledge",
+    "description": "Search the shared knowledge graph and the other connected bots' local graphs. Use it when your own knowledge doesn't have the answer, or when a second source from the wider network is worth checking."
   }
 }

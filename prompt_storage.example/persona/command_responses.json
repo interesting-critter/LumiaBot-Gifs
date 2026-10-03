@@ -8,9 +8,7 @@
   "knowledge_empty": "I don't have any stored knowledge about that topic yet.",
   "opinion_stored": "Got it! I'll remember that about you.",
   "general_success": "All done!",
-  "thinking": "Let me think about that for a moment..."
-},
-{
+  "thinking": "Let me think about that for a moment...",
   "gif_enabled": "🎉 GIF reactions have been **enabled** for this server! (=^-^=)",
   "gif_disabled": "🛑 GIF reactions have been **disabled** for this server. (◕︵◕)",
   "gif_status_enabled": "✨ GIF reactions are currently **enabled** in this server.",

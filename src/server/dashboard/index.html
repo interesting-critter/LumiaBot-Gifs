@@ -694,6 +694,7 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
             <span id="model-badge"></span>
           </div>
           <div id="model-block"><div class="empty">Loading…</div></div>
+          <div id="profile-block" style="margin-top:1.1rem;padding-top:1rem;border-top:1px solid var(--border)"><div class="empty">Loading…</div></div>
           <div id="usage-block" style="margin-top:1.1rem;padding-top:1rem;border-top:1px solid var(--border)"><div class="empty">Loading…</div></div>
         </div>
       </article>
@@ -981,6 +982,7 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
             <span class="ds-badge" id="persona-count">&mdash;</span>
           </div>
           <div class="pfile-list" id="persona-list"></div>
+          <p class="hint" id="persona-profile-hint" hidden></p>
         </div>
       </article>
       <article class="ds-card" id="persona-editor" hidden>
@@ -1238,7 +1240,7 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
     // every expand and never read, so they only grew for the life of the tab —
     // a full memory dump plus every transcript the operator opened.
     guildNames: null, conversations: [], convTotal: 0, fullPrompts: {},
-    personaPath: null, personaOriginal: null,
+    personaPath: null, personaOriginal: null, personaProfile: null,
   };
 
   // Five destinations is the ceiling for a bottom bar, so the four secondary
@@ -1483,6 +1485,138 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
     });
   }
 
+  /**
+   * The prompt-profile picker.
+   *
+   * It lives in the Model card, not its own, because it is not an independent
+   * setting: the profile in effect is `override ?? the active model's binding ??
+   * default`, and switching the model deliberately drops the override. Split
+   * across two cards, that last part is the surprising one and it is exactly the
+   * thing the operator has to be told about, so it is said here, next to the
+   * control that causes it.
+   *
+   * `selectable` (not `available`) is the option list. `available` mirrors the
+   * PROMPT_PROFILES whitelist and is legitimately empty when the feature is off;
+   * a picker offering nothing in that state is a bug, not an off switch. When
+   * `default` is genuinely the only option the picker is dropped entirely and
+   * the section becomes read-only.
+   */
+  function renderPromptProfiles(profiles) {
+    var block = document.getElementById('profile-block');
+    if (!block) return;
+
+    var selectable = (profiles.selectable && profiles.selectable.length)
+      ? profiles.selectable
+      : [profiles.active || 'default'];
+    var model = profiles.currentModel || '—';
+    var bound = (profiles.byModel && profiles.byModel[model]) || null;
+    // `override` is null whenever the profile is being chosen automatically, so
+    // the difference between null and undefined is the whole test.
+    var overriding = profiles.override !== null && profiles.override !== undefined;
+
+    var head = '<h3 class="ds-section-title" style="font-size:1rem;margin:0 0 .7rem">Prompt profile</h3>';
+
+    // Where the effective profile came from. Say it explicitly, because "the
+    // picker says A and the model says B" is otherwise unreadable.
+    var source;
+    if (overriding) {
+      source = rawFact(
+        'Winning',
+        '<span class="ds-badge ds-badge-primary">manual override</span> ' +
+          (bound
+            ? 'overriding the <strong>' + esc(bound) + '</strong> binding on ' + esc(model)
+            : 'overriding <strong>' + esc(model) + '</strong>, which has no binding')
+      );
+    } else if (bound) {
+      source = fact('In effect from', 'the ' + model + ' binding');
+    } else {
+      source = fact('In effect from', 'no binding for ' + model + ' — default');
+    }
+
+    var facts = '<dl class="facts">' +
+      (profiles.changedAt ? fact('Last changed', timeAgo(profiles.changedAt)) : '') +
+      '</dl>';
+
+    if (selectable.length <= 1) {
+      block.innerHTML = head +
+        '<dl class="facts">' + fact('Active', profiles.active) + source + '</dl>' +
+        (profiles.changedAt ? facts : '') +
+        '<p class="hint">Set PROMPT_PROFILES to switch profiles. Nothing else exists yet.</p>';
+      return;
+    }
+
+    var options = selectable.map(function (id) {
+      return '<option value="' + esc(id) + '"' + (id === profiles.active ? ' selected' : '') + '>' + esc(id) + '</option>';
+    }).join('');
+
+    // The operator's actual reason for having profiles: on a per-request (RPD)
+    // model a 200k-token prompt costs the same as a 2k one, so a bigger prompt
+    // set is free there and not elsewhere. That is a billing fact about their
+    // models, not an opinion, so it is stated as one — and only for the
+    // profiles where it matters.
+    var costNote = profiles.active && profiles.active !== 'default'
+      ? '<p class="hint">A profile prompt is billed per token unless the model is billed per ' +
+        'request (RPD) — on an RPD model the extra size is free.</p>'
+      : '';
+
+    block.innerHTML = head +
+      '<div class="ds-control-row">' +
+        '<div class="ds-field">' +
+          '<label class="ds-label" for="profile-select">Override — clears when you change model</label>' +
+          '<select class="ds-select" id="profile-select">' + options + '</select>' +
+        '</div>' +
+        '<button class="ds-btn ds-btn-primary" id="profile-apply">Apply</button>' +
+      '</div>' +
+      (overriding
+        ? '<div class="ds-row" style="margin-top:.75rem"><button class="ds-btn ds-btn-ghost" id="profile-clear">Clear override</button></div>'
+        : '') +
+      '<dl class="facts" style="margin-top:.9rem">' + source + '</dl>' +
+      (profiles.changedAt ? facts : '') +
+      costNote;
+  }
+
+  function applyProfile() {
+    var select = document.getElementById('profile-select');
+    if (!select) return;
+    var chosen = select.value;
+    var apply = document.getElementById('profile-apply');
+    if (apply) apply.disabled = true;
+    select.disabled = true;
+
+    api('/api/prompt-profiles/override', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profile: chosen })
+    }).then(function () {
+      toast('Prompt profile set to ' + chosen, 'ok');
+      // The persona list is profile-scoped, so leaving it on an inherited/overridden
+      // split from before the switch would be a lie.
+      if (state.view === 'persona') loadPersona();
+      loadOverview();
+    }).catch(function (err) {
+      toast(err.message, 'bad');
+      loadOverview();
+    });
+  }
+
+  function clearProfileOverride() {
+    var btn = document.getElementById('profile-clear');
+    if (btn) btn.disabled = true;
+
+    api('/api/prompt-profiles/override', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profile: null })
+    }).then(function () {
+      toast('Override cleared; back to the model binding', 'ok');
+      if (state.view === 'persona') loadPersona();
+      loadOverview();
+    }).catch(function (err) {
+      toast(err.message, 'bad');
+      loadOverview();
+    });
+  }
+
   function renderOverview(data, usage, logSummary) {
     var pill = document.getElementById('conn-pill');
     if (data.bot.ready) {
@@ -1572,12 +1706,16 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
       api('/api/status', { signal: signal }),
       api('/api/usage', { signal: signal }).then(function (d) { return d.stats; }),
       api('/api/models', { signal: signal }).then(function (d) { return d.model; }),
+      // Optional: the profile card is a small projection next to the model
+      // card, and a failure there must not blank the whole overview.
+      api('/api/prompt-profiles', { signal: signal }).catch(function () { return null; }),
       // Summary only: counters, the hourly strip and the newest prompt. Not the
       // 200-entry log dump, which was the heaviest thing the page did.
       api('/api/log/summary', { signal: signal }).catch(function () { return null; })
     ]).then(function (res) {
       renderModel(res[2]);
-      renderOverview(res[0], res[1], res[3]);
+      renderOverview(res[0], res[1], res[4]);
+      if (res[3]) renderPromptProfiles(res[3]);
     }).catch(function (err) {
       if (err && err.name === 'AbortError') return;
       toast(err.message, 'bad');
@@ -2402,6 +2540,7 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
   function resetPersona() {
     state.personaPath = null;
     state.personaOriginal = null;
+    state.personaProfile = null;
     document.getElementById('persona-editor').hidden = true;
     document.getElementById('persona-hint').textContent = '';
     var list = document.querySelectorAll('#persona-list .pfile');
@@ -2410,8 +2549,10 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
 
   function markPersonaSaved() {
     state.personaOriginal = document.getElementById('persona-content').value;
+    var scoped = state.personaProfile && state.personaProfile !== 'default';
     document.getElementById('persona-hint').textContent =
-      'Saved. The bot uses this on its next message, with no restart.';
+      'Saved' + (scoped ? ' into profile "' + state.personaProfile + '"' : '') +
+      '. The bot uses this on its next message, with no restart.';
   }
 
   function paintPersonaList() {
@@ -2438,15 +2579,24 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
     return api('/api/persona?path=' + encodeURIComponent(path)).then(function (data) {
       state.personaPath = data.path;
       state.personaOriginal = data.content;
+      state.personaProfile = data.profile || null;
 
       document.getElementById('persona-title').textContent = path.split('/').pop();
       document.getElementById('persona-kind').textContent = data.kind === 'json' ? 'JSON' : 'text';
       var meta = PERSONA_META[path] || {};
       document.getElementById('persona-desc').textContent = meta.hint || path;
       document.getElementById('persona-content').value = data.content;
-      document.getElementById('persona-hint').textContent = data.exists
-        ? ''
-        : 'This file does not exist yet. Saving creates it.';
+      // Name the profile before the save, not after: under a profile the file
+      // this operator is looking at may not be the file the save will touch, and
+      // that is the one thing about the editor worth warning about up front.
+      var scoped = data.profile && data.profile !== 'default';
+      var where = scoped
+        ? (data.overridden
+          ? 'Saved into profile "' + data.profile + '".'
+          : 'Inherited from default — saving writes a copy into profile "' + data.profile + '".')
+        : '';
+      document.getElementById('persona-hint').textContent =
+        (data.exists ? '' : 'This file does not exist yet. Saving creates it. ') + where;
       document.getElementById('persona-editor').hidden = false;
       paintPersonaList();
     }).catch(function (err) { toast(err.message, 'bad'); });
@@ -2461,7 +2611,22 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
       PERSONA_META = {};
       data.files.forEach(function (f) { PERSONA_META[f.path] = f; });
 
-      document.getElementById('persona-count').textContent = editable.length + ' editable';
+      // Under a profile the interesting question per file is whether the profile
+      // ships its own copy or inherits the default root's. That is what makes a
+      // profile cheap to author — one file copied, thirty inherited — so it is
+      // said on every row rather than left for the operator to infer.
+      var profile = data.profile || 'default';
+      var scoped = profile !== 'default';
+
+      document.getElementById('persona-count').textContent =
+        editable.length + ' editable' + (scoped ? ' · ' + profile : '');
+
+      var profileHint = document.getElementById('persona-profile-hint');
+      profileHint.hidden = !scoped;
+      profileHint.textContent = scoped
+        ? 'Profile "' + profile + '" is active. Saving writes into it; anything marked ' +
+          '"inherited from default" gets its own copy here on first save.'
+        : '';
 
       list.innerHTML = data.files.map(function (f) {
         return '<button type="button" class="pfile" data-path="' + esc(f.path) + '"' +
@@ -2469,7 +2634,11 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
           '<span class="pfile-id">' +
             '<span class="pfile-label">' + esc(f.label) + '</span>' +
             '<span class="pfile-path">' + esc(f.path) +
-              (f.exists ? '' : ', not created yet') + '</span>' +
+              (f.exists ? '' : ', not created yet') +
+              // Static suffixes, so they sit outside esc() alongside the rest of
+              // this line's literal text.
+              (scoped ? (f.overridden ? ' · overridden here' : ' · inherited from default') : '') +
+              '</span>' +
           '</span>' +
           (f.editable ? '' : '<span class="ds-badge">read-only</span>') +
         '</button>';
@@ -2729,15 +2898,24 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
       .catch(function (err) { toast(err.message, 'bad'); });
   });
 
-  // Model switcher and persona save are delegated because their nodes are
-  // replaced on every render.
+  // Model switcher, profile picker and persona save are delegated because their
+  // nodes are replaced on every render.
   document.addEventListener('click', function (ev) {
     var id = ev.target && ev.target.id;
     if (id === 'model-apply') { applyModel(); return; }
+    if (id === 'profile-apply') { applyProfile(); return; }
+    if (id === 'profile-clear') {
+      if (!confirm('Clear the manual prompt profile override and go back to the model binding?')) return;
+      clearProfileOverride();
+      return;
+    }
     if (id === 'model-reset') {
       if (!confirm('Revert to the model configured in the environment?')) return;
       api('/api/models/reset', { method: 'POST' })
-        .then(function (res) { toast('Reverted to ' + res.model.active, 'ok'); loadOverview(); })
+        .then(function (res) {
+          toast('Reverted to ' + res.model.active, 'ok');
+          loadOverview();
+        })
         .catch(function (err) { toast(err.message, 'bad'); });
     }
   });

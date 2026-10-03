@@ -31,6 +31,28 @@ This directory contains example templates for creating your bot's personality. T
 - **instructions/boredom_updates.txt** - Opt-in/opt-out messages
 - **config/tool_descriptions.json** - Tool descriptions with personality
 
+### Shape of these two JSON files
+
+`persona/command_responses.json` must be a **single** JSON object. It was once
+shipped as two objects concatenated together (`},` then `{`), which is not valid
+JSON: the loader swallows the parse error and every canned command reply
+silently answers with nothing.
+
+`config/tool_descriptions.json` must be keyed by the **exact tool name the bot
+registers** (`web_search`, `search_users`, `generate_selfie`, ... - the names in
+`src/services/openai.ts` and `src/services/google-genai.ts`). The prompt loader
+reads these keys without a guard, so a missing key is not a degraded feature, it
+is a crash the first time anything asks for tool descriptions. If you add a tool
+to either provider, add its entry here in the same change.
+
+Two keys are read by the prompt layer rather than registered as tools, and must
+stay even though they are not tool names:
+
+- `boredom_preference` - `description`, `trigger_phrases_opt_in`,
+  `trigger_phrases_opt_out`, `note`. The absence of this key is the crash.
+- `query_knowledge_base` - the prompt layer's alias for the live
+  `search_knowledge_base` tool.
+
 ## Customization Tips
 
 1. **Start with identity.txt** - This is the most important file

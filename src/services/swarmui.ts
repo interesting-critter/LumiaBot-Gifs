@@ -1,7 +1,5 @@
 import { existsSync } from 'node:fs';
-import { join } from 'node:path';
-import { getPromptCacheGeneration, loadJsonFile, loadTextFile } from './prompts';
-import { PROMPT_STORAGE_DIR } from '../utils/paths';
+import { getPromptCacheGeneration, loadJsonFile, loadTextFile, resolvePromptPath } from './prompts';
 
 export interface GeneratedImageAttachment {
   data: Buffer;
@@ -44,15 +42,23 @@ const SESSION_TTL_MS = 25 * 60 * 1000;
 const CONFIG_CACHE_TTL_MS = 30_000;
 
 /**
- * These three are **relative to `prompt_storage`**, not to `process.cwd()`.
+ * These three are **relative to the active prompt profile**, not to
+ * `process.cwd()` and not to the default root.
  *
- * `loadJsonFile` / `loadTextFile` (`prompts.ts`) join them onto their own
- * absolute prompt-storage root, so a bot started from any directory reads the
- * same three files the dashboard's persona editor writes to. The existence
- * probe in `getConfig()` used to re-derive that root here as
- * `join(__dirname, '..', '..', 'prompt_storage')` — a second copy of the same
- * anchor, which is how the two drifts apart. It now uses `PROMPT_STORAGE_DIR`
- * from `utils/paths.ts` so there is exactly one definition.
+ * `loadJsonFile` / `loadTextFile` (`prompts.ts`) resolve them through
+ * `resolvePromptPath()`, so a bot started from any directory reads the same three
+ * files the dashboard's persona editor writes to, and a profile may override any
+ * of them.
+ *
+ * The existence probe in `getConfig()` is the one caller that must therefore ask
+ * the **same** question the loader is about to ask. It used to re-derive the
+ * default root here — first as `join(__dirname, '..', '..', 'prompt_storage')`,
+ * then as `join(PROMPT_STORAGE_DIR, CONFIG_PATH)` — which is a second, always-
+ * default definition of the same anchor. Under a profile the two disagreed: the
+ * probe looked in the default root, found nothing, and reported SwarmUI
+ * unconfigured, while the `loadJsonFile` on the very next line would have
+ * resolved and read the profile's file. It now calls `resolvePromptPath()`, so
+ * there is exactly one definition of "the file `getConfig()` is about to load".
  */
 const CONFIG_PATH = 'config/swarm_cfg.json';
 const POSITIVE_PROMPT_PATH = 'config/image_prompt_pos.txt';
@@ -188,7 +194,11 @@ class SwarmUIService {
     }
 
     let value: SwarmConfig | null = null;
-    if (existsSync(join(PROMPT_STORAGE_DIR, CONFIG_PATH))) {
+    // Probe the *resolved* path, not `join(PROMPT_STORAGE_DIR, CONFIG_PATH)`:
+    // under a profile that second path names a file the loader was never going
+    // to read, so the guard could veto a perfectly good profile config and
+    // `isConfigured()` would report SwarmUI as absent.
+    if (existsSync(resolvePromptPath(CONFIG_PATH))) {
       value = loadJsonFile<SwarmConfig>(CONFIG_PATH);
     }
     this.configCache = { value, expiresAt: Date.now() + CONFIG_CACHE_TTL_MS, generation };
