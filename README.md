@@ -400,6 +400,11 @@ DASHBOARD_LOG_WINDOW_HOURS=12
 DASHBOARD_USAGE_WINDOW_HOURS=24
 LLM_DAILY_REQUEST_LIMIT=500   # your provider's requests-per-day ceiling
 DASHBOARD_MODEL_OPTIONS=gpt-4o,kimi-k2-thinking   # enables the live model switcher
+
+# Unauthenticated liveness ping — point monitors here, not at the dashboard
+HEALTH_PORT=3002
+HEALTH_HOST=127.0.0.1     # use 0.0.0.0 only if the monitor runs on another machine
+HEALTH_ENABLED=true
 ```
 
 **Security note:** the dashboard serves full prompts, responses, and stored
@@ -407,6 +412,46 @@ memories, so it is protected with HTTP Basic auth as soon as `DASHBOARD_PASSWORD
 is set. If you bind it to `0.0.0.0` the server **refuses to start** without a
 password, to avoid exposing that data to your local network. Keep the default
 `127.0.0.1` and access it only from the device running the bot.
+
+**Uptime monitoring:** do not point a monitor at the dashboard URL. The dashboard
+requires Basic auth, so every credential-less request from the monitor is counted
+as an auth failure by `checkAuthorization()`; after 5 failures from one source IP
+the server answers `429` with a doubling backoff up to 120 seconds. A monitor
+polling the dashboard therefore trips the brute-force lockout and — when it
+shares a source address with you — locks you out of your own dashboard until the
+bot restarts.
+
+Use the separate health port instead. It is a second, unauthenticated listener
+that answers only `GET`/`HEAD` on `/` and `/healthz`, and it never touches the
+auth machinery. It is disabled unless you set a port, so `0` (the default) starts
+nothing new:
+
+```env
+HEALTH_PORT=3002
+HEALTH_HOST=0.0.0.0   # only if the monitor runs on another machine
+# HEALTH_ENABLED=true
+```
+
+In Dashy, set the URL to `http://<your-host>:3002/healthz`. The response is
+always `200` — `discord` is informational and never changes the status code, so
+a monitor cannot false-alarm while the bot is starting or restarting:
+
+```console
+$ curl -i http://localhost:3002/healthz
+HTTP/1.1 200 OK
+...
+{"status":"ok","uptimeSeconds":1234,"discord":"ready","serverTime":"2026-10-03T00:00:00.000Z"}
+```
+
+Any other path returns `404` and any other method `405`; nothing else is exposed.
+Two things to keep in mind: there is no auth on this port, but it reveals only
+that the process is alive plus its uptime — no bot name, no guild names, no
+transcripts, no prompts, no keys — so keep `HEALTH_HOST=127.0.0.1` unless a
+monitor on another machine specifically needs it. And unlike the dashboard, this
+server does not step forward to the next free port when `HEALTH_PORT` is busy: it
+logs one error and stays down, because silently hopping would point your monitor
+at nothing while appearing healthy. It logs nothing per request, just one line at
+startup with its URL (plus a warning if you bind it to a non-loopback host).
 
 **Request counting:** the requests-per-day counter is persisted in
 `api_usage.db`, so a bot restart does not reset it. Every outbound LLM request
@@ -675,6 +720,11 @@ OPENAI_FILTER_REASONING=false
   `DASHBOARD_PASSWORD`; set the password or use the default `127.0.0.1`
 - The browser prompts for a username/password when `DASHBOARD_PASSWORD` is set
   (default username is `admin`)
+
+### Health port does not come up
+- `HEALTH_PORT` is already in use. Unlike the dashboard this server does not hop
+  to the next port — check the boot log for the error line naming the port, then
+  set a different `HEALTH_PORT` (or `HEALTH_ENABLED=false` to turn it off)
 
 ### Owner-only commands are denied for everyone
 - Check the boot log for `🚨 OWNER_ID is not set`. Both `validateConfig()` and the

@@ -22,6 +22,7 @@ import { searxngService } from '../services/searxng';
 import { navidromeService } from '../services/navidrome';
 import { reloadBotDefinition } from '../utils/bot-definition';
 import { bot } from '../bot/client';
+import { describeBindError, isAddressInUse } from './bind';
 
 const UI_PATH = join(import.meta.dir, 'dashboard', 'index.html');
 
@@ -839,27 +840,6 @@ async function buildPersonaPayload() {
 export interface DashboardServer {
   stop: (closeActiveConnections?: boolean) => void;
   url: string;
-}
-
-/**
- * True when a bind failed because the port is taken, as opposed to a bad host
- * or a permission problem. Only this case justifies trying the next port.
- *
- * Bun surfaces the condition inconsistently across versions and platforms (an
- * `EADDRINUSE` code, or an `EADDRINUSE`/`address already in use` substring), so
- * both are checked rather than trusting either one alone.
- */
-function isAddressInUse(error: unknown): boolean {
-  const code = (error as { code?: unknown } | null)?.code;
-  if (code === 'EADDRINUSE') {
-    return true;
-  }
-  const message = error instanceof Error ? error.message : String(error);
-  return /EADDRINUSE|address already in use|port is already in use/i.test(message);
-}
-
-function describeBindError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 /**

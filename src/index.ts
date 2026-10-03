@@ -6,6 +6,7 @@ import { initBalance } from './services/moonshot';
 import { knowledgeGraphService } from './services/knowledge-graph';
 import { modelSelectorService } from './services/model-selector';
 import { startDashboardServer, type DashboardServer } from './server/dashboard';
+import { startHealthServer, type HealthServer } from './server/health';
 import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -88,8 +89,16 @@ function installProcessGuards(): void {
  * a rejecting `destroy()` during shutdown became an unhandled rejection. This is
  * the only place that reacts to a signal, it is idempotent, and every exit path
  * is guarded.
+ *
+ * Both HTTP listeners (dashboard and health) are released here, each in its own
+ * `try`/`catch`: leaving a bound socket behind is what makes a restart fail to
+ * rebind, and neither listener is worth a refusal to exit over.
  */
-function installShutdownHandlers(getDashboard: () => DashboardServer | null, intervals: Timer[]): void {
+function installShutdownHandlers(
+  getDashboard: () => DashboardServer | null,
+  getHealth: () => HealthServer | null,
+  intervals: Timer[]
+): void {
   let shuttingDown = false;
 
   const shutdown = (signal: string) => {
@@ -110,6 +119,12 @@ function installShutdownHandlers(getDashboard: () => DashboardServer | null, int
       console.error('[SHUTDOWN] Dashboard stop failed (continuing):', error);
     }
 
+    try {
+      getHealth()?.stop(true);
+    } catch (error) {
+      console.error('[SHUTDOWN] Health stop failed (continuing):', error);
+    }
+
     // Guarded exit: a failure to tear down must not become an unhandled rejection
     // on the way out, and must not leave the process hanging either.
     bot.destroy()
@@ -128,6 +143,7 @@ function installShutdownHandlers(getDashboard: () => DashboardServer | null, int
 
 async function main() {
   let dashboard: DashboardServer | null = null;
+  let health: HealthServer | null = null;
   const backgroundIntervals: Timer[] = [];
 
   // Installed first, before anything can throw, so a failure during startup is
@@ -203,6 +219,12 @@ async function main() {
     // Start the mobile dashboard (observability + memory management)
     dashboard = startDashboardServer();
 
+    // Monitor-facing liveness port (opt-in via HEALTH_PORT). Separate listener on
+    // purpose: a monitor cannot authenticate, and sharing the dashboard's port
+    // meant its unauthenticated polls counted as failed logins and eventually
+    // locked the operator out of the dashboard itself.
+    health = startHealthServer();
+
     // Note: Guild updates are now handled by the onConnect callback in the orchestrator
     // This ensures guilds are sent immediately after the WebSocket connection is established
 
@@ -236,7 +258,7 @@ async function main() {
     backgroundIntervals.push(guildSyncInterval);
 
     // Single, idempotent, fully-guarded shutdown path.
-    installShutdownHandlers(() => dashboard, backgroundIntervals);
+    installShutdownHandlers(() => dashboard, () => health, backgroundIntervals);
 
   } catch (error) {
     console.error('Failed to start bot:', error);
