@@ -70,6 +70,28 @@ const ownerId: string = strEnv('OWNER_ID', strEnv('BOT_OWNER_ID', ''));
 const dashboardPassword = strEnv('DASHBOARD_PASSWORD', '');
 
 /**
+ * Health/ping port for monitors (Dashy, Uptime Kuma, a cron `curl`, …).
+ *
+ * WHY THE DEFAULT IS 0, i.e. "off"
+ * ---------------------------------
+ * This listener is deliberately UNAUTHENTICATED — that is the whole point of
+ * it (see `server/health.ts`) — so unlike every other tunable in this file it
+ * must not appear on an existing install just because the bot was upgraded. A
+ * fresh unauthenticated port that nobody asked for is new attack surface
+ * appearing on a device that already had none, and it would appear silently,
+ * between restarts, with nobody reading the boot log to notice. So the port has
+ * to be *chosen* by the operator: `HEALTH_PORT=3002` and you get the listener;
+ * unset (or `0`, or `HEALTH_ENABLED=false`) and there is no listener at all.
+ *
+ * `min: 0` is load-bearing and must not be "tidied" into `min: 1`. `intEnv`
+ * clamps to `opts.min`, so a `min: 1` would turn the `0` sentinel into "port 1"
+ * — which is privileged, fails to bind as a non-root user, and looks like a
+ * deliberate configuration in every log and status line that prints the port.
+ * `0` has to survive parsing as "disabled" for `server/health.ts` to branch on.
+ */
+const healthPort = intEnv('HEALTH_PORT', 0, { min: 0, max: 65535 });
+
+/**
  * A prompt profile id is used verbatim as a directory name under
  * `prompt_storage/profiles/`, so it is restricted to characters that cannot
  * escape that directory.
@@ -461,6 +483,48 @@ export const config = {
     // Models the dashboard is allowed to switch between. Empty means the
     // switcher stays hidden and the model is fixed by the environment.
     modelOptions: dashboardModelOptions,
+  },
+
+  /**
+   * Dead-silent, unauthenticated liveness port for monitoring tools.
+   *
+   * WHY A SEPARATE PORT AND NOT A DASHBOARD ROUTE
+   * --------------------------------------------
+   * Monitors (Dashy in particular) cannot hold credentials, so they poll the
+   * dashboard without them. Every one of those unauthenticated polls is counted
+   * as a failed login by `checkAuthorization()`, and after five of them the
+   * monitor's source address is locked out — 429, with the window doubling up to
+   * 120s. Whenever the monitor shares a source address with the operator (same
+   * phone, same Termux session, same `127.0.0.1`, or a reverse proxy in between
+   * that collapses both onto one address) the monitor's polling locks the
+   * operator out of their own dashboard until the process is restarted. The two
+   * failure modes are indistinguishable from the operator's side: the dashboard
+   * simply stops loading, and the logs show only the monitor's 401s.
+   *
+   * A separate listener is the only structural fix. It shares no state with the
+   * auth machinery, so there is no counter for a monitor to trip and no
+   * credentials for it to fail to supply. The trade-off is that anything that
+   * can route to the port learns uptime and whether the Discord gateway is up —
+   * which is why the bind host defaults to loopback and a non-loopback bind is
+   * warned about loudly at startup.
+   *
+   * See `server/health.ts` for the server, and `healthPort` above for the
+   * opt-in.
+   */
+  health: {
+    // 0 is the "off" sentinel: the port must be explicitly chosen, so an
+    // existing install never gains a new unauthenticated listener on upgrade.
+    // `HEALTH_ENABLED` is the belt to that braces — defaulting to `true` it can
+    // never turn anything on by itself, and it lets an operator who set
+    // HEALTH_PORT once kill the listener again without editing the port too.
+    enabled: healthPort > 0 && boolEnv('HEALTH_ENABLED', true),
+    // Loopback by default for the same reason the dashboard defaults there, but
+    // WITHOUT the password requirement: the payload is uptime and gateway
+    // readiness, not transcripts. Note that on Android loopback is still shared
+    // with every other app on the device, so this is a weak boundary, not a
+    // real one.
+    host: strEnv('HEALTH_HOST', '127.0.0.1'),
+    port: healthPort,
   },
 
   /**
