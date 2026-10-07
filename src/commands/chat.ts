@@ -1,101 +1,16 @@
 import {
   SlashCommandBuilder,
   ChatInputCommandInteraction,
-  TextChannel,
-  ThreadChannel,
-  NewsChannel,
-  VoiceChannel,
-  StageChannel,
-  DMChannel,
 } from 'discord.js';
 import { getErrorMessage } from '../services/prompts';
 import { formatDiscordResponseText } from '../utils/discord-markdown';
 import { buildResponseCard } from '../utils/response-card';
 import { config } from '../utils/config';
 import { buildAllowedMentions } from '../utils/permissions';
-import { channelHistoryService } from '../services/channel-history';
+import { fetchChannelTurns } from '../utils/channel-turns';
 import { handleMessage } from '../services/message-handler';
 import { buildDiscordImageFiles } from '../bot/client';
-import type { ChatMessage } from '../services/openai';
 import type { Command } from '../bot/client';
-
-/** Channel types `fetchChannelHistory` can read a message history from. */
-type HistoryCapableChannel =
-  | TextChannel
-  | ThreadChannel
-  | NewsChannel
-  | VoiceChannel
-  | StageChannel
-  | DMChannel;
-
-function isHistoryCapable(channel: unknown): channel is HistoryCapableChannel {
-  return channel instanceof TextChannel
-    || channel instanceof ThreadChannel
-    || channel instanceof NewsChannel
-    || channel instanceof VoiceChannel
-    || channel instanceof StageChannel
-    || channel instanceof DMChannel;
-}
-
-/**
- * Resolve the interaction's channel to something with a readable history.
- *
- * WHY THIS FETCHES INSTEAD OF READING `interaction.channel`
- * --------------------------------------------------------
- * `interaction.channel` is typed `Channel | null` and is **cache-only** — it
- * resolves the channel id against the client's cache and yields `null` when the
- * channel is not in it. That is not hypothetical: an uncached channel made
- * `/chat` silently answer with no context at all, because an earlier version of
- * this helper treated a `null` channel as "no history available" and returned
- * without a word. The user got a confident reply to "what did she just say?"
- * from a model that had never seen the channel.
- *
- * So: prefer the cache, fall back to an API fetch, and only then give up — and
- * say so, rather than degrading to a silent blank.
- */
-async function resolveHistoryChannel(interaction: ChatInputCommandInteraction): Promise<HistoryCapableChannel | null> {
-  const cached = interaction.channel;
-  if (isHistoryCapable(cached)) return cached;
-
-  if (!interaction.channelId) return null;
-
-  try {
-    const fetched = await interaction.client.channels.fetch(interaction.channelId);
-    if (isHistoryCapable(fetched)) return fetched;
-    console.warn(`📜 [CHAT COMMAND] Channel ${interaction.channelId} is ${fetched?.constructor.name ?? 'unavailable'}, which has no message history`);
-    return null;
-  } catch (error) {
-    // Usually a permissions problem (no Read Message History). Worth saying out
-    // loud: the difference between "no history exists" and "cannot read history"
-    // is the difference between a correct answer and a confidently wrong one.
-    console.warn(`📜 [CHAT COMMAND] Could not resolve channel ${interaction.channelId} for history:`, error);
-    return null;
-  }
-}
-
-/**
- * Recent channel turns for context, or `undefined` when there are none to give.
- *
- * Never throws: history is an enrichment, and a channel the bot cannot read must
- * still get an answer — just one without surrounding context.
- */
-async function fetchChannelTurns(interaction: ChatInputCommandInteraction): Promise<ChatMessage[] | undefined> {
-  const channel = await resolveHistoryChannel(interaction);
-  if (!channel) return undefined;
-
-  try {
-    const history = await channelHistoryService.fetchChannelHistory(
-      channel as Parameters<typeof channelHistoryService.fetchChannelHistory>[0],
-    );
-    if (history.length === 0) return undefined;
-    const turns = channelHistoryService.convertToTurns(history, interaction.client.user?.id);
-    console.log(`📜 [CHAT COMMAND] Converted ${history.length} channel messages to ${turns.length} chat turns`);
-    return turns;
-  } catch (error) {
-    console.warn('📜 [CHAT COMMAND] Failed to fetch channel history:', error);
-    return undefined;
-  }
-}
 
 const command: Command = {
   data: new SlashCommandBuilder()
@@ -157,7 +72,7 @@ const command: Command = {
 
     try {
       const guildId = interaction.guildId || 'dm';
-      const channelTurns = await fetchChannelTurns(interaction);
+      const channelTurns = await fetchChannelTurns(interaction, 'CHAT COMMAND');
 
       // Routed through `handleMessage` rather than calling the AI service
       // directly, so `/chat` and a mention go through the identical pipeline:

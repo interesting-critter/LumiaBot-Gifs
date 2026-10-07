@@ -9,6 +9,14 @@ export type InteractionSource =
   | 'orchestrator'
   | 'boredom'
   | 'slash-command'
+  /**
+   * `/dryrun` (owner-only): the whole message pipeline ran, but no request was
+   * made to any model. Its own source value rather than a reuse of
+   * `'slash-command'`, because a dry run is the one entry in this log whose
+   * `response` is *not* something the model said — filtering the two apart is
+   * the whole point of having the value.
+   */
+  | 'dry-run'
   | 'unknown';
 
 export interface LoggedInteraction {

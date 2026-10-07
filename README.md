@@ -244,6 +244,31 @@ Once the bot is running and invited to your server, use these slash commands:
 
 - **`/ratelimit status|set <seconds>`** - View or change the chat rate limit (owner or trusted role)
 
+- **`/dryrun [message] [search] [image] [video]`** - Run the whole message
+  pipeline with **no model request**, and log the exact prompt (owner only)
+  - `message`: (Optional) Text to run through the pipeline. Omit it to see the
+    prompt for a bare turn; a visible placeholder is substituted and the reply
+    says so
+  - `search`, `image`, `video`: as `/chat`. Attachments are threaded into the
+    prompt as URLs and are **never analysed** — a dry run makes no request to any
+    model, including the secondary vision one
+
+  Channel history, page extraction, collective-knowledge prefetch,
+  pronoun/third-party parsing, the memory store and the dashboard log all still
+  run: those are the stages a prompt problem usually lives in. Only the model
+  call is removed. The result is logged under the trigger **Dry runs** on the
+  dashboard, and the full payload is in that entry's full-prompt view — the
+  conversation-history entry is a short marker rather than the prompt, so a
+  dry run cannot evict twenty real messages out of the rolling context window.
+
+  The reply is ephemeral and is just the configured `DRY_RUN_EMOJI`. That
+  value is resolved through the same emoji lookup the reaction path uses, so a
+  bare name, a bare snowflake, `<:name:id>`, `<a:name:id>` or a plain unicode
+  emoji all work. Application emoji (uploaded for this bot in the Developer
+  Portal) are resolved first and are what you want here — they render in any
+  channel the bot can post in, whereas a guild emoji only renders inside the
+  guild that owns its id.
+
 ## Rate Limiting
 
 The bot allows **one request per `RATE_LIMIT_SECONDS` window, per user**. When a
@@ -487,6 +512,7 @@ LumiaBot/
 │   │   └── client.ts          # Discord client setup
 │   ├── commands/
 │   │   ├── chat.ts            # /chat command
+│   │   ├── dryrun.ts          # /dryrun command (owner-only prompt preview)
 │   │   ├── ratelimit.ts       # /ratelimit command (owner/mod)
 │   │   └── search.ts          # /search command
 │   ├── scripts/

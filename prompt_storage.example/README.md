@@ -29,6 +29,7 @@ This directory contains example templates for creating your bot's personality. T
 - **instructions/memory_system.txt** - Memory formation guidelines
 - **instructions/reply_context.json** - Reply context templates
 - **instructions/boredom_updates.txt** - Opt-in/opt-out messages
+- **config/rewrites.json** - Ordered text substitutions applied to the prompt just before it is sent, e.g. to have the bot call you by a chosen name instead of your Discord username or display name. Ships with commented examples.
 - **config/tool_descriptions.json** - Tool descriptions with personality
 
 ### Shape of these two JSON files

@@ -231,6 +231,19 @@ export interface MessageHandlerOptions {
   channelId?: string;
   channelName?: string;
   guildName?: string;
+  /**
+   * Run the whole pipeline and stop just short of the model.
+   *
+   * Set by the owner-only `/dryrun` command. Every non-model stage still runs —
+   * channel-history fetch, page extraction, collective-knowledge prefetch,
+   * pronoun/third-party parsing, the dashboard log, conversation-history writes
+   * — because those are exactly the stages a prompt problem usually lives in.
+   * The two model calls are removed: the primary one via `dryRun` on the AI
+   * service options (the short-circuit lives in each provider, after the prompt
+   * is assembled), and the secondary vision one here, since `processVisionContent`
+   * is this module's own call and not part of the provider's payload assembly.
+   */
+  dryRun?: boolean;
 }
 
 export interface MessageHandlerResponse {
@@ -238,6 +251,47 @@ export interface MessageHandlerResponse {
   reactions: string[];
   attachments: GeneratedImageAttachment[];
   gifUrl?: string;
+  /**
+   * Only ever set on a `dryRun` turn: the exact payload that would have been
+   * sent to the model, in the POST-rewrite form.
+   *
+   * It is deliberately NOT `text`. `text` is what gets posted to Discord and what
+   * gets stored as the assistant turn, and this is a multi-kilobyte prompt — the
+   * one place it belongs is the dashboard log's `fullPrompt` field, which is
+   * content-addressed and de-duplicated precisely because these payloads are far
+   * too big to keep a copy of per turn.
+   */
+  dryRunPrompt?: string;
+}
+
+/**
+ * The username a dry run is filed under, in the dashboard log and in
+ * conversation history.
+ *
+ * Deliberately not the operator's own name. A dry run is not something anyone
+ * said, and a history entry that read like a real turn from the owner would be
+ * indistinguishable from one when the model is later handed that history — which
+ * is the opposite of what a troubleshooting tool should do.
+ */
+export const DRY_RUN_HISTORY_USERNAME = 'dry run';
+
+/**
+ * The short marker stored as the assistant turn for a dry run.
+ *
+ * NOT the prompt itself. `CONVERSATION_MAX_HISTORY` is a rolling window (20 by
+ * default) measured in entries, so writing a multi-KB "reply" would evict 20
+ * real messages' worth of context in one dry run and poison every subsequent
+ * turn in that guild with prompt text the operator never typed. The full payload
+ * lives in the dashboard log's `fullPrompt` field, which exists for this.
+ *
+ * The stage list is assembled from what actually ran rather than hardcoded, so a
+ * future stage that gets skipped in dry runs cannot leave a marker claiming it
+ * happened.
+ */
+function buildDryRunMarker(stages: string[], skipped: string[]): string {
+  const ran = stages.length > 0 ? stages.join(', ') : 'none';
+  const notRun = skipped.length > 0 ? skipped.join(', ') : 'none';
+  return `[dry run] No request was made to any model. Stages that ran: ${ran}. Skipped: ${notRun}. The full prompt is in this entry's full-prompt view on the dashboard.`;
 }
 
 /**
@@ -387,7 +441,15 @@ async function processVisionContent(
  * @returns The bot's response with potential reactions
  */
 export async function handleMessage(options: MessageHandlerOptions): Promise<MessageHandlerResponse> {
-    const { content, enableSearch, enableKnowledgeGraph, imageUrls, videoUrls, textAttachments, pageContents, userId, username, guildId, mentionedUsers, replyContext, channelMessages, orchestratorContextNote, currentMessageSpeaker, getUserListeningActivity, resolveUserMention, isNsfwChannel, allowNsfwImageGeneration, orchestratorEventId, orchestratorTurnId, requestFollowUp, requestCollectiveKnowledge, source, channelName, guildName } = options;
+    const { content, enableSearch, enableKnowledgeGraph, imageUrls, videoUrls, textAttachments, pageContents, userId, username, guildId, mentionedUsers, replyContext, channelMessages, orchestratorContextNote, currentMessageSpeaker, getUserListeningActivity, resolveUserMention, isNsfwChannel, allowNsfwImageGeneration, orchestratorEventId, orchestratorTurnId, requestFollowUp, requestCollectiveKnowledge, source, channelName, guildName, dryRun } = options;
+
+    const isDryRun = dryRun === true;
+    // Everything a dry run writes under a name — the dashboard entry and both
+    // conversation-history turns — uses this instead of the caller's username.
+    // The `userId` stays the real one, so the entries land in the owner's own
+    // guild-scoped bucket rather than in an unreadable bucket of their own
+    // making. See `DRY_RUN_HISTORY_USERNAME`.
+    const historyUsername = isDryRun ? DRY_RUN_HISTORY_USERNAME : username;
 
     // Dashboard observability: measure the full turn so the log shows how long
     // the bot actually took to answer, not just the model call.
@@ -402,7 +464,7 @@ export async function handleMessage(options: MessageHandlerOptions): Promise<Mes
         response: response?.text ?? '',
         durationMs: Date.now() - turnStartedAt,
         userId,
-        username,
+        username: historyUsername,
         channelId: options.channelId,
         channelName,
         guildId,
@@ -504,10 +566,22 @@ export async function handleMessage(options: MessageHandlerOptions): Promise<Mes
     let processedImages = imageUrls;
     let processedVideos = videoUrls;
     // Don't pass images/videos to main model since vision model already processed them
-    if (isVisionRequest && config.vision.enabled) {
+    //
+    // A dry run skips this entirely, and this is the second of the two model
+    // calls a dry run must never make: `processVisionContent` calls a SECONDARY
+    // vision model, which is still an LLM request, so leaving it in would defeat
+    // the entire premise. The media is deliberately left in place below rather
+    // than dropped — the URLs still travel into the assembled prompt, which is
+    // exactly what the operator needs to see, and the marker records that
+    // nothing analysed them.
+    if (isVisionRequest && config.vision.enabled && !isDryRun) {
       processedContent = await processVisionContent(content, imageUrls, videoUrls);
       processedImages = undefined;
       processedVideos = undefined;
+    } else if (isVisionRequest && config.vision.enabled) {
+      console.log(
+        '👁️  [HANDLER] DRY RUN: skipping the secondary vision model. The attachment(s) are in the prompt as URLs and were NOT analysed.',
+      );
     }
 
     let collectiveKnowledgeContext: string | undefined;
@@ -525,8 +599,8 @@ export async function handleMessage(options: MessageHandlerOptions): Promise<Mes
     }
 
     // Add user message to conversation history (use processed content if vision was used)
-    if (userId && username) {
-      conversationHistoryService.addMessage(userId, guildId, username, 'user', processedContent);
+    if (userId && historyUsername) {
+      conversationHistoryService.addMessage(userId, guildId, historyUsername, 'user', processedContent);
     }
 
     // Get per-user conversation summary for background context in system prompt
@@ -581,6 +655,7 @@ export async function handleMessage(options: MessageHandlerOptions): Promise<Mes
       orchestratorTurnId,
       requestFollowUp,
       requestCollectiveKnowledge,
+      dryRun: isDryRun,
       onImageGenerated: (image: GeneratedImageAttachment) => generatedImages.push(image),
       onFullPrompt: (fullPrompt: string) => { fullPromptForLog = fullPrompt; },
     });
@@ -591,6 +666,12 @@ export async function handleMessage(options: MessageHandlerOptions): Promise<Mes
     // them: a turn that ended in "Something went wrong" would store the user's
     // pronouns and burn one of the 15 third-party context slots, evicting a
     // genuine older memory in exchange for a turn that never happened.
+    //
+    // Placed ABOVE the dry-run return so a dry run still exercises this stage:
+    // memory injection is one of the things an operator is debugging when they
+    // reach for a dry run, so skipping the store would hide exactly the bug they
+    // are looking for. (The dry-run return is still after the model call in both
+    // paths, which is the invariant this comment is about.)
     if (parsedInfo && userId && username) {
       storeParsedInformation(userId, username, parsedInfo, guildId);
 
@@ -601,6 +682,58 @@ export async function handleMessage(options: MessageHandlerOptions): Promise<Mes
       if (parsedInfo.hasMentions) {
         console.log(`📝 [HANDLER] Stored ${parsedInfo.mentions.length} third-party reference(s)`);
       }
+    }
+
+    // ── DRY RUN RETURNS HERE ────────────────────────────────────────────────
+    // `response` is the assembled prompt, NOT model output, so none of the
+    // output post-processing below may touch it.
+    //
+    // `gifService.extractAndResolveGif` strips `<gif>` tags and
+    // `extractReactions` strips `[REACT: …]`, and both patterns match text that
+    // belongs in the *prompt's own instructions* — the system prompt documents
+    // both tags. Running either over the payload would silently delete the
+    // documentation of the feature being debugged. For the same reason the
+    // command must not pass it through `formatDiscordResponseText`, which is the
+    // same strip again plus escaping and truncation.
+    if (isDryRun) {
+      const stages = [
+        'channel-history fetch and turn conversion',
+        'pronoun/third-party parsing',
+        'memory store',
+        'conversation-history read and write',
+        'dashboard log',
+      ];
+      if (channelMessages) stages.push('channel turns');
+      if (pageContents && pageContents.length > 0) stages.push('page extraction');
+      if (collectiveKnowledgeContext !== undefined) stages.push('collective-knowledge prefetch');
+      if (imageUrls && imageUrls.length > 0) stages.push(`${imageUrls.length} image URL(s)`);
+      if (videoUrls && videoUrls.length > 0) stages.push(`${videoUrls.length} video URL(s)`);
+      stages.push('prompt assembly and rewrite');
+
+      const skipped = ['primary model request'];
+      // Named explicitly rather than left implicit: an operator who attaches an
+      // image and sees it in the prompt could otherwise believe it was analysed.
+      if (isVisionRequest) skipped.push('secondary vision request (attachments were NOT analysed)');
+
+      const marker = buildDryRunMarker(stages, skipped);
+
+      // Stored as the assistant turn under the real `userId` but the literal
+      // "dry run" name, so it lands in the owner's guild-scoped bucket and is
+      // recognisable when the model is later handed that history. The prompt
+      // itself is NOT stored here — see `buildDryRunMarker`.
+      if (userId && historyUsername) {
+        conversationHistoryService.addMessage(userId, guildId, historyUsername, 'assistant', marker);
+      }
+
+      console.log(`🧪 [HANDLER] DRY RUN complete — no model request was made`);
+      logTurn({ text: marker, reactions: [], attachments: [], dryRunPrompt: response });
+
+      return {
+        text: marker,
+        reactions: [],
+        attachments: [],
+        dryRunPrompt: response,
+      };
     }
 
     // 1. Extract and resolve GIF if present (and remove <gif> tags from the text)

@@ -4,6 +4,15 @@ import { dbPath } from '../utils/paths';
 import type { ChatMessage } from './openai';
 
 export interface ConversationEntry {
+  /**
+   * Row id from `conversation_messages.id`. Carried through so a caller that
+   * wants to delete exactly one message (the dashboard) can name it, instead
+   * of only being offered "delete this whole conversation". It is the
+   * autoincrement primary key, so it is sequential and guessable — which is why
+   * `deleteMessage` treats it as an untrusted hint and re-checks the owner
+   * columns rather than trusting it.
+   */
+  id: number;
   role: 'user' | 'assistant';
   content: string;
   timestamp: string;
@@ -163,11 +172,11 @@ export class ConversationHistoryService {
    */
   getConversation(userId: string, guildId: string): UserConversation | null {
     const results = this.db.query(
-      `SELECT user_id, username, role, content, timestamp 
+      `SELECT id, user_id, username, role, content, timestamp 
        FROM conversation_messages 
        WHERE user_id = ? AND guild_id = ?
        ORDER BY timestamp ASC, id ASC`
-    ).all(userId, guildId) as Array<{ user_id: string; username: string; role: 'user' | 'assistant'; content: string; timestamp: string }>;
+    ).all(userId, guildId) as Array<{ id: number; user_id: string; username: string; role: 'user' | 'assistant'; content: string; timestamp: string }>;
 
     if (results.length === 0) {
       return null;
@@ -181,6 +190,7 @@ export class ConversationHistoryService {
     }
 
     const messages: ConversationEntry[] = results.map(r => ({
+      id: r.id,
       role: r.role,
       content: r.content,
       timestamp: r.timestamp,
@@ -206,6 +216,49 @@ export class ConversationHistoryService {
     if (result.changes > 0) {
       console.log(`💬 [CONVERSATION] Cleared ${result.changes} messages for user ${userId} in guild ${guildId}`);
     }
+  }
+
+  /**
+   * Delete a single message from a user's conversation in a guild.
+   *
+   * `id` comes off a URL the dashboard was handed, and it is an autoincrement
+   * primary key — small, dense and entirely predictable (the first message the
+   * bot has ever stored is id 1). A `DELETE ... WHERE id = ?` on its own would
+   * therefore let any authenticated dashboard caller remove a row out of a
+   * guild it has no business touching just by counting up. So the id is treated
+   * as nothing more than a hint *within* an already-authorised scope: `user_id`
+   * and `guild_id` are bound alongside it, and a mismatch simply matches zero
+   * rows. That mirrors every other read here — the guild is part of the key,
+   * not a filter applied afterwards.
+   *
+   * Returns whether a row was actually removed, so the route can answer 404 for
+   * an id that was never there (or belongs to someone else) instead of
+   * pretending the delete succeeded.
+   */
+  deleteMessage(id: number, userId: string, guildId: string): boolean {
+    // Reject a non-integer before it reaches the driver: SQLite would happily
+    // compare any TEXT binding against an INTEGER column, and relying on "it
+    // matches nothing" to reject junk from a public URL path is a weaker
+    // contract than saying no outright.
+    if (!Number.isInteger(id)) {
+      return false;
+    }
+
+    const result = this.db.run(
+      'DELETE FROM conversation_messages WHERE id = ? AND user_id = ? AND guild_id = ?',
+      [id, userId, guildId]
+    );
+
+    if (result.changes > 0) {
+      console.log(`💬 [CONVERSATION] Deleted message ${id} for user ${userId} in guild ${guildId}`);
+      return true;
+    }
+
+    // Not logged as an error: the overwhelmingly common cause is a stale tab
+    // re-submitting an id that has already been trimmed away by the rolling
+    // window or deleted by a previous click, which is not worth a warning line
+    // per request.
+    return false;
   }
 
   /**

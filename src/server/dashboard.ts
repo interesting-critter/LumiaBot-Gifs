@@ -43,6 +43,7 @@ const VALID_SOURCES: InteractionSource[] = [
   'orchestrator',
   'boredom',
   'slash-command',
+  'dry-run',
   'unknown',
 ];
 
@@ -495,6 +496,10 @@ const PROMPT_FILES: Array<{ path: string; label: string; kind: 'text' | 'json'; 
   { path: 'config/image_prompt_pos.txt', label: 'Image prompt (positive)', kind: 'text', hint: 'Base prompt for image generation.' },
   { path: 'config/image_prompt_neg.txt', label: 'Image prompt (negative)', kind: 'text', hint: 'Terms excluded from images.' },
   { path: 'config/swarm_cfg.json', label: 'Image generation config', kind: 'json', hint: 'Backend, steps, sampler.' },
+  // Outbound-only: rewrites run on a copy of the prompt at the send boundary, so
+  // editing this changes what the model sees without touching stored history or
+  // the activity log.
+  { path: 'config/rewrites.json', label: 'Prompt rewrites', kind: 'json', hint: 'Ordered text substitutions applied to the prompt just before sending.' },
 ];
 
 const PROMPT_FILE_MAP = new Map(PROMPT_FILES.map((f) => [f.path, f]));
@@ -1261,6 +1266,34 @@ export function startDashboardServer(): DashboardServer | null {
       // explicit guildId, and a missing one returns empty rather than erroring.
       if (path === '/api/conversations' && method === 'GET') {
         return json(buildConversationList(url.searchParams.get('limit')));
+      }
+
+      // The three-segment form is matched first, deliberately. The two-segment
+      // regex below is anchored with `$` and its guild group is `[^/]+`, so
+      // `/api/conversations/<user>/<guild>/<id>` cannot match it — the extra
+      // segment is neither consumed nor ignored, and an extra `/` fails the
+      // anchor. The two patterns are therefore disjoint and order only documents
+      // the more specific route first, matching the knowledge routes above.
+      //
+      // The guild group stays `[^/]+` rather than `\d+`: the bot stores DMs under
+      // the literal guild scope `'dm'`, so a digit-only pattern would 404 every
+      // single-message delete in a DM even though the rest of the page renders
+      // it. It is decodeURIComponent-ed like the segment below.
+      const conversationMessageMatch = path.match(/^\/api\/conversations\/(\d{5,25})\/([^/]+)\/(\d+)$/);
+      if (conversationMessageMatch) {
+        if (method !== 'DELETE') return fail('Method not allowed', 405);
+        const userId = conversationMessageMatch[1]!;
+        const guildId = decodeURIComponent(conversationMessageMatch[2]!);
+        const messageId = Number.parseInt(conversationMessageMatch[3]!, 10);
+
+        // The service re-checks ownership even though the id came out of a
+        // conversation the caller just read, so a row in another guild cannot be
+        // removed by naming a plausible sequential id.
+        const removed = conversationHistoryService.deleteMessage(messageId, userId, guildId);
+        if (!removed) {
+          return fail(`No message ${messageId} for user ${userId} in ${guildId}`, 404);
+        }
+        return json({ ok: true, removed: 1 });
       }
 
       const conversationMatch = path.match(/^\/api\/conversations\/(\d{5,25})(?:\/([^/]+))?$/);
