@@ -6,6 +6,7 @@ import {
 import { getErrorMessage } from '../services/prompts';
 import { config } from '../utils/config';
 import { buildAllowedMentions } from '../utils/permissions';
+import { emojiLookupContext, resolveEmojiContent } from '../utils/emoji';
 import { handleMessage } from '../services/message-handler';
 // The same shared helper `/chat` uses (see `src/utils/channel-turns.ts`), so a
 // dry run and a real `/chat` in the same channel resolve surrounding context
@@ -153,10 +154,33 @@ const command: Command = {
       //
       // Ephemeral: this is a debugging tool, and a visible "zakyap" in a live
       // channel is noise the channel's occupants did not ask for.
+      //
+      // The emoji goes through the same resolution the reaction path uses, so a
+      // bare name, a bare snowflake, or full `<:…>`/`<a:…>` markup in
+      // `DRY_RUN_EMOJI` all work, and an application-owned emoji is emitted in
+      // the `<a:…>` form the client actually renders. Interpolating the raw
+      // config string here was the bug: it bypassed that lookup entirely and
+      // posted unrenderable markup.
+      const emoji = resolveEmojiContent(config.dryRun.emoji, emojiLookupContext(interaction.client, interaction.guild));
+      if (!emoji.resolved) {
+        // Honest failure beats a silent one. An unresolved value means no emoji
+        // cache this bot can see holds that emoji, so whatever we posted would
+        // render as literal text — which looks identical to the bug this
+        // replaced. The offending value is quoted inside an inline-code span,
+        // which Discord does not parse as emoji markup, so this reports the
+        // problem instead of half-reproducing it.
+        console.warn(
+          `⚠️ [DRY RUN] Could not resolve DRY_RUN_EMOJI ("${config.dryRun.emoji}") against any emoji cache; reporting that instead of posting unrenderable markup.`
+        );
+      }
+      const replyEmoji = emoji.resolved
+        ? emoji.markup
+        : `⚠️ *(could not resolve \`DRY_RUN_EMOJI\` = \`${config.dryRun.emoji}\` — no matching app or guild emoji)*`;
+
       await interaction.editReply({
         content: usedPlaceholder
-          ? `${config.dryRun.emoji}\n*(no message supplied — ran with the placeholder instead)*`
-          : config.dryRun.emoji,
+          ? `${replyEmoji}\n*(no message supplied — ran with the placeholder instead)*`
+          : replyEmoji,
         allowedMentions: buildAllowedMentions(),
       });
     } catch (error) {

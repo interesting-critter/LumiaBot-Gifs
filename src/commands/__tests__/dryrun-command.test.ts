@@ -46,6 +46,20 @@ const OWNER_ID = '777888999000111222';
 const GUILD_ID = '555666777888999000';
 const OWNER_NAME = 'the operator';
 
+/**
+ * The bot's own `zak_yap`, as `/dryrun` now resolves it: an **application-owned**
+ * emoji, animated, and therefore emitted in Discord's `<a:…>` content form.
+ *
+ * The cache here is what the real bot has once `client.application.emojis` is
+ * populated, and putting it in the fake is what lets the command resolve
+ * anything at all. Without it the command correctly reports that it could not
+ * resolve the configured value — see the "unresolvable" describe block below.
+ */
+const ZAK_YAP = { id: '1552379447246852146', name: 'zak_yap', animated: true };
+
+/** What `/dryrun` is expected to post once that emoji resolves. */
+const RESOLVED_ZAK_YAP = '<a:zak_yap:1552379447246852146>';
+
 interface Recorded {
   content?: string;
   flags?: number;
@@ -72,6 +86,8 @@ interface FakeInteraction {
 function fakeInteraction(options: {
   message?: string | null;
   guildId?: string | null;
+  /** Set false to model a bot whose emoji caches are empty. */
+  withEmojis?: boolean;
 }): FakeInteraction {
   const replies: Recorded[] = [];
   const edits: Recorded[] = [];
@@ -79,6 +95,11 @@ function fakeInteraction(options: {
   const followUps: Recorded[] = [];
 
   const guildId = options.guildId === undefined ? GUILD_ID : options.guildId;
+  const withEmojis = options.withEmojis ?? true;
+  const emojiCache = {
+    find: (predicate: (e: typeof ZAK_YAP) => boolean) =>
+      withEmojis ? [ZAK_YAP].find(predicate) : undefined,
+  };
 
   const interaction: Record<string, unknown> = {
     options: {
@@ -89,11 +110,13 @@ function fakeInteraction(options: {
     channelId: '444555666777888999',
     channel: { name: 'prompt-lab', nsfw: false },
     guildId,
-    guild: guildId ? { name: 'Test Guild' } : null,
+    guild: guildId ? { name: 'Test Guild', emojis: { cache: emojiCache } } : null,
     user: { id: OWNER_ID, username: OWNER_NAME },
     client: {
       user: { id: '1234567890' },
       channels: { fetch: async () => null },
+      application: { emojis: { cache: emojiCache } },
+      emojis: { cache: emojiCache },
     },
     deferReply: async (payload?: Recorded) => { deferrals.push(payload ?? {}); },
     editReply: async (payload: Recorded) => { edits.push(payload); },
@@ -222,14 +245,37 @@ describe('/dryrun — what it writes', () => {
 });
 
 describe('/dryrun — what it says', () => {
-  test('the reply is the emoji and nothing else', async () => {
+  test('the reply is the resolved emoji and nothing else', async () => {
     const fake = fakeInteraction({ message: 'reply shape' });
     await dryRunCommand.execute(fake.interaction as never);
 
     expect(fake.edits).toHaveLength(1);
-    expect(fake.edits[0]?.content).toBe(config.dryRun.emoji);
-    // The custom emoji is a named config value, not a literal at the call site.
+    // NOT the raw config string. `DRY_RUN_EMOJI` is an input that goes through
+    // the shared emoji resolver, so an application-owned emoji comes out in the
+    // `<a:…>` content form Discord actually renders. Interpolating the config
+    // value verbatim — which is what this used to do — is the bug: it posted
+    // `<:zak_yap:…>`, which does not render.
+    expect(fake.edits[0]?.content).toBe(RESOLVED_ZAK_YAP);
+    // The configured value is still full markup, and still a named config
+    // constant rather than a literal at the call site.
     expect(config.dryRun.emoji).toBe('<:zak_yap:1552379447246852146>');
+    expect(fake.edits[0]?.content).not.toBe(config.dryRun.emoji);
+  });
+
+  test('an application-owned emoji renders even when the input is a bare snowflake', async () => {
+    // The tolerant formats `.env.example` advertises all have to reach the same
+    // markup, otherwise the documentation is a lie.
+    const original = config.dryRun.emoji;
+    try {
+      for (const input of ['1552379447246852146', 'zak_yap', ':zak_yap:', '<a:zak_yap:1552379447246852146>']) {
+        config.dryRun.emoji = input;
+        const fake = fakeInteraction({ message: `format: ${input}` });
+        await dryRunCommand.execute(fake.interaction as never);
+        expect(fake.edits[0]?.content).toBe(RESOLVED_ZAK_YAP);
+      }
+    } finally {
+      config.dryRun.emoji = original;
+    }
   });
 
   test('the reply is ephemeral', async () => {
@@ -249,7 +295,7 @@ describe('/dryrun — what it says', () => {
 
     // The reply says the placeholder was used, because the dashboard's `prompt`
     // column would otherwise read as though real input had been given.
-    expect(fake.edits[0]?.content).toContain(config.dryRun.emoji);
+    expect(fake.edits[0]?.content).toContain(RESOLVED_ZAK_YAP);
     expect(fake.edits[0]?.content).toContain('no message supplied');
 
     // And the placeholder is unmistakable in the log itself.
@@ -275,6 +321,46 @@ describe('/dryrun — what it says', () => {
     for (const recorded of [...fake.edits, ...fake.replies, ...fake.followUps]) {
       expect(recorded.content ?? '').not.toContain('do not post me');
       expect(recorded.content ?? '').not.toContain('[system]');
+    }
+  });
+});
+
+describe('/dryrun — an emoji it cannot resolve', () => {
+  test('it says so rather than posting markup that will not render', async () => {
+    // A bot whose emoji caches hold nothing has no way to render the configured
+    // value. Posting it verbatim would look exactly like the bug this replaced,
+    // which is the one thing the operator debugging /dryrun cannot afford.
+    const fake = fakeInteraction({ message: 'no emoji cache', withEmojis: false });
+    await dryRunCommand.execute(fake.interaction as never);
+
+    expect(fake.edits).toHaveLength(1);
+    const content = fake.edits[0]?.content ?? '';
+    expect(content).toContain('could not resolve');
+    // It names the offending value, so the fix is a one-line env edit.
+    expect(content).toContain('DRY_RUN_EMOJI');
+    expect(content).toContain('1552379447246852146');
+
+    // It does not POST the markup. The value does appear in the message, but
+    // inside an inline-code span, which Discord does not parse as emoji — so
+    // what renders is a readable warning, not a half-broken emoji. Asserting on
+    // "does not start with the markup" is the precise claim; a bare
+    // "does not contain" would fail on a warning that helpfully quotes the value.
+    expect(content.startsWith('<')).toBe(false);
+    expect(content).toContain('`<:zak_yap:1552379447246852146>`');
+  });
+
+  test('a unicode emoji in DRY_RUN_EMOJI still passes straight through', async () => {
+    // The documented escape hatch for a per-install value, and it needs no
+    // cache entry to work.
+    const original = config.dryRun.emoji;
+    try {
+      config.dryRun.emoji = '🔥';
+      const fake = fakeInteraction({ message: 'unicode fallback', withEmojis: false });
+      await dryRunCommand.execute(fake.interaction as never);
+
+      expect(fake.edits[0]?.content).toBe('🔥');
+    } finally {
+      config.dryRun.emoji = original;
     }
   });
 });

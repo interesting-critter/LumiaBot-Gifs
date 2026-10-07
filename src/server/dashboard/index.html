@@ -598,16 +598,29 @@ details.reveal{border:0;background:none;box-shadow:none;backdrop-filter:none;-we
 .turn.is-user .role::before{content:"";width:.45rem;height:.45rem;border-radius:999px;background:var(--primary);flex:none}
 .turn .body{font-size:.875rem;white-space:pre-wrap;overflow-wrap:anywhere}
 /* Per-message delete. It sits on the role line rather than beside the body so
-   it cannot be mistaken for part of the transcript text, and it is muted until
-   the row is hovered or the button itself is focused — a transcript is read far
-   more often than it is pruned, so a permanently loud red control on every turn
-   is noise. */
+   it cannot be mistaken for part of the transcript text, and on a mouse-driven
+   UI it is muted until the row is hovered or the button itself is focused — a
+   transcript is read far more often than it is pruned, so a permanently loud red
+   control on every turn is noise.
+
+   That muting is gated on a real hover pointer rather than left in the base
+   rule, because touch devices never enter :hover: left ungated the button sat at
+   opacity 0 forever and was simply unreachable on a phone. Where there is no
+   hover to reveal it, it stays visible and grows to a 44px finger-sized target;
+   the destructive colour is still reserved for an actual pointer hover, so a
+   phone does not get a wall of red either. */
 .turn-head{display:flex;align-items:center;gap:.4rem;margin-bottom:.2rem}
 .turn-head .role{flex:1;min-width:0;margin-bottom:0}
 .turn-del{flex:none;width:1.9rem;height:1.9rem;display:inline-flex;align-items:center;justify-content:center;padding:0;border:1px solid var(--border);border-radius:999px;background:transparent;color:var(--muted-foreground);cursor:pointer;opacity:0;transition:opacity .15s}
-.turn:hover .turn-del,.turn-del:focus-visible{opacity:1}
+.turn-del:focus-visible{opacity:1}
 .turn-del:hover{border-color:var(--destructive);color:var(--destructive)}
 .turn-del:focus-visible{outline:2px solid var(--ring);outline-offset:2px}
+@media (hover:hover) and (pointer:fine){
+  .turn:hover .turn-del{opacity:1}
+}
+@media (hover:none),(pointer:coarse){
+  .turn-del{opacity:1;width:2.75rem;height:2.75rem}
+}
 
 /* ---- Persona editor ---- */
 /* The material layer gives every field a 9999px pill radius. That is right for

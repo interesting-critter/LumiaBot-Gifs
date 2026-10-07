@@ -261,7 +261,13 @@ Once the bot is running and invited to your server, use these slash commands:
   conversation-history entry is a short marker rather than the prompt, so a
   dry run cannot evict twenty real messages out of the rolling context window.
 
-  The reply is ephemeral and is just the configured `DRY_RUN_EMOJI`.
+  The reply is ephemeral and is just the configured `DRY_RUN_EMOJI`. That
+  value is resolved through the same emoji lookup the reaction path uses, so a
+  bare name, a bare snowflake, `<:name:id>`, `<a:name:id>` or a plain unicode
+  emoji all work. Application emoji (uploaded for this bot in the Developer
+  Portal) are resolved first and are what you want here — they render in any
+  channel the bot can post in, whereas a guild emoji only renders inside the
+  guild that owns its id.
 
 ## Rate Limiting
 

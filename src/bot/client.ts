@@ -21,6 +21,7 @@ import { rateLimiterService } from '../services/rate-limiter';
 import { buildAllowedMentions } from '../utils/permissions';
 import { assertPublicUrl, safeFetchText } from '../utils/safe-fetch';
 import { mediaAllowedHosts } from '../utils/media-allowlist';
+import { emojiLookupContext, resolveEmoji, toEmojiReactionForm } from '../utils/emoji';
 import type { InteractionSource } from '../services/dashboard-logger';
 
 export interface Command {
@@ -1599,47 +1600,17 @@ ${sections.join('\n\n')}
   /**
    * Resolves a raw emoji tag (name, :name:, <:name:id>, or unicode)
    * to a valid Discord.js reaction identifier (supports Developer Dashboard Application Emojis).
+   *
+   * A thin wrapper over {@link resolveEmoji} + {@link toEmojiReactionForm} in
+   * `src/utils/emoji.ts`. The lookup and its cache ordering live there so that
+   * message-content callers (which need `<a:name:id>`, a different output
+   * shape entirely) share one implementation with this reaction path instead
+   * of re-deriving it and drifting. Behaviour is unchanged.
    */
   private resolveEmojiReaction(emojiInput: string, guild?: Message['guild']): string {
-    const raw = emojiInput.trim();
-
-    // 1. If formatted as full custom emoji tag <:name:id> or <a:name:id>
-    const customMatch = raw.match(/^<a?:(\w+):(\d+)>$/);
-    if (customMatch) {
-      return `${customMatch[1]}:${customMatch[2]}`;
-    }
-
-    // 2. Strip surrounding colons if provided (e.g. ":my_emoji:" -> "my_emoji")
-    const cleanName = raw.replace(/^:|:$/g, '').toLowerCase();
-
-    // 3. Search Application Emojis (added in Developer Dashboard)
-    const appEmoji = this.client.application?.emojis.cache.find(
-      (e) => e.name?.toLowerCase() === cleanName || e.id === raw
+    return toEmojiReactionForm(
+      resolveEmoji(emojiInput, emojiLookupContext(this.client, guild))
     );
-    if (appEmoji) {
-      return `${appEmoji.name}:${appEmoji.id}`;
-    }
-
-    // 4. Search Guild/Server Emojis
-    if (guild) {
-      const guildEmoji = guild.emojis.cache.find(
-        (e) => e.name?.toLowerCase() === cleanName || e.id === raw
-      );
-      if (guildEmoji) {
-        return `${guildEmoji.name}:${guildEmoji.id}`;
-      }
-    }
-
-    // 5. Search Client Global Emoji cache
-    const globalEmoji = this.client.emojis.cache.find(
-      (e) => e.name?.toLowerCase() === cleanName || e.id === raw
-    );
-    if (globalEmoji) {
-      return `${globalEmoji.name}:${globalEmoji.id}`;
-    }
-
-    // 6. Fallback to raw string (standard unicode emoji like 🔥)
-    return raw;
   }
 
   /**

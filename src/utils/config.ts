@@ -386,13 +386,19 @@ export const config = {
     /**
      * The emoji `/dryrun` replies with once the pipeline has finished.
      *
-     * A named constant rather than an inline literal in the command, because it
-     * is a guild **custom** emoji: Discord only renders `<:name:id>` inside the
-     * guild that owns the id, and falls back to the literal `:name:` text
-     * everywhere else. That makes it a per-install value in practice, so it is
-     * overridable here rather than baked in — an operator whose bot is in a
-     * guild that does not own this emoji can point it at one that does (or at a
-     * plain unicode emoji, which renders identically everywhere).
+     * This is an **input**, not markup to paste: `/dryrun` runs it through the
+     * same resolver the reaction path uses (`src/utils/emoji.ts`), which
+     * accepts a bare name (`zak_yap`), a `:wrapped:` name, a bare snowflake
+     * (`1552379447246852146`), or full `<:name:id>` / `<a:name:id>` markup, and
+     * emits the correct *content* form for whatever it finds. The default is
+     * written as full markup only so it is recognisable; the `a` is added by the
+     * resolver because this id is an application-owned emoji.
+     *
+     * It is overridable per install: a plain unicode emoji renders identically
+     * everywhere, and a **guild** emoji only renders inside the guild that owns
+     * its id — so an operator whose bot is in a guild that does not own the
+     * configured emoji should point this at an application emoji or a unicode
+     * one instead.
      */
     emoji: strEnv('DRY_RUN_EMOJI', '<:zak_yap:1552379447246852146>'),
   },
