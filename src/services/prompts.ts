@@ -2,6 +2,14 @@ import { existsSync, readdirSync, readFileSync, statSync, type Dirent } from 'no
 import { resolve, sep } from 'node:path';
 import { config } from '../utils/config';
 import { PROMPT_STORAGE_DIR } from '../utils/paths';
+import {
+  applyCompiledPromptRewrites,
+  compilePromptRewriteRules,
+  normalizePromptRewriteRules,
+  rewriteGeminiContents,
+  rewriteOpenAIMessages,
+  type CompiledPromptRewrite,
+} from '../utils/prompt-rewrites';
 
 // Template variable substitutions
 interface TemplateVariables {
@@ -602,6 +610,123 @@ export function getMemorySystemTemplate(variables: {
   }
   
   return substituteVariables(result);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Outbound prompt rewrites — `config/rewrites.json`
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * An ordered list of text substitutions applied to the FINAL assembled prompt,
+ * immediately before it is handed to a provider. The motivating case is an
+ * operator who wants the model to call them "Critter" rather than by their
+ * Discord username or their decorative display name.
+ *
+ * WHY A PROMPT FILE AND NOT CODE
+ * -----------------------------
+ * It is operator-owned tuning, exactly like `config/triggers.json`: the same
+ * per-file profile overlay applies (`profiles/<id>/config/rewrites.json`
+ * overrides just this file), the same cache keyed on the resolved absolute path
+ * applies, and the dashboard's file browser and hot-reload work on it with no
+ * extra wiring. That is the whole reason this is a getter in this module rather
+ * than a bespoke reader somewhere else.
+ *
+ * WHERE IT RUNS, AND WHAT IT DELIBERATELY DOES NOT TOUCH
+ * ------------------------------------------------------
+ * Only on the outbound API call, and only on a copy. Stored conversation
+ * history, the database and the dashboard's activity log all keep the original
+ * text — a log that showed "Critter" where the channel said "dumb.critter"
+ * would be a log that cannot be trusted to debug a name problem. The transform
+ * is applied after template-variable substitution and after profile resolution,
+ * so derived text (`{botName}`, `<current-user name="…">`, memory context) is
+ * covered too.
+ *
+ * DEGRADES, NEVER THROWS
+ * ----------------------
+ * A missing file, unparseable JSON, or a malformed rule all resolve to "fewer
+ * rewrites". This runs on the send path of every turn; a hand-edited config
+ * file must not be able to take the bot's replies down.
+ */
+
+/**
+ * Compiled rules, memoised on the parsed object `loadJsonFile` hands back.
+ *
+ * A `WeakMap` for the same reason as `renderTriggerKeywords` above: the keys are
+ * the objects in this module's own `promptCache`, so an entry becomes
+ * unreachable the instant the cache is cleared and nothing needs to evict it by
+ * hand. Compilation is per-rule `new RegExp` plus escaping, which is not free to
+ * redo once per message part on a hot path.
+ */
+const compiledPromptRewrites = new WeakMap<object, CompiledPromptRewrite[]>();
+
+/**
+ * The parsed contents of `config/rewrites.json`, or `null` when there is no
+ * usable file.
+ *
+ * `loadJsonFile` already logs a warning and returns `null` for a missing file or
+ * for unparseable JSON; the extra guard here is for the case where the file
+ * *parses* into something that is not an object at all (`"hello"`, `42`).
+ */
+function loadRewriteConfig(): object | null {
+  const parsed = loadJsonFile<unknown>('config/rewrites.json');
+  if (parsed === null || typeof parsed !== 'object') return null;
+  return parsed as object;
+}
+
+/**
+ * The compiled rewrite rules for the active profile, empty when none are
+ * configured.
+ *
+ * Safe to call on every turn: the common case is a file that does not exist, in
+ * which case this returns a shared empty array and the caller short-circuits.
+ */
+export function getPromptRewriteRules(): CompiledPromptRewrite[] {
+  const source = loadRewriteConfig();
+  if (!source) return [];
+
+  const cached = compiledPromptRewrites.get(source);
+  if (cached) return cached;
+
+  const compiled = compilePromptRewriteRules(normalizePromptRewriteRules(source));
+  compiledPromptRewrites.set(source, compiled);
+  return compiled;
+}
+
+/**
+ * Apply the configured rewrites to one already-assembled string.
+ *
+ * This is the system-prompt half. Call it on the FINAL assembled text — after
+ * every template substitution and every conditional block — so that derived text
+ * is covered, not just the source files.
+ */
+export function applyPromptRewrites(text: string): string {
+  return applyCompiledPromptRewrites(text, getPromptRewriteRules());
+}
+
+/**
+ * Apply the rewrites to an OpenAI-shaped message array, returning a copy.
+ *
+ * The system message is included: it carries `<current-user name="…">` and
+ * `<mentioned-users>`. The caller's array and its objects are never mutated, so
+ * whoever captured the payload for the dashboard log first still holds the
+ * original text.
+ */
+export function applyPromptRewritesToMessages<T extends object>(
+  messages: readonly T[],
+): T[] {
+  return rewriteOpenAIMessages(messages, getPromptRewriteRules());
+}
+
+/**
+ * Apply the rewrites to Gemini `contents`, returning a copy.
+ *
+ * Gemini keeps the persona out of `contents` (it travels as `systemInstruction`),
+ * so the caller rewrites that string separately with
+ * {@link applyPromptRewrites}.
+ */
+export function applyPromptRewritesToGeminiContents<T extends object>(
+  contents: readonly T[],
+): T[] {
+  return rewriteGeminiContents(contents, getPromptRewriteRules());
 }
 
 /**

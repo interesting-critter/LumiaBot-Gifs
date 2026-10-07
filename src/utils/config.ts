@@ -382,6 +382,20 @@ export const config = {
   conversation: {
     maxHistoryLength: intEnv('CONVERSATION_MAX_HISTORY', 20, { min: 1 }),
   },
+  dryRun: {
+    /**
+     * The emoji `/dryrun` replies with once the pipeline has finished.
+     *
+     * A named constant rather than an inline literal in the command, because it
+     * is a guild **custom** emoji: Discord only renders `<:name:id>` inside the
+     * guild that owns the id, and falls back to the literal `:name:` text
+     * everywhere else. That makes it a per-install value in practice, so it is
+     * overridable here rather than baked in — an operator whose bot is in a
+     * guild that does not own this emoji can point it at one that does (or at a
+     * plain unicode emoji, which renders identically everywhere).
+     */
+    emoji: strEnv('DRY_RUN_EMOJI', '<:zak_yap:1552379447246852146>'),
+  },
   channel: {
     maxHistoryLength: intEnv('CHANNEL_MAX_HISTORY', 20, { min: 1 }),
   },

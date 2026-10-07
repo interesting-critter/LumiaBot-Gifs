@@ -38,6 +38,8 @@ import {
   filterReasoningContent,
   getUntrustedDataClause,
   sanitizePromptAttribute,
+  applyPromptRewrites,
+  applyPromptRewritesToGeminiContents,
 } from './prompts';
 
 /**
@@ -208,10 +210,30 @@ export interface ChatCompletionOptions {
   isNsfwChannel?: boolean;
   allowNsfwImageGeneration?: boolean;
   isGifEnabled?: boolean;
+  /**
+   * Assemble the request exactly as a real turn would, then return the payload
+   * instead of sending it. Set by `/dryrun` (see `handleMessage`'s `dryRun`).
+   *
+   * It has to live HERE rather than in the caller: `buildSystemPrompt()` and
+   * `convertMessages()` are private to this service, so a caller that wants to
+   * see what would be sent has no other way to get it. The short-circuit is
+   * taken after the payload is final and immediately before the send, so every
+   * stage that could alter it still runs — and nothing after that point can
+   * reach the network.
+   *
+   * Not honoured by `streamChatCompletion`, for the same reason as the OpenAI
+   * twin: a generator cannot return a value, and nothing in the codebase calls
+   * that path with `dryRun` set.
+   */
+  dryRun?: boolean;
   onImageGenerated?: (image: GeneratedImageAttachment) => void;
   /**
    * Called with the exact payload handed to Gemini, rendered as readable text,
    * once the system prompt and contents are final.
+   *
+   * For a `dryRun` turn this is the POST-rewrite payload (it fires after the
+   * rewrite hook rather than before it). That divergence from a normal turn is
+   * deliberate — see the dry-run return below.
    */
   onFullPrompt?: (fullPrompt: string) => void;
 }
@@ -1892,40 +1914,90 @@ Use this sparingly and naturally when a reaction enhances your response.
       }
 
 
+      // Render the outbound payload the way the dashboard's full-prompt view
+      // does. Shared by the normal capture below and the dry-run return further
+      // down, so both describe the same thing and cannot drift. Takes the system
+      // prompt as an argument rather than closing over the local because the two
+      // callers hand it different halves: below it is the pre-rewrite persona,
+      // and in the dry run it is the rewritten one.
+      const renderOutboundPrompt = (
+        systemText: string,
+        outbound: typeof contents,
+      ): string =>
+        formatPromptForLog(
+          systemText,
+          outbound.map((c) => ({
+            role: c.role === 'model' ? 'assistant' : 'user',
+            content: ((c as { parts?: Array<{ text?: string; inlineData?: unknown }> }).parts ?? [])
+              .map((part) => {
+                if (typeof part.text === 'string') return part.text;
+                if (part.inlineData) return '[attachment]';
+                return '';
+              })
+              .filter(Boolean)
+              .join('\n'),
+          })),
+        );
+
       // Hand the caller the final payload for the dashboard log. Placed after the
       // persona directive so the capture matches what Gemini receives. Gemini
       // carries the persona as a separate systemInstruction, so both halves join.
-      if (options.onFullPrompt) {
+      //
+      // Skipped for a dry run, which captures the POST-rewrite payload instead
+      // (further down). Capturing both would call `onFullPrompt` twice for one
+      // turn, and the dashboard log stores a single `fullPrompt` per entry, so
+      // the second call would silently win.
+      if (options.onFullPrompt && !options.dryRun) {
         try {
-          options.onFullPrompt(
-            formatPromptForLog(
-              systemPrompt,
-              contents.map((c) => ({
-                role: c.role === 'model' ? 'assistant' : 'user',
-                content: ((c as { parts?: Array<{ text?: string; inlineData?: unknown }> }).parts ?? [])
-                  .map((part) => {
-                    if (typeof part.text === 'string') return part.text;
-                    if (part.inlineData) return '[attachment]';
-                    return '';
-                  })
-                  .filter(Boolean)
-                  .join('\n'),
-              }))
-            )
-          );
+          options.onFullPrompt(renderOutboundPrompt(systemPrompt, contents));
         } catch (promptLogError) {
           console.error('⚠️ [GEMINI] Failed to capture full prompt for the dashboard log:', promptLogError);
         }
       }
 
-      const genConfig = this.buildConfig(options, systemPrompt);
+      // Operator rewrite rules (`config/rewrites.json`), applied to COPIES at the
+      // send boundary — deliberately after the `onFullPrompt` capture above, so
+      // the dashboard log keeps the original names it was handed. Gemini splits
+      // the payload in two (persona as `systemInstruction`, turns as `contents`),
+      // so both halves are rewritten here rather than inside `buildSystemPrompt`.
+      const outboundSystemPrompt = applyPromptRewrites(systemPrompt);
+      const outboundContents = applyPromptRewritesToGeminiContents(contents);
 
-      console.log(`🔮 [Google GenAI] Sending ${contents.length} messages to ${this.model}`);
-      console.log(`🎭 [Google GenAI] System instruction: ${systemPrompt.substring(0, 50)}... (${systemPrompt.length} chars)`);
+      // ── DRY RUN ──────────────────────────────────────────────────────────
+      // Placed AFTER the rewrite hook, not next to the capture above, and that
+      // ordering is the point of the whole feature.
+      //
+      // The capture above deliberately logs the PRE-rewrite text, because for a
+      // normal turn the dashboard is a record of what the channel said and must
+      // keep the operator's real names. A dry run is the opposite question: the
+      // operator is asking "what would actually have gone out?", and rewrites are
+      // now a feature, so someone debugging one needs to see the rewritten form.
+      // Returning here — after both halves are rewritten, before `buildConfig`,
+      // before `generateWithRetry` — is the earliest point at which the answer is
+      // both complete and unreachable-by-accident.
+      if (options.dryRun) {
+        const rendered = renderOutboundPrompt(outboundSystemPrompt, outboundContents);
+        console.log(
+          `🧪 [DRY RUN] Assembled prompt (${rendered.length} chars, ${outboundContents.length} contents) — no request sent`,
+        );
+        if (options.onFullPrompt) {
+          try {
+            options.onFullPrompt(rendered);
+          } catch (promptLogError) {
+            console.error('⚠️ [GEMINI] Failed to capture full prompt for the dry run:', promptLogError);
+          }
+        }
+        return rendered;
+      }
+
+      const genConfig = this.buildConfig(options, outboundSystemPrompt);
+
+      console.log(`🔮 [Google GenAI] Sending ${outboundContents.length} messages to ${this.model}`);
+      console.log(`🎭 [Google GenAI] System instruction: ${outboundSystemPrompt.substring(0, 50)}... (${outboundSystemPrompt.length} chars)`);
       console.log(`🧠 [Google GenAI] Thinking disabled via native thinkingConfig`);
 
       // Use retry logic to handle empty responses
-      const content = await this.generateWithRetry(contents, genConfig, options);
+      const content = await this.generateWithRetry(outboundContents, genConfig, options);
 
       console.log(`🔮 [Google GenAI] Response received: ${content.length} chars`);
 
@@ -1943,6 +2015,17 @@ Use this sparingly and naturally when a reaction enhances your response.
    * Matches the OpenAIService interface
    */
   async *streamChatCompletion(options: ChatCompletionOptions): AsyncGenerator<string> {
+    // A dry run is refused outright rather than silently ignored. A generator
+    // cannot "return the payload instead of sending it" without either yielding
+    // it as if it were model output (which would be a lie the caller cannot
+    // detect) or throwing from the first `next()`. Throwing once, loudly, at the
+    // top is the only honest option: the one contract a streaming path can keep
+    // is "I will never contact the model for a dry run", and this keeps it.
+    // Nothing in the codebase calls this path with `dryRun` set.
+    if (options.dryRun) {
+      throw new Error('streamChatCompletion does not support dryRun; use createChatCompletion');
+    }
+
     try {
       console.log(`🔮 [Google GenAI] Starting streaming completion...`);
 
@@ -1977,16 +2060,22 @@ Use this sparingly and naturally when a reaction enhances your response.
         }
       }
 
-      const genConfig = this.buildConfig(options, systemPrompt);
+      // Same send-boundary rewrite as the non-streaming path above. No `onFullPrompt`
+      // capture exists on this path, so the only ordering constraint is that the
+      // rewrite happens after the payload is fully assembled.
+      const outboundSystemPrompt = applyPromptRewrites(systemPrompt);
+      const outboundContents = applyPromptRewritesToGeminiContents(contents);
 
-      console.log(`🔮 [Google GenAI] Streaming ${contents.length} messages to ${this.model}`);
-      console.log(`🎭 [Google GenAI] System instruction: ${systemPrompt.substring(0, 50)}... (${systemPrompt.length} chars)`);
+      const genConfig = this.buildConfig(options, outboundSystemPrompt);
+
+      console.log(`🔮 [Google GenAI] Streaming ${outboundContents.length} messages to ${this.model}`);
+      console.log(`🎭 [Google GenAI] System instruction: ${outboundSystemPrompt.substring(0, 50)}... (${outboundSystemPrompt.length} chars)`);
       console.log(`🧠 [Google GenAI] Thinking disabled via native thinkingConfig`);
 
       recordApiCall('gemini-stream', this.model);
       const stream = await this.client.models.generateContentStream({
         model: this.model,
-        contents,
+        contents: outboundContents,
         config: genConfig,
       });
 

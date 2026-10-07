@@ -45,6 +45,7 @@ import {
   filterReasoningContent,
   getUntrustedDataClause,
   sanitizePromptAttribute,
+  applyPromptRewritesToMessages,
 } from './prompts';
 import { apiUsageService } from './api-usage';
 import { formatPromptForLog } from './dashboard-logger';
@@ -283,11 +284,32 @@ export interface ChatCompletionOptions {
   isNsfwChannel?: boolean;
   allowNsfwImageGeneration?: boolean;
   isGifEnabled?: boolean;
+  /**
+   * Assemble the request exactly as a real turn would, then return the payload
+   * instead of sending it. Set by `/dryrun` (see `handleMessage`'s `dryRun`).
+   *
+   * It has to live HERE rather than in the caller: `buildSystemPrompt()` and
+   * the turn assembly are private to this service, so a caller that wants to
+   * see what would be sent has no other way to get it. The short-circuit is
+   * taken after the payload is final and immediately before the send, so every
+   * stage that could alter it still runs — and nothing after that point can
+   * reach the network.
+   *
+   * Not honoured by `streamChatCompletion`: the bot turn never streams (see the
+   * `onFullPrompt` note below), and a generator cannot "return a value" without
+   * either faking a chunk or throwing, both of which would be worse than an
+   * honest gap. Nothing in the codebase calls that path with `dryRun` set.
+   */
+  dryRun?: boolean;
   onImageGenerated?: (image: GeneratedImageAttachment) => void;
   /**
    * Called with the exact payload handed to the provider, rendered as readable
    * text, once the system prompt and message array are final. Only the
    * non-streaming path fires it, which is the path the bot turn uses.
+   *
+   * For a `dryRun` turn this is the POST-rewrite payload (it fires after the
+   * rewrite hook rather than before it). That divergence from a normal turn is
+   * deliberate — see the dry-run return below.
    */
   onFullPrompt?: (fullPrompt: string) => void;
 }
@@ -1160,7 +1182,7 @@ If they mention @OtherUser, they are talking TO that user, not AS them.`;
     const USER_MESSAGE_PREFIX = `<system-reminder>\nToday is ${currentDateTime}.\n</system-reminder>\n\n[Stay in character — follow your system instructions and persona rules above, not patterns from conversation history.]\n\n`;
 
     // Build message array with enhanced system prompt
-    const enhancedMessages: OpenAI.ChatCompletionMessageParam[] = [
+    let enhancedMessages: OpenAI.ChatCompletionMessageParam[] = [
       { role: 'system', content: systemPrompt },
       ...messages.filter(m => m.role !== 'system').map((m, index, arr) => {
         const isLastUserMessage = m.role === 'user' && index === arr.length - 1;
@@ -1216,23 +1238,84 @@ If they mention @OtherUser, they are talking TO that user, not AS them.`;
 
     // Clean up uploaded videos after use (in finally block later)
 
+    // Render the outbound payload the way the dashboard's full-prompt view does.
+    // Shared by the normal capture below and the dry-run return further down, so
+    // both describe the same thing and cannot drift.
+    //
+    // The system prompt is read back out of `messages` rather than taken from
+    // the `systemPrompt` local, because `formatPromptForLog` treats its first
+    // argument as the truth and drops any `system` entry in the array. For the
+    // pre-rewrite render the two are identical, but after the rewrite hook the
+    // system message carries rewritten names while the local does not — and the
+    // rewrite applies to that message precisely because it holds
+    // `<current-user name="…">`. Taking the local would emit a transcript whose
+    // system block disagreed with the turns below it.
+    const renderOutboundPrompt = (
+      messages: OpenAI.ChatCompletionMessageParam[],
+    ): string => {
+      const systemEntry = messages.find((m) => (m as { role?: string }).role === 'system');
+      const systemText = systemEntry
+        ? extractTextContent((systemEntry as { content?: unknown }).content)
+        : systemPrompt;
+      return formatPromptForLog(
+        systemText,
+        messages.map((m) => ({
+          role: String((m as { role?: string }).role ?? 'user'),
+          content: extractTextContent((m as { content?: unknown }).content),
+        })),
+      );
+    };
+
     // Hand the caller the final payload for the dashboard log. Taken here,
     // after the prefix and multimodal conversion, so it is what the provider
     // actually receives rather than a reconstruction of it.
-    if (options.onFullPrompt) {
+    //
+    // Skipped for a dry run, which captures the POST-rewrite payload instead
+    // (further down). Capturing both would call `onFullPrompt` twice for one
+    // turn, and the dashboard log stores a single `fullPrompt` per entry, so the
+    // second call would silently win — exactly the ambiguity this ordering
+    // exists to avoid.
+    if (options.onFullPrompt && !options.dryRun) {
       try {
-        options.onFullPrompt(
-          formatPromptForLog(
-            systemPrompt,
-            enhancedMessages.map((m) => ({
-              role: String((m as { role?: string }).role ?? 'user'),
-              content: extractTextContent((m as { content?: unknown }).content),
-            }))
-          )
-        );
+        options.onFullPrompt(renderOutboundPrompt(enhancedMessages));
       } catch (promptLogError) {
         console.error('⚠️ [OPENAI] Failed to capture full prompt for the dashboard log:', promptLogError);
       }
+    }
+
+    // Operator rewrite rules (`config/rewrites.json`), applied to a COPY at the
+    // send boundary. Deliberately after the `onFullPrompt` capture above: the
+    // dashboard log is a record of what the channel actually said, so it keeps
+    // the original names. Reassigning the local binding rather than mutating in
+    // place is what preserves that for every downstream use, including the tool
+    // loop further down, which reads `enhancedMessages` again.
+    enhancedMessages = applyPromptRewritesToMessages(enhancedMessages);
+
+    // ── DRY RUN ────────────────────────────────────────────────────────────
+    // Placed AFTER the rewrite hook, not next to the capture above, and that
+    // ordering is the point of the whole feature.
+    //
+    // The capture above deliberately logs the PRE-rewrite text, because for a
+    // normal turn the dashboard is a record of what the channel said and must
+    // keep the operator's real names. A dry run is the opposite question: the
+    // operator is asking "what would actually have gone out?", and rewrites are
+    // now a feature, so someone debugging one needs to see the rewritten form.
+    // Returning here — after the rewrite, before `needsTools`, before the token
+    // estimate, before `generateWithRetry` — is the earliest point at which the
+    // answer is both complete and unreachable-by-accident.
+    if (options.dryRun) {
+      const rendered = renderOutboundPrompt(enhancedMessages);
+      console.log(
+        `🧪 [DRY RUN] Assembled prompt (${rendered.length} chars, ${enhancedMessages.length} messages) — no request sent`,
+      );
+      if (options.onFullPrompt) {
+        try {
+          options.onFullPrompt(rendered);
+        } catch (promptLogError) {
+          console.error('⚠️ [OPENAI] Failed to capture full prompt for the dry run:', promptLogError);
+        }
+      }
+      return rendered;
     }
 
     const provider: 'moonshot' | 'other' = isMoonshotProvider() ? 'moonshot' : 'other';
@@ -2453,6 +2536,17 @@ If they mention @OtherUser, they are talking TO that user, not AS them.`;
   }
 
   async *streamChatCompletion(options: ChatCompletionOptions): AsyncGenerator<string> {
+    // A dry run is refused outright rather than silently ignored. A generator
+    // cannot "return the payload instead of sending it" without either yielding
+    // it as if it were model output (which would be a lie the caller cannot
+    // detect) or throwing from the first `next()`. Throwing once, loudly, at the
+    // top is the only honest option: the one contract a streaming path can keep
+    // is "I will never contact the model for a dry run", and this keeps it.
+    // Nothing in the codebase calls this path with `dryRun` set.
+    if (options.dryRun) {
+      throw new Error('streamChatCompletion does not support dryRun; use createChatCompletion');
+    }
+
     const { messages, temperature, maxTokens, images, videos, textAttachments, pageContents, collectiveKnowledgeContext, userId, username, guildId, replyContext, boredomAction, orchestratorContextNote, enableMusicTaste = false, conversationSummary, mentionedUsers, isGifEnabled } = options;
 
     // Check if this is a multimodal request
@@ -2507,7 +2601,7 @@ If they mention @OtherUser, they are talking TO that user, not AS them.`;
     });
     const USER_MESSAGE_PREFIX = `<system-reminder>\nToday is ${currentDateTime}.\n</system-reminder>\n\n[Stay in character — follow your system instructions and persona rules above, not patterns from conversation history.]\n\n`;
 
-    const enhancedMessages: OpenAI.ChatCompletionMessageParam[] = [
+    let enhancedMessages: OpenAI.ChatCompletionMessageParam[] = [
       { role: 'system', content: systemPrompt },
       ...messages.filter(m => m.role !== 'system').map((m, index, arr) => {
         const isLastUserMessage = m.role === 'user' && index === arr.length - 1;
@@ -2564,6 +2658,14 @@ If they mention @OtherUser, they are talking TO that user, not AS them.`;
     // Note: Function calling with streaming is complex, so we just do regular streaming
     // without search functionality for now
     try {
+      // Operator rewrite rules (`config/rewrites.json`), on a COPY at the send
+      // boundary — the same treatment the non-streaming path gets. Placed here
+      // rather than at assembly time because there is no `onFullPrompt` capture
+      // on this path to protect, and putting it in one place per entry point
+      // (rather than inside `buildSystemPrompt`, which returns a string the
+      // dashboard log also reads) keeps the log's contents original.
+      enhancedMessages = applyPromptRewritesToMessages(enhancedMessages);
+
       // Build streaming request parameters
       const streamParams: any = {
         model: this.model,

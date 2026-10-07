@@ -597,6 +597,17 @@ details.reveal{border:0;background:none;box-shadow:none;backdrop-filter:none;-we
 .turn.is-user .role{font-weight:700;color:var(--foreground)}
 .turn.is-user .role::before{content:"";width:.45rem;height:.45rem;border-radius:999px;background:var(--primary);flex:none}
 .turn .body{font-size:.875rem;white-space:pre-wrap;overflow-wrap:anywhere}
+/* Per-message delete. It sits on the role line rather than beside the body so
+   it cannot be mistaken for part of the transcript text, and it is muted until
+   the row is hovered or the button itself is focused — a transcript is read far
+   more often than it is pruned, so a permanently loud red control on every turn
+   is noise. */
+.turn-head{display:flex;align-items:center;gap:.4rem;margin-bottom:.2rem}
+.turn-head .role{flex:1;min-width:0;margin-bottom:0}
+.turn-del{flex:none;width:1.9rem;height:1.9rem;display:inline-flex;align-items:center;justify-content:center;padding:0;border:1px solid var(--border);border-radius:999px;background:transparent;color:var(--muted-foreground);cursor:pointer;opacity:0;transition:opacity .15s}
+.turn:hover .turn-del,.turn-del:focus-visible{opacity:1}
+.turn-del:hover{border-color:var(--destructive);color:var(--destructive)}
+.turn-del:focus-visible{outline:2px solid var(--ring);outline-offset:2px}
 
 /* ---- Persona editor ---- */
 /* The material layer gives every field a 9999px pill radius. That is right for
@@ -734,6 +745,7 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
                 <option value="orchestrator">Orchestrator</option>
                 <option value="boredom">Boredom</option>
                 <option value="slash-command">Slash commands</option>
+                <option value="dry-run">Dry runs</option>
               </select>
             </div>
             <div class="ds-field">
@@ -1217,12 +1229,16 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
   var SOURCE_LABEL = {
     mention: 'mention', keyword: 'keyword', reply: 'reply',
     orchestrator: 'orchestrator', boredom: 'boredom',
-    'slash-command': 'slash command', unknown: 'unknown'
+    'slash-command': 'slash command', 'dry-run': 'dry run', unknown: 'unknown'
   };
+  // `dry-run` gets no badge colour of its own. Its entries are the only ones in
+  // this log whose `response` field is a marker rather than model output, so
+  // the label alone has to carry that; a colour would suggest a status it does
+  // not have.
   var SOURCE_BADGE = {
     mention: 'ds-badge-verified', keyword: 'ds-badge-primary', reply: '',
     orchestrator: 'ds-badge-safe', boredom: 'ds-badge-warn',
-    'slash-command': '', unknown: ''
+    'slash-command': '', 'dry-run': '', unknown: ''
   };
   function sourceBadge(source) {
     return '<span class="ds-badge ' + (SOURCE_BADGE[source] || '') + '">' +
@@ -2391,9 +2407,21 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
 
         // Newest first reads better for a transcript you are auditing.
         var turns = conv.messages.slice().reverse().map(function (m) {
-          return '<div class="turn' + (m.role === 'user' ? ' is-user' : '') + '">' +
-            '<div class="role">' + (m.role === 'user' ? 'They said' : 'Bot replied') +
-              '<span>' + esc(clockTimeShort(m.timestamp)) + '</span></div>' +
+          return '<div class="turn' + (m.role === 'user' ? ' is-user' : '') + '" data-msg-id="' +
+              esc(String(m.id)) + '">' +
+            '<div class="turn-head">' +
+              '<div class="role">' + (m.role === 'user' ? 'They said' : 'Bot replied') +
+                '<span>' + esc(clockTimeShort(m.timestamp)) + '</span></div>' +
+              // The row id is only useful as a delete handle, so it stays on the
+              // element rather than in a parallel lookup that could drift out of
+              // step with the rendered order.
+              '<button class="turn-del" data-act="del-msg" data-msg-id="' + esc(String(m.id)) +
+                '" title="Delete this message" aria-label="Delete this message">' +
+                '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+                'stroke-width="2" stroke-linecap="round" aria-hidden="true">' +
+                '<path d="M18 6 6 18M6 6l12 12"/></svg>' +
+              '</button>' +
+            '</div>' +
             '<div class="body">' + esc(m.content) + '</div>' +
           '</div>';
         }).join('');
@@ -2457,6 +2485,46 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
 
     if (act === 'toggle-conv') {
       openConversation(target.closest('.xcard'));
+      return;
+    }
+
+    // Single-message delete. The turn is spliced out of the DOM rather than
+    // re-fetched: reloading the whole conversation would also drop the row the
+    // operator just acted on and re-expand nothing else they were reading. The
+    // two "Messages"/"Last activity" facts are stale once a turn disappears, so
+    // they are re-derived from what is left rather than left showing the old
+    // count. If the last turn goes, the transcript is replaced with an empty
+    // state — the header row is still there, so the collapse stays open.
+    if (act === 'del-msg') {
+      var msgId = target.dataset.msgId;
+      var msgUserId = target.closest('.xcard').dataset.userId;
+      var msgGuildId = target.closest('.xcard').dataset.guildId;
+      if (!confirm('Delete this single message from the stored conversation?')) return;
+      target.disabled = true;
+      api('/api/conversations/' + encodeURIComponent(msgUserId) + '/' + encodeURIComponent(msgGuildId) +
+          '/' + encodeURIComponent(msgId), { method: 'DELETE' })
+        .then(function (res) {
+          toast('Deleted ' + plural(res.removed, 'message'), 'ok');
+          var turn = target.closest('.turn');
+          var body = target.closest('.xbody');
+          if (turn) turn.remove();
+          // `plural` reads the row count off the DOM rather than a counter
+          // variable, so the fact strip cannot disagree with the list above it.
+          var remaining = body ? body.querySelectorAll('.turn').length : 0;
+          var countFact = body ? body.querySelector('.fact dd') : null;
+          if (countFact) countFact.textContent = String(remaining);
+          if (remaining === 0 && body) {
+            body.innerHTML = '<div class="empty">No stored messages in this conversation.</div>';
+          }
+          // The per-conversation counts in the collapsed headers come from the
+          // list endpoint, so that one does need a reload — it is a cheap
+          // re-render of a page the operator is not mid-read in.
+          loadConversations();
+        })
+        .catch(function (err) {
+          target.disabled = false;
+          toast(err.message, 'bad');
+        });
       return;
     }
 
