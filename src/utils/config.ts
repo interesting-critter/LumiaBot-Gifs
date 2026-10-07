@@ -41,6 +41,7 @@ const BOUNDED_ENV_VARS: ReadonlyArray<{
   { key: 'DASHBOARD_USAGE_WINDOW_HOURS', min: 1 },
   { key: 'LLM_DAILY_REQUEST_LIMIT', min: 0 },
   { key: 'DASHBOARD_LOG_MAX_ENTRIES', min: 1 },
+  { key: 'GUILD_PROFILES_MAX', min: 1, max: 12 },
 ];
 
 function parseKnowledgeSourceMode(value: string | undefined): 0 | 1 | 2 {
@@ -267,6 +268,255 @@ export function parseModelPromptProfiles(
 }
 
 /**
+ * One entry of `GUILD_PROMPT_PROFILES`: a Discord guild snowflake and the label
+ * the operator gave it.
+ *
+ * The label is *not* a Discord identifier and is never matched against one. It
+ * has two jobs, both operator-facing:
+ *   - it is the name shown for this guild in the dashboard's guild list, and
+ *   - it is the guild's **own prompt profile folder**,
+ *     `prompt_storage/profiles/<label>/`.
+ *
+ * That second job is why the label has to satisfy
+ * {@link PROMPT_PROFILE_ID_PATTERN}: a profile id is joined onto a directory, and
+ * the path-traversal boundary around that join is the validator above. Because
+ * the label *is* the folder name, "My Cool Guild" is not a label this feature
+ * can accept — see rule 9 in {@link parseGuildPromptProfiles}.
+ */
+export interface GuildPromptProfileEntry {
+  label: string;
+  guildId: string;
+}
+
+/**
+ * A Discord snowflake: 16–20 digits.
+ *
+ * Deliberately shape-checked rather than merely "non-empty". The guild id is
+ * the only field here that is ever matched against Discord, so a mistyped id is
+ * the failure mode this feature is most prone to: it is not an error anywhere,
+ * it simply never matches, and the guild quietly keeps using the main-page
+ * persona while the operator believes the `.env` change took effect. Rejecting
+ * it loudly at boot converts a silent no-op into a line in the log.
+ *
+ * The 16-digit floor is a real 2015-era snowflake width; the 20-digit ceiling
+ * leaves headroom for the next ~35 years of id growth (Discord's ids are
+ * millisecond-since-epoch based), so it will not become a bug that rejects valid
+ * guilds. Discord has never issued ids outside this shape.
+ */
+const DISCORD_SNOWFLAKE_PATTERN = /^\d{16,20}$/;
+
+/**
+ * Upper bound on a guild label's length.
+ *
+ * The label is rendered in the dashboard (a card heading, and the folder name
+ * in the persona view's group labels) and appears verbatim in several warning
+ * lines at boot. 64 characters is far longer than any sane label and short
+ * enough that a pasted paragraph — the realistic way to blow this — is caught
+ * rather than wrapping a layout or drowning the log. There is no lower bound
+ * beyond "non-empty": single-character profile ids are perfectly usable.
+ */
+const GUILD_PROMPT_LABEL_MAX_LENGTH = 64;
+
+/**
+ * Strip stray parentheses and surrounding whitespace from a label.
+ *
+ * `( Name )` is how an operator will *inevitably* write a label whose whole
+ * purpose is to be human-readable, so refusing it would fail the feature for
+ * being friendly rather than for being wrong. It is therefore **tolerated, not
+ * rejected**, and it is applied only to the label side: a guild id is a
+ * snowflake, and wrapping one in parens is a genuine typo rather than a
+ * formatting habit.
+ *
+ * Looped rather than single-pass so `( ( Name ) )` also collapses, and bounded
+ * by the length guard so a bare `(` is left alone for the emptiness/profile-id
+ * rules to reject with an accurate message.
+ */
+function normalizeGuildPromptLabel(raw: string): string {
+  let label = raw.trim();
+  while (label.length >= 2 && label.startsWith('(') && label.endsWith(')')) {
+    label = label.slice(1, -1).trim();
+  }
+  return label;
+}
+
+/**
+ * Parse `GUILD_PROMPT_PROFILES`: comma-separated `(label)=(guildId)` pairs naming
+ * the guilds allowed their own prompt profile.
+ *
+ * Format, with one entry per guild:
+ *
+ *     GUILD_PROMPT_PROFILES=(big-rpd)=123456789012345678,(other)=987654321098765432
+ *
+ * The philosophy is the same as {@link parseModelPromptProfiles} and follows the
+ * plan's decision — **bad entries are rejected loudly, good ones still load.** A
+ * single typo must not cost the operator the two entries they got right, and a
+ * silent drop is how somebody ends up convinced their per-guild persona is
+ * configured when nothing was ever read. So every rejection names the offending
+ * entry, and the drops are also summarised in one bordered block at the end
+ * rather than left scattered across the boot log.
+ *
+ * Unset/empty yields `[]`, which turns the whole feature off and leaves
+ * behaviour byte-identical to a build without it.
+ *
+ * Rules, in evaluation order per entry:
+ *   1. Not exactly one `=` (`a=b=c`) → dropped. Guessing which side was meant is
+ *      exactly how a binding ends up pointing somewhere else; same reasoning as
+ *      the `=` check in {@link parseModelPromptProfiles}.
+ *   2. Empty label or empty guild id → dropped.
+ *   3. Guild id not matching {@link DISCORD_SNOWFLAKE_PATTERN} → dropped, because
+ *      a mistyped snowflake silently matches no guild at all.
+ *   4. Label longer than {@link GUILD_PROMPT_LABEL_MAX_LENGTH} → dropped.
+ *   5. Duplicate guild id → **first wins**, later ones dropped. The operator
+ *      means the first one they wrote; the later ones are edits that were never
+ *      removed, and silently letting the last win would make the effective
+ *      config depend on ordering the operator cannot see.
+ *   6. Duplicate label → **allowed**. Labels are display text and folder names,
+ *      not keys — the dashboard and the resolution service both key on
+ *      `guildId`, so two guilds may legitimately share a label. Refusing it
+ *      would be enforcing a uniqueness property nothing depends on.
+ *   7. More than `maxGuilds` accepted entries → the extras are dropped with a
+ *      warning naming the cutoff, so the cap is visible rather than felt as an
+ *      entry the operator swears they wrote.
+ *   8. Label wrapped in stray parens/spaces → the parens are stripped and the
+ *      label trimmed (tolerated, not rejected). See
+ *      {@link normalizeGuildPromptLabel}.
+ *   9. Label that is not a usable profile id → dropped, **not slugified**. The
+ *      label doubles as the guild's profile folder name (§3.1 of the plan), and
+ *      the natural operator guess for "My Guild" is "MyGuild" — silently
+ *      renaming it would create a folder somewhere they did not expect and
+ *      quietly ignore the one they named. {@link isUsableProfileId} is reused
+ *      rather than re-implemented so this parser and
+ *      {@link parsePromptProfileIds} cannot drift apart on what a profile id is.
+ *
+ * Profile *existence* is not checked here — a configured guild's folder may
+ * legitimately not exist yet (that is how the operator creates the first
+ * override). Config must not touch the filesystem; that reconciliation belongs
+ * to the startup diagnostics, exactly as for `MODEL_PROMPT_PROFILES`.
+ *
+ * @param raw       the raw env value; blank entries and a blank string yield `[]`.
+ * @param maxGuilds ceiling on accepted entries, i.e. the operator-configured
+ *                  `GUILD_PROFILES_MAX` value rather than a literal, so raising
+ *                  the cap needs no code change.
+ */
+export function parseGuildPromptProfiles(
+  raw: string | undefined,
+  maxGuilds: number = 3,
+): GuildPromptProfileEntry[] {
+  // Defensive floor. `maxGuilds` normally arrives already clamped by `intEnv`
+  // (min 1), but this function is exported for unit tests and is the only guard
+  // between the ceiling and the loop below — a 0 or NaN here would silently drop
+  // every entry, turning a typo into a feature that appears simply not to work.
+  const cap = Math.max(1, Math.floor(maxGuilds) || 1);
+  const seenGuildIds = new Set<string>();
+  const out: GuildPromptProfileEntry[] = [];
+  const dropped: string[] = [];
+
+  for (const entry of String(raw ?? '').split(',')) {
+    const trimmed = entry.trim();
+    if (!trimmed) continue;
+
+    // Exactly one `=`. `a=b=c` is not a label/guild pair, and the plan's
+    // format `(label)=(guildId)` means the parens belong to the label — so the
+    // raw entry commonly *looks* like it has extra `=`, hence the strip in rule 8
+    // happening after this check rather than before it.
+    if (trimmed.split('=').length - 1 !== 1) {
+      dropped.push(`"${trimmed}" — not a (label)=(guildId) pair`);
+      continue;
+    }
+
+    const separator = trimmed.indexOf('=');
+    const label = normalizeGuildPromptLabel(trimmed.slice(0, separator));
+    const guildId = trimmed.slice(separator + 1).trim();
+
+    if (!label || !guildId) {
+      dropped.push(`"${trimmed}" — missing a label or a guild id`);
+      continue;
+    }
+
+    if (!DISCORD_SNOWFLAKE_PATTERN.test(guildId)) {
+      // The one identifier here that Discord actually matches on. A typo here is
+      // invisible at runtime: the guild simply never resolves to its own
+      // profile, which is indistinguishable from the feature not existing.
+      dropped.push(`"${trimmed}" — "${guildId}" is not a Discord guild id (16–20 digits)`);
+      continue;
+    }
+
+    if (label.length > GUILD_PROMPT_LABEL_MAX_LENGTH) {
+      dropped.push(
+        `"${trimmed}" — label is ${label.length} characters, over the ${GUILD_PROMPT_LABEL_MAX_LENGTH} character limit`,
+      );
+      continue;
+    }
+
+    if (!isUsableProfileId(label)) {
+      // The warning has to name the character rule rather than just say "invalid":
+      // the operator's instinct on seeing this is to write `MyGuild`, and they
+      // must be told that the label is a *folder name*, so the fix is to rename
+      // the label themselves — not to have the bot rename it for them.
+      dropped.push(
+        `"${trimmed}" — label "${label}" is not a usable profile id ` +
+          '(letters, digits, dot, dash and underscore, starting with a letter or digit; ' +
+          'no spaces). The label is this guild\'s prompt folder name ' +
+          '(prompt_storage/profiles/<label>/), so it cannot be rewritten for you — ' +
+          'rename it in .env to something like "my-guild".',
+      );
+      continue;
+    }
+
+    if (seenGuildIds.has(guildId)) {
+      // First wins, mirroring the duplicate-model handling in
+      // `parseModelPromptProfiles`: keep what the operator wrote first rather
+      // than letting file order decide which of two contradictory rows applies.
+      dropped.push(`"${trimmed}" — guild ${guildId} is already configured as "${label}"`);
+      continue;
+    }
+
+    if (out.length >= cap) {
+      // Reported with the cutoff named, because the visible symptom of hitting
+      // the cap is an entry the operator swears they wrote and that appears
+      // nowhere.
+      dropped.push(
+        `"${trimmed}" — over the ${cap}-guild limit (GUILD_PROFILES_MAX); the first ${cap} entries are kept`,
+      );
+      continue;
+    }
+
+    seenGuildIds.add(guildId);
+    out.push({ label, guildId });
+  }
+
+  if (dropped.length > 0) {
+    // Bordered block in the style of the MODEL_PROMPT_PROFILES summary: the
+    // whole point is that this is one thing to read, at the end, with the
+    // surviving entries named so the operator can tell at a glance whether the
+    // remaining pairs are the ones they meant.
+    const kept = out.map((e) => `${e.label}=${e.guildId}`);
+    console.warn(
+      [
+        '',
+        '='.repeat(72),
+        '  CONFIGURATION ERROR: GUILD_PROMPT_PROFILES contains unusable entries.',
+        '='.repeat(72),
+        '',
+        '  Dropped:',
+        ...dropped.map((d) => `      - ${d}`),
+        '',
+        `  Configured: ${kept.length > 0 ? kept.join(', ') : '(none — the feature is off)'}`,
+        '',
+        '  A dropped guild is NOT a fallback: it simply never matches, so it keeps',
+        '  using the main-page prompt profile. Fix the entry above, or comment it',
+        '  out. Labels must be usable profile ids because each one names that',
+        '  guild\'s own prompt folder (prompt_storage/profiles/<label>/).',
+        '='.repeat(72),
+        '',
+      ].join('\n'),
+    );
+  }
+
+  return out;
+}
+
+/**
  * The dashboard's model list and the prompt-profile tables are parsed here,
  * before the config object, because both parsers need each other: a binding can
  * only be validated against the whitelist, and a whitelist entry is useless
@@ -287,6 +537,39 @@ const modelPromptProfiles: Record<string, string> = parseModelPromptProfiles(
   strEnv('MODEL_PROMPT_PROFILES', ''),
   promptProfileIds,
   dashboardModelOptions,
+);
+
+/**
+ * How many guilds may be given their own prompt profile.
+ *
+ * A ceiling rather than a fixed three so an operator running the bot in more
+ * than three places can raise it from `.env` without a code change — but a
+ * *small* ceiling on purpose: this feature multiplies the number of distinct
+ * personas a single operator has to keep straight, and the dashboard renders one
+ * card per guild. `min: 1` because 0 would disable the feature through a number
+ * that reads like a mistake, and `max: 12` so a fat-fingered `GUILD_PROFILES_MAX`
+ * cannot turn the dashboard into a list nobody can scroll.
+ *
+ * Read through `intEnv` and never bare `parseInt`: per `utils/env.ts`, a NaN
+ * here would make every `length >= cap` comparison false and silently disable
+ * the cap, which is exactly the unbounded fan-out the cap exists to prevent.
+ * Registered in {@link BOUNDED_ENV_VARS} so a bad value is reported once at boot
+ * rather than quietly clamped.
+ */
+const guildProfilesMax: number = intEnv('GUILD_PROFILES_MAX', 3, { min: 1, max: 12 });
+
+/**
+ * The guilds eligible for their own prompt profile, in configured order.
+ *
+ * Parsed at module scope for the same reason `promptProfileIds` and
+ * `modelPromptProfiles` are: the parser is pure and this is a one-shot boot
+ * parse, and resolving it inside the `config` literal is not possible because
+ * `config` is still in its temporal dead zone there. `[]` (env unset) leaves
+ * every guild on the main-page selection.
+ */
+const guildPromptProfiles: GuildPromptProfileEntry[] = parseGuildPromptProfiles(
+  strEnv('GUILD_PROMPT_PROFILES', ''),
+  guildProfilesMax,
 );
 
 export const config = {
@@ -587,6 +870,23 @@ export const config = {
     available: promptProfileIds,
     /** Model name → profile id, from MODEL_PROMPT_PROFILES. Bindings whose profile is not whitelisted are dropped with a loud warning. */
     byModel: modelPromptProfiles,
+    /**
+     * Guilds eligible for their own prompt profile, from
+     * GUILD_PROMPT_PROFILES. `[]` means the feature is off and every guild
+     * resolves to the main-page selection.
+     *
+     * `label` is display text AND the guild's own profile folder name, so it is
+     * held to the same profile-id rule as `available` — see
+     * {@link GuildPromptProfileEntry}.
+     */
+    guilds: guildPromptProfiles,
+    /**
+     * Ceiling on how many entries `guilds` may hold (GUILD_PROFILES_MAX,
+     * default 3, clamped to 1–12). Exposed rather than hard-coded downstream so
+     * the dashboard can show the limit without re-deriving it, and so the
+     * enforcement point stays a single value.
+     */
+    maxGuilds: guildProfilesMax,
   },
 };
 

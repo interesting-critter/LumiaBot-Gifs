@@ -4,7 +4,7 @@ import { config } from '../utils/config';
 import { shouldTriggerBot, extractMessageContent, handleMessage, extractTriggerKeywords } from '../services/message-handler';
 import { boredomService } from '../services/boredom';
 import { channelHistoryService } from '../services/channel-history';
-import { getBotCouncilProfile, getErrorMessage, getTriggerKeywords } from '../services/prompts';
+import { getBotCouncilProfile, getErrorMessage, getTriggerKeywords, runWithPromptContext } from '../services/prompts';
 import { userActivityService } from '../services/user-activity';
 import { userMemoryService } from '../services/user-memory';
 import { pageExtractorService } from '../services/page-extractor';
@@ -41,6 +41,27 @@ interface OrchestratorQueuedInfo {
   imageUrls: string[];
   videoUrls: MediaAttachment[];
   textAttachments: TextAttachment[];
+}
+
+/**
+ * The reply context a triggered message carries from `onMessageCreate` into the
+ * queued turn.
+ *
+ * Named so the turn's entry-point wrapper and its body can share one
+ * declaration: `processTriggeredMessage` exists only to open the guild's prompt
+ * context, and duplicating this shape across both signatures would be the one
+ * place the two could drift.
+ */
+interface TriggeredMessageReplyContext {
+  isReply: boolean;
+  isReplyToLumia: boolean;
+  originalContent?: string;
+  originalTimestamp?: string;
+  originalAuthor?: string;
+  embeddedContent?: {
+    images: string[];
+    videos: { url: string; mimeType?: string }[];
+  };
 }
 
 /**
@@ -956,8 +977,26 @@ ${sections.join('\n\n')}
     });
 
     // Set up response handler for orchestrator
+    //
+    // Wrapped because an orchestrated turn is a full turn that starts here, not
+    // at `handleMessage`: the orchestrator grants this bot a turn seconds or
+    // minutes after the mention, in its own async chain, driven by a WebSocket
+    // frame. Nothing else in that chain carries the guild, so without this the
+    // whole turn would fall back to the main-page selection. The wrapper covers
+    // the entire handler so prompt reads before and after `handleMessage` — the
+    // journal replay, the duplicate-response check, the media allowlisting — all
+    // resolve against the same guild, and so a concurrent turn in another guild
+    // cannot interleave into a mixed profile.
+    //
+    // `payload.guildId` is optional (and is the literal `'dm'` for a guild-less
+    // channel, per `notifyMention`), so it is a best-effort answer here;
+    // `handleOrchestratorResponse` re-enters the context with the resolved
+    // Discord message's own `guildId`, which is authoritative. Both resolve to
+    // the main selection when the guild is a DM, which is the intended fallback.
     this.orchestrator.setResponseHandler(async (payload: ResponseRequestPayload) => {
-      return this.handleOrchestratorResponse(payload);
+      return runWithPromptContext(payload.guildId ?? null, () =>
+        this.handleOrchestratorResponse(payload),
+      );
     });
 
     this.orchestrator.setCollectiveKnowledgeHandler(async (payload) => {
@@ -1014,6 +1053,26 @@ ${sections.join('\n\n')}
 
   /**
    * Handle orchestrator response request - generates actual response and sends it
+   *
+   * WHY THE TURN IS SPLIT IN TWO HERE
+   * ---------------------------------
+   * The guild is only knowable once the queued (or snapshot-reconstructed) message
+   * is resolved, and resolution happens *after* the payload arrives. So this
+   * method resolves the message first and then hands the whole turn to
+   * {@link runOrchestratorTurn} inside the guild's prompt context.
+   *
+   * The wrapper is around the entire turn, not around the `handleMessage` call
+   * alone, because prompt reads in this path are spread across many awaits —
+   * mention resolution, media allowlisting, page extraction, history conversion,
+   * then the system-prompt assembly and the rewrite pass. Wrapping only the
+   * generation call would leave the earlier reads on whatever profile was
+   * ambient, which is exactly the cross-guild cross-talk the ambient context
+   * exists to make impossible. Because the context is established once around
+   * the whole chain, a concurrent turn in a different guild cannot interleave
+   * into this one, and no signature below changes.
+   *
+   * `message.guildId` is null for a DM, which resolves to the main-page
+   * selection — the correct fallback.
    */
   private async handleOrchestratorResponse(payload: ResponseRequestPayload): Promise<string> {
     const { context, eventId, turnId } = payload;
@@ -1030,6 +1089,26 @@ ${sections.join('\n\n')}
       console.error(`[Orchestrator] No queued or reconstructable message found for event ${eventId}`);
       return '';
     }
+
+    // The live `Message` is authoritative for the guild, unlike `payload.guildId`
+    // (optional, and the literal `'dm'` for a guild-less channel), and it is the
+    // same value every later read in the turn would derive anyway.
+    return runWithPromptContext(queuedInfo.message.guildId, () =>
+      this.runOrchestratorTurn(payload, queuedInfo),
+    );
+  }
+
+  /**
+   * The body of an orchestrated turn, run inside the resolved message's guild
+   * prompt context. Extracted only so {@link handleOrchestratorResponse} can open
+   * that context around the whole turn; it has no other caller and takes no guild
+   * argument, because the ambient context already carries it.
+   */
+  private async runOrchestratorTurn(
+    payload: ResponseRequestPayload,
+    queuedInfo: OrchestratorQueuedInfo,
+  ): Promise<string> {
+    const { context, eventId, turnId } = payload;
 
     const { message, replyContext, imageUrls, videoUrls, textAttachments } = queuedInfo;
 
@@ -1790,52 +1869,60 @@ ${sections.join('\n\n')}
     // ran on one signal: two concurrent `destroy()` calls and two `process.exit(0)`
     // calls, racing each other. Single owner now.
 
+    // The whole dispatch is wrapped, not just `command.execute`, because a slash
+    // command is a full turn of its own: `/chat` and `/persona` read prompts, and
+    // anything they do asynchronously after replying must still see the same
+    // profile. Two guilds running commands concurrently would otherwise be free
+    // to read each other's prompt text, and a wrapper around only the innermost
+    // call would leave the awaits before it unwrapped.
     this.client.on(Events.InteractionCreate, async (interaction) => {
       if (!interaction.isChatInputCommand()) return;
 
-      const command = this.commands.get(interaction.commandName);
+      await runWithPromptContext(interaction.guildId, async () => {
+        const command = this.commands.get(interaction.commandName);
 
-      if (!command) {
-        console.error(`No command matching ${interaction.commandName} was found.`);
-        return;
-      }
-
-      try {
-        // NSFW-only mode: commands are usable only in channels marked NSFW.
-        if (config.bot.nsfwOnly && !isDiscordNsfwChannel(interaction.channel)) {
-          await interaction.reply({
-            content: 'I can only be used in age-restricted (NSFW) channels.',
-            ephemeral: true,
-          });
+        if (!command) {
+          console.error(`No command matching ${interaction.commandName} was found.`);
           return;
         }
 
-        const subcommand = interaction.options.getSubcommand(false);
-        const ownerOnly = command.ownerOnly ||
-          (subcommand !== null && command.ownerOnlySubcommands?.includes(subcommand));
+        try {
+          // NSFW-only mode: commands are usable only in channels marked NSFW.
+          if (config.bot.nsfwOnly && !isDiscordNsfwChannel(interaction.channel)) {
+            await interaction.reply({
+              content: 'I can only be used in age-restricted (NSFW) channels.',
+              ephemeral: true,
+            });
+            return;
+          }
 
-        if (ownerOnly && interaction.user.id !== config.bot.ownerId) {
-          await interaction.reply({
-            content: 'This command is only available to the bot owner.',
+          const subcommand = interaction.options.getSubcommand(false);
+          const ownerOnly = command.ownerOnly ||
+            (subcommand !== null && command.ownerOnlySubcommands?.includes(subcommand));
+
+          if (ownerOnly && interaction.user.id !== config.bot.ownerId) {
+            await interaction.reply({
+              content: 'This command is only available to the bot owner.',
+              ephemeral: true,
+            });
+            return;
+          }
+
+          await command.execute(interaction);
+        } catch (error) {
+          console.error(error);
+          const errorMessage = {
+            content: 'There was an error while executing this command!',
             ephemeral: true,
-          });
-          return;
-        }
+          };
 
-        await command.execute(interaction);
-      } catch (error) {
-        console.error(error);
-        const errorMessage = {
-          content: 'There was an error while executing this command!',
-          ephemeral: true,
-        };
-
-        if (interaction.replied || interaction.deferred) {
-          await interaction.followUp(errorMessage);
-        } else {
-          await interaction.reply(errorMessage);
+          if (interaction.replied || interaction.deferred) {
+            await interaction.followUp(errorMessage);
+          } else {
+            await interaction.reply(errorMessage);
+          }
         }
-      }
+      });
     });
 
     // Handle message mentions and keyword triggers.
@@ -2123,22 +2210,52 @@ ${sections.join('\n\n')}
 
   /**
    * Process a triggered message (extracted for per-channel queuing)
+   *
+   * WHY THE ENTIRE TURN IS WRAPPED, NOT JUST THE PROMPT READS
+   * --------------------------------------------------------
+   * `runWithPromptContext` opens an `AsyncLocalStorage` scope for the guild this
+   * message came from, and it has to enclose the *whole* turn — the first
+   * trigger-keyword read to the last dashboard log write.
+   *
+   * The reason is that prompt reads are spread across many `await`s inside one
+   * turn: page extraction, media filtering, vision, knowledge prefetch, the
+   * SwarmUI config read, then the system-prompt assembly and the rewrite pass
+   * seconds later. Two of those reads MUST agree, or the bot mixes a `swarm_cfg`
+   * from one profile with prompt text from another.
+   *
+   * A wrapper around only part of the turn would therefore reintroduce exactly
+   * the cross-guild cross-talk this design exists to prevent — and it would do so
+   * only intermittently, which is the worst possible failure mode. The context
+   * carries the guild id down the whole async chain, so no downstream signature
+   * changes and no restore step can clobber a concurrent turn in another guild.
+   *
+   * `message.guildId` is null for a DM, which resolves to the main-page
+   * selection — the correct and intended behaviour.
    */
   private async processTriggeredMessage(
     message: Message,
     botId: string,
     hasTrigger: boolean,
-    replyContext: {
-      isReply: boolean;
-      isReplyToLumia: boolean;
-      originalContent?: string;
-      originalTimestamp?: string;
-      originalAuthor?: string;
-      embeddedContent?: {
-        images: string[];
-        videos: { url: string; mimeType?: string }[];
-      };
-    } | undefined,
+    replyContext: TriggeredMessageReplyContext | undefined,
+  ): Promise<void> {
+    return runWithPromptContext(message.guildId, () =>
+      this.runTriggeredMessageTurn(message, botId, hasTrigger, replyContext),
+    );
+  }
+
+  /**
+   * The body of a triggered-message turn, run inside the guild's prompt context.
+   *
+   * Split out from {@link processTriggeredMessage} purely so the wrapper can
+   * enclose the whole turn without re-indenting several hundred lines; it has no
+   * other caller and takes no guild argument, because the ambient context
+   * already carries it.
+   */
+  private async runTriggeredMessageTurn(
+    message: Message,
+    botId: string,
+    hasTrigger: boolean,
+    replyContext: TriggeredMessageReplyContext | undefined,
   ): Promise<void> {
     const generationKey = `root:${message.id}`;
     const typingHolder = directTypingHolder(message.id);

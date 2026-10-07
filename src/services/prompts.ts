@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { existsSync, readdirSync, readFileSync, statSync, type Dirent } from 'node:fs';
 import { resolve, sep } from 'node:path';
 import { config } from '../utils/config';
@@ -87,6 +88,53 @@ let templateVariables: TemplateVariables = {
  * per load is the entire cost at steady state — no separate resolution cache,
  * because a second cache would introduce a second staleness rule for a stat call
  * that costs microseconds.
+ *
+ *
+ * PER-GUILD PROFILES (ambient context, not a second global)
+ * -------------------------------------------------------
+ * A process-global profile cannot express "three guilds, three characters".
+ * `activePromptProfileId` below remains the *main* selection — what the dashboard's
+ * main page picks, and what every guild-less caller (login, the dashboard's own
+ * reads, `initializePromptService`) resolves to.
+ *
+ * Above that sits one more layer: the profile a *specific guild* should speak with,
+ * carried in an `AsyncLocalStorage` context that each turn's entry point opens with
+ * `runWithPromptContext(guildId, …)`. Reads consult it via
+ * `getEffectivePromptProfileId()`, which is what `resolvePromptPath` uses.
+ *
+ * WHY NOT "set the global at the top of a turn, restore it at the end"
+ * -----------------------------------------------------------------
+ * Turns are serialised **per channel** (`client.ts`, the turn queue), not
+ * per guild — two guilds genuinely run concurrently, and four other entry points
+ * (slash commands, the boredom timer, the dashboard HTTP server, the orchestrator
+ * WebSocket) start turns with no channel at all. Worse, a single turn contains real
+ * `await` gaps *between* prompt reads that must agree: `swarmui.ts` reads
+ * `swarm_cfg.json` and then the positive/negative prompts minutes later, and both
+ * the OpenAI and Gemini paths build a system prompt and apply rewrites across an
+ * await. Under set-then-restore, guild A's turn can read its config from profile A
+ * and its prompt text from profile B — intermittently, unreproducibly, with no
+ * warning anywhere. A whole-turn restore is worse still: it runs after those awaits,
+ * so it clobbers a concurrent turn's selection.
+ *
+ * There is no shared mutable slot to race on with `AsyncLocalStorage`, because each
+ * async chain resolves its own. This mirrors how the codebase already solved the
+ * identical problem twice — `utils/bot-definition.ts` memoises on
+ * `(activePromptProfileId, promptCacheGeneration)` and `swarmui.ts` snapshots the
+ * generation counter, both read-at-use rather than set-then-restore.
+ *
+ * DEPENDENCY DIRECTION — prompts.ts is a LEAF
+ * -------------------------------------------
+ * `services/guild-prompt-profiles.ts` (the per-guild resolver, built on this
+ * module's `DEFAULT_PROMPT_PROFILE_ID`) imports THIS file. Therefore this file must
+ * never import that one — not even lazily-by-need at call time — or the two modules
+ * form a cycle and one of them initialises against a half-built namespace.
+ *
+ * So the guild→profile lookup is *injected* rather than imported: the composition
+ * root constructs `GuildPromptProfileService` and hands it to
+ * `setGuildProfileResolver`. Until it does, and for every call made outside a guild
+ * context, resolution falls back to the main selection — which is also the correct
+ * answer for DMs, and the behaviour an install with `GUILD_PROMPT_PROFILES` unset
+ * must have byte-for-byte.
  */
 
 /** One folder per named prompt profile, under the default root. */
@@ -101,8 +149,74 @@ export const PROMPT_PROFILES_DIR: string = resolve(PROMPT_STORAGE_DIR, 'profiles
  */
 export const DEFAULT_PROMPT_PROFILE_ID = 'default';
 
-/** The profile every getter resolves against until something changes it. */
+/** The profile the dashboard's main page selects; also the guild-less default. */
 let activePromptProfileId: string = DEFAULT_PROMPT_PROFILE_ID;
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Ambient per-guild context
+ * ═══════════════════════════════════════════════════════════════════════════
+ * See the PER-GUILD PROFILES block at the top of this file for why the guild's
+ * profile travels in an async context rather than in a second mutable global.
+ */
+
+/**
+ * The ambient "which guild is this turn for?" marker.
+ *
+ * `guildId: null` is a real value, not an absent store: DMs and every guild-less
+ * entry point resolve to the main selection, and encoding that as `null` means a
+ * nested `runWithPromptContext` inside an outer one is unambiguous.
+ */
+interface PromptContext {
+  guildId: string | null;
+}
+
+const promptContext = new AsyncLocalStorage<PromptContext>();
+
+/**
+ * Run `fn` with `guildId` as the ambient guild, so every prompt read in that async
+ * chain — however deep, and across whatever `await`s sit between them — resolves
+ * against that guild's profile.
+ *
+ * Only the async chain *inside* `fn` is affected. Context does not leak to work
+ * started before the call, nor to a chain the caller starts afterwards; the store
+ * is restored automatically when `fn` returns or rejects. No call site needs to
+ * thread a profile parameter, and none of the ~60 downstream prompt reads change
+ * signature.
+ *
+ * Pass `null` (or simply do not wrap) for a DM or a guild-less entry point.
+ */
+export function runWithPromptContext<T>(guildId: string | null, fn: () => T): T {
+  return promptContext.run({ guildId }, fn);
+}
+
+/** The ambient guild id, or `null` outside any {@link runWithPromptContext}. */
+function currentGuildId(): string | null {
+  return promptContext.getStore()?.guildId ?? null;
+}
+
+/**
+ * Guild → profile lookup, injected rather than imported.
+ *
+ * See the DEPENDENCY DIRECTION note at the top of this file: the service that owns
+ * this function imports `prompts.ts`, so importing it back would create a cycle.
+ * `null` means "no per-guild layer installed", which is the state in tests and in
+ * any install that does not wire the service up.
+ */
+type GuildProfileResolver = (guildId: string | null) => string;
+
+let guildProfileResolver: GuildProfileResolver | null = null;
+
+/**
+ * Install the guild→profile resolver. Called once by the composition root, right
+ * after it constructs `GuildPromptProfileService`.
+ *
+ * The indirection is load-bearing, not defensive programming: it is what keeps
+ * `prompts.ts` a leaf module. Everything else here degrades gracefully if it is
+ * never called; this is the one function that must not be turned into an import.
+ */
+export function setGuildProfileResolver(resolver: GuildProfileResolver | null): void {
+  guildProfileResolver = resolver;
+}
 
 /**
  * Ids are single path segments, so they are restricted to characters that cannot
@@ -191,8 +305,41 @@ function getPromptStoragePath(): string {
   return PROMPT_STORAGE_DIR;
 }
 
-/** The profile every getter currently resolves against. */
+/**
+ * The main profile selection — what the dashboard's main page picked.
+ *
+ * Deliberately **guild-unaware**. This answers "what has the operator selected?",
+ * which is a global question by definition, and it is what the dashboard, the
+ * prompt selector's own reconciliation and `bot-definition.ts` need. Per-guild
+ * resolution belongs to {@link getEffectivePromptProfileId}.
+ */
 export function getActivePromptProfileId(): string {
+  return activePromptProfileId;
+}
+
+/**
+ * The profile the *current* turn should resolve prompts against.
+ *
+ * Precedence, per the plan:
+ *
+ *   1. this guild's own profile, if the turn carries an ambient guild **and** the
+ *      per-guild service is wired in;
+ *   2. otherwise the main selection.
+ *
+ * Both fallbacks are first-class rather than degraded: DMs, guild-less entry points
+ * (login metadata, the dashboard's own reads, `initializePromptService`) and any
+ * install without `GUILD_PROMPT_PROFILES` all land on (2), which is exactly today's
+ * behaviour.
+ *
+ * This is the function {@link resolvePromptPath} uses. It is intentionally *not*
+ * used by the dashboard or the prompt selector, which describe the main selection
+ * and must not be rewritten to follow whichever guild happens to be in scope.
+ */
+export function getEffectivePromptProfileId(): string {
+  const guildId = currentGuildId();
+  if (guildId !== null && guildProfileResolver) {
+    return guildProfileResolver(guildId);
+  }
   return activePromptProfileId;
 }
 
@@ -280,22 +427,49 @@ export function listPromptProfiles(): string[] {
 }
 
 /**
- * Absolute path of a prompt file, honouring the active profile's per-file
+ * Absolute path of a prompt file, honouring the effective profile's per-file
  * overlay and falling back to the default root.
+ *
+ * "Effective" means guild-aware ({@link getEffectivePromptProfileId}), not just the
+ * main selection: two guilds on different profiles resolving this same relative
+ * path concurrently get two different absolute paths, and that is the point.
  *
  * Returns the default root's path when the profile has no copy of that file —
  * even when the default root has none either, so the caller's "file not found"
  * warning names the default path (the operator's canonical location) instead of
  * a profile path that may not exist.
+ *
+ * A profile id with no folder on disk does NOT throw here. This sits on the
+ * message path, where a throw would take an entire guild offline for a `.env`
+ * typo — and it would gain nothing: `getPromptProfileRoot` throws only because the
+ * *dashboard* must not offer a profile that resolves to nothing, whereas a missing
+ * folder degrades to `default` per file, which is the outcome the operator would
+ * get anyway. So this mirrors `PromptSelectorService.pushActive`: log loudly, use
+ * `default`. The main selection cannot hit this path — `setActivePromptProfileId`
+ * validates before assigning — so in practice it is the per-guild layer that
+ * degrades here.
  */
 export function resolvePromptPath(relativePath: string): string {
   const defaultPath = resolveInsideRoot(getPromptStoragePath(), relativePath);
 
-  if (activePromptProfileId === DEFAULT_PROMPT_PROFILE_ID) {
+  const profileId = getEffectivePromptProfileId();
+  if (profileId === DEFAULT_PROMPT_PROFILE_ID) {
     return defaultPath;
   }
 
-  const profilePath = resolveInsideRoot(getPromptProfileRoot(activePromptProfileId), relativePath);
+  let profileRoot: string;
+  try {
+    profileRoot = getPromptProfileRoot(profileId);
+  } catch (error) {
+    console.error(
+      `📝 [PROMPTS] Could not resolve prompt profile "${profileId}" for ${relativePath}: ` +
+        `${error instanceof Error ? error.message : String(error)}\n` +
+        `     Falling back to "${DEFAULT_PROMPT_PROFILE_ID}" for this read.`,
+    );
+    return defaultPath;
+  }
+
+  const profilePath = resolveInsideRoot(profileRoot, relativePath);
   return existsSync(profilePath) ? profilePath : defaultPath;
 }
 
@@ -320,6 +494,14 @@ function substituteVariables(text: string, variables: TemplateVariables = templa
  * actually read makes each physical file cache separately, keeps
  * `clearCache()` the single invalidation point, and means a switch needs no
  * cache clear for correctness (it is still done, for the generation counter).
+ *
+ * This is what makes per-guild profiles free of cache work: the resolved path
+ * already contains the profile's own directory, so two guilds on different
+ * profiles key on different entries and cannot collide, concurrently or
+ * otherwise. No guild id needs to enter the key — and no new invalidation rule
+ * is needed when a guild's assignment changes, because the new profile simply
+ * resolves to a different path (files shared with `default` are byte-identical
+ * by definition, since `default` is where they came from).
  */
 export function loadTextFile(relativePath: string, useCache: boolean = true): string | null {
   const filePath = resolvePromptPath(relativePath);
@@ -944,6 +1126,53 @@ export function clearCache(): void {
   promptCache.clear();
   promptCacheGeneration++;
   console.log('📝 [PROMPTS] Cache cleared');
+}
+
+/**
+ * Bump the generation counter **without** dropping this module's own cache.
+ *
+ * The two halves of {@link clearCache} serve different audiences, and only one of
+ * them is ever needed by a *per-guild* write.
+ *
+ * Dropping the `promptCache` map exists for the case where the bytes on disk or
+ * the template variables changed: every entry was computed from them, so every
+ * entry is suspect. That is `setActivePromptProfileId` (an operator switching
+ * profiles process-wide), `setTemplateVariables`, and the dashboard's
+ * `reloadPrompts()`.
+ *
+ * A *guild assignment* is a different case and needs neither half. The map is
+ * keyed on resolved absolute paths, and the resolved path already contains the
+ * profile's own directory, so the newly-assigned profile simply resolves to
+ * different keys and re-reads naturally. What a guild write does invalidate is
+ * the consumers that cache **outside** this module and key on the profile id —
+ * `swarmui.ts`'s 30s `config/swarm_cfg.json` cache, `bot-definition.ts`'s
+ * `(profile, generation)` persona memo — because the profile half of their key
+ * moves for a reason this module cannot see, and they treat a generation change
+ * as "re-read from disk now".
+ *
+ * Hence a separate entry point. Without it, every per-guild assignment write
+ * would evict the whole process's prompt cache, and a guild edit would make
+ * unrelated guilds pay for it: one operator's dropdown click re-reading every
+ * prompt file for every other guild on the next turn.
+ *
+ * Nothing here needs the *trigger* patterns re-rendered either. They are memoised
+ * per profile (`TRIGGER_PATTERNS_BY_PROFILE`), so a guild that changes profile
+ * lands on a different slot and compiles fresh; one that returns to a previous
+ * profile finds that slot holding patterns compiled from that profile's own
+ * cached array, which is the correct list. An actual edit to `triggers.json`
+ * reaches this module through the dashboard's `reloadPrompts()` → `clearCache()`,
+ * which drops the map and hands every profile a new array. The
+ * `compiledPromptRewrites` / `renderedTriggerKeywords` `WeakMap`s below are keyed
+ * on objects *owned by* `promptCache`, so they are downstream of it — not an
+ * extra reason to drop it — and being weak, not dropping the map leaks nothing.
+ *
+ * The guild service calls this from its post-write bookkeeping on `setAssignment`
+ * and `clearAssignment`. It is the reason that call site does **not** call
+ * {@link clearCache}; the two doc comments used to contradict each other on this
+ * point, and this one is the accurate half.
+ */
+export function bumpPromptCacheGeneration(): void {
+  promptCacheGeneration++;
 }
 
 /**

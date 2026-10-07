@@ -1,5 +1,11 @@
 import { existsSync } from 'node:fs';
-import { getPromptCacheGeneration, loadJsonFile, loadTextFile, resolvePromptPath } from './prompts';
+import {
+  getEffectivePromptProfileId,
+  getPromptCacheGeneration,
+  loadJsonFile,
+  loadTextFile,
+  resolvePromptPath,
+} from './prompts';
 
 export interface GeneratedImageAttachment {
   data: Buffer;
@@ -59,6 +65,12 @@ const CONFIG_CACHE_TTL_MS = 30_000;
  * unconfigured, while the `loadJsonFile` on the very next line would have
  * resolved and read the profile's file. It now calls `resolvePromptPath()`, so
  * there is exactly one definition of "the file `getConfig()` is about to load".
+ *
+ * One definition of the *path* is not enough on its own, because `getConfig()`
+ * caches behind that call and a cache fronting a profile-aware loader must key
+ * on the profile too — see the history block on the method itself, where the
+ * same "resolve it correctly but serve it from a shared slot" mistake shows up
+ * a second time.
  */
 const CONFIG_PATH = 'config/swarm_cfg.json';
 const POSITIVE_PROMPT_PATH = 'config/image_prompt_pos.txt';
@@ -112,7 +124,12 @@ export function isNsfwImagePrompt(tags: string): boolean {
 
 class SwarmUIService {
   private sessions = new Map<string, SessionEntry>();
-  private configCache: { value: SwarmConfig | null; expiresAt: number; generation: number } | null = null;
+  private configCache: {
+    value: SwarmConfig | null;
+    expiresAt: number;
+    generation: number;
+    profile: string;
+  } | null = null;
 
   isConfigured(): boolean {
     const cfg = this.getConfig();
@@ -185,11 +202,49 @@ class SwarmUIService {
    * dashboard's persona hot-reload (`reloadBotDefinition()` →
    * `reloadPrompts()` → `clearCache()`) still takes effect on the very next
    * call rather than after the TTL.
+   *
+   * HISTORY: THIS CACHE HAS BEEN WRONG TWICE, IN THE SAME PLACE
+   * -------------------------------------------------------
+   * (1) The probe under the loader. `getConfig()` used to guard its read with
+   *     `existsSync(join(PROMPT_STORAGE_DIR, CONFIG_PATH))` — the **default**
+   *     root — while the `loadJsonFile` on the next line resolved through
+   *     `resolvePromptPath()` and read whatever the *active profile* pointed at.
+   *     Under a profile the guard therefore proved the absence of a file the
+   *     loader was never going to ask for, and `isConfigured()` reported SwarmUI
+   *     as absent. Fixed by probing `resolvePromptPath(CONFIG_PATH)`.
+   *
+   * (2) The cache key — the second, subtler version of the same mistake, and the
+   *     one per-guild profiles introduce. `loadJsonFile` is guild-aware now, but
+   *     the *cache in front of it* was not: one `configCache` slot keyed on
+   *     `(expiresAt, generation)` served every guild. Two guilds on two
+   *     different profiles alternating inside one 30-second window therefore
+   *     shared a single entry, and whichever resolved first won — guild A
+   *     generating selfies against guild B's SwarmUI URL, token and model, or
+   *     against the default's, with no warning anywhere. A cache that front-ends
+   *     a profile-aware loader has to be keyed on the profile too, or it is the
+   *     loader's cross-talk with extra steps.
+   *
+   *     It keys on `getEffectivePromptProfileId()` — the *guild-aware* profile —
+   *     rather than `getActivePromptProfileId()`, which answers the global
+   *     question "what did the dashboard's main page select?". Using the latter
+   *     here would be the identical defect wearing a different hat: every guild
+   *     would share the main selection's key, which is exactly the cross-talk
+   *     above, just relabelled. Note also what the generation alone can and
+   *     cannot tell us: it moves when something is *edited*, never when merely a
+   *     *different turn* asks a different question, so it is the invalidation
+   *     half of the key and the profile is the semantic half — the same split
+   *     `bot-definition.ts` documents for its own memo.
    */
   private getConfig(): SwarmConfig | null {
     const generation = getPromptCacheGeneration();
+    const profile = getEffectivePromptProfileId();
     const cached = this.configCache;
-    if (cached && cached.generation === generation && cached.expiresAt > Date.now()) {
+    if (
+      cached &&
+      cached.profile === profile &&
+      cached.generation === generation &&
+      cached.expiresAt > Date.now()
+    ) {
       return cached.value;
     }
 
@@ -197,11 +252,11 @@ class SwarmUIService {
     // Probe the *resolved* path, not `join(PROMPT_STORAGE_DIR, CONFIG_PATH)`:
     // under a profile that second path names a file the loader was never going
     // to read, so the guard could veto a perfectly good profile config and
-    // `isConfigured()` would report SwarmUI as absent.
+    // `isConfigured()` would report SwarmUI as absent. (Bug (1) above.)
     if (existsSync(resolvePromptPath(CONFIG_PATH))) {
       value = loadJsonFile<SwarmConfig>(CONFIG_PATH);
     }
-    this.configCache = { value, expiresAt: Date.now() + CONFIG_CACHE_TTL_MS, generation };
+    this.configCache = { value, expiresAt: Date.now() + CONFIG_CACHE_TTL_MS, generation, profile };
     return value;
   }
 

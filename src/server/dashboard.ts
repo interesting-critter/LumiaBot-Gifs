@@ -10,11 +10,12 @@ import { userMemoryService, type MemoryEntryKind, type UserOpinion } from '../se
 import { rateLimiterService } from '../services/rate-limiter';
 import { modelSelectorService } from '../services/model-selector';
 import { promptSelectorService } from '../services/prompt-selector';
+import { guildPromptProfileService } from '../services/guild-prompt-profiles';
 import {
   DEFAULT_PROMPT_PROFILE_ID,
+  PROMPT_PROFILES_DIR,
   getActivePromptProfileId,
   getPromptProfileRoot,
-  resolvePromptPath,
 } from '../services/prompts';
 import { knowledgeGraphService } from '../services/knowledge-graph';
 import { conversationHistoryService } from '../services/conversation-history';
@@ -709,93 +710,356 @@ function buildPromptProfilePayload() {
   };
 }
 
+/**
+ * Why a guild resolved to the profile it did.
+ *
+ * The precedence has three rules (assignment, then the guild's own folder if it
+ * exists on disk, then the main page), and they mean very different things to an
+ * operator: a guild reading `big-rpd` because someone assigned it is deliberate,
+ * the same id falling out of the main page is not. Rather than let the UI
+ * reimplement the precedence — which is exactly the kind of duplication that
+ * drifts and then disagrees with the bot — the rule that fired is named here and
+ * the UI only renders it.
+ */
+type GuildProfileSource = 'assignment' | 'own-folder' | 'main';
+
+/**
+ * Everything `GET /api/guild-prompt-profiles` needs to render the Guilds view,
+ * and nothing it would have to derive.
+ *
+ * `guilds[].profile` is the **effective** profile (`resolveProfileFor`), so the
+ * UI shows what is actually in effect rather than re-running the precedence; the
+ * `source` field says which rule produced it, which is the distinction the UI
+ * cannot make on its own. `assignments` is kept separately because the
+ * "unassigned → follow the own-folder default" affordance is a guild with no
+ * entry here, and a guild reading its own label through rule 2 must not look
+ * assigned.
+ *
+ * `selectable` is the whitelist plus `default` **plus every configured guild's
+ * own label** (plan §3.5: a `GUILD_PROMPT_PROFILES` entry authorises its label on
+ * its own, so requiring it in `PROMPT_PROFILES` too would make the operator
+ * declare each guild twice and would leave an existing guild folder silently
+ * unusable).
+ */
+function buildGuildPromptProfilesPayload() {
+  const configured = guildPromptProfileService.listConfiguredGuilds();
+
+  // Joined against the live guild cache so the UI can show member/channel counts
+  // alongside the configuration, and so `inCache` can say whether the bot is
+  // genuinely in that guild at all.
+  const live = new Map(buildGuildsPayload().map((guild) => [guild.id, guild]));
+
+  const guilds = configured.map((entry) => {
+    const assignment = guildPromptProfileService.assignmentFor(entry.guildId);
+    const profile = guildPromptProfileService.resolveProfileFor(entry.guildId);
+
+    // Derived from the same two facts the service resolved with, so it cannot
+    // disagree with `profile`. An assignment whose value happens to equal the
+    // label is still an assignment — the row exists, and that is what the UI's
+    // "Clear assignment" button acts on.
+    const source: GuildProfileSource = assignment
+      ? 'assignment'
+      : profile === entry.label
+        ? 'own-folder'
+        : 'main';
+
+    const liveGuild = live.get(entry.guildId);
+    return {
+      guildId: entry.guildId,
+      label: entry.label,
+      // The live guild name when it differs from the operator-chosen label; the
+      // label is what identifies the profile, the name is what recognises the
+      // guild, and they are frequently different.
+      name: liveGuild?.name ?? null,
+      memberCount: liveGuild?.memberCount ?? null,
+      channels: liveGuild?.channels ?? null,
+      profile,
+      source,
+      changedAt: assignment?.changedAt ?? null,
+      eligible: guildPromptProfileService.isEligible(entry.guildId),
+      inCache: liveGuild !== undefined,
+    };
+  });
+
+  const selectable = promptSelectorService.selectableProfiles();
+  for (const entry of configured) {
+    if (!selectable.includes(entry.label)) selectable.push(entry.label);
+  }
+
+  const assignments: Record<string, { profile: string; changedAt: string | null }> = {};
+  for (const entry of guildPromptProfileService.listAssignments()) {
+    assignments[entry.guildId] = { profile: entry.profile, changedAt: entry.changedAt };
+  }
+
+  return {
+    guilds,
+    assignments,
+    selectable,
+    // `getActivePromptProfileId()` and `promptSelectorService.getActiveProfileId()`
+    // agree by construction (`prompt-selector.ts` pushes to `prompts.ts` on every
+    // resolution); the prompts.ts value is the one the read/write paths below use,
+    // so this is what the UI should compare against "Use main page (currently X)".
+    mainActive: getActivePromptProfileId(),
+    maxGuilds: guildPromptProfileService.getMaxGuilds(),
+  };
+}
+
 // ---- Persona --------------------------------------------------------------
 
 /**
- * Root of the profile currently in effect, or `null` when that is `default`.
+ * Which profile a persona request is about.
  *
- * `getPromptProfileRoot` throws for an id with no folder on disk. That is the
- * right behaviour for the prompt loader (a typo must not silently read the
- * wrong tree) but wrong for the dashboard, which must still render: a 500 on
- * the persona list over a mistyped `PROMPT_PROFILES` entry would take the
- * editor down entirely rather than showing the operator the one thing they need
- * to fix. So this answers `null` and every caller falls back to the default root,
- * which is exactly what `prompts.ts` does with the same missing folder.
+ * Absent parameter → the main selection, which is exactly what every route did
+ * before the profile dimension existed, so an old client keeps writing where it
+ * always did. Anything else is passed through to be validated by the caller;
+ * this function does no checking, so the two persona routes and the write-path
+ * allow-check cannot drift apart.
  */
-function activeProfileRoot(): string | null {
+function requestedProfileId(param: string | null | undefined): string {
+  const trimmed = param?.trim();
+  return trimmed ? trimmed : getActivePromptProfileId();
+}
+
+/**
+ * Root of a *named* profile for reading, or `null` when it resolves to the
+ * default tree.
+ *
+ * `getPromptProfileRoot` throws for an id with no folder on disk. That is right
+ * for the prompt loader (a typo must not silently read the wrong tree) but wrong
+ * for the dashboard, which must still render: a 500 on the persona list because a
+ * guild's folder has not been created yet would take the editor down rather than
+ * showing the operator the one thing they need to fix. So this answers `null` and
+ * reads fall through to the default root, which is exactly what `prompts.ts`
+ * does with the same missing folder.
+ */
+function namedProfileRoot(profileId: string): string | null {
+  if (profileId === DEFAULT_PROMPT_PROFILE_ID) return null;
   try {
-    if (getActivePromptProfileId() === DEFAULT_PROMPT_PROFILE_ID) return null;
-    return getPromptProfileRoot(getActivePromptProfileId());
+    return getPromptProfileRoot(profileId);
   } catch (error) {
-    console.warn('📊 [DASHBOARD] Active prompt profile has no folder; showing the default tree:', error);
+    console.warn(`📊 [DASHBOARD] Prompt profile "${profileId}" has no folder; showing the default tree:`, error);
     return null;
   }
 }
 
 /**
- * Where a persona **read** resolves to: the profile's copy of the file, or the
- * default root's when the profile does not ship one.
+ * The profile ids the persona editor may read and write.
  *
- * This is `resolvePromptPath` verbatim, guarded only so a broken profile id
- * degrades to the default tree instead of failing the request.
+ * `default` and the main selection are always there. Every eligible guild's own
+ * label is there too (plan §3.5) — without that a guild folder could not be
+ * *created* from the UI, since creating it is the only way to get one.
+ *
+ * Everything else is refused. This is the security boundary of the profile-aware
+ * write path: without it, naming any folder that happens to exist under
+ * `prompt_storage/profiles/` would turn the persona editor into an
+ * arbitrary-file-write primitive over the operator's whole prompt tree — the
+ * profile root is not sandboxed per profile, so a permitted id decides which
+ * files are reachable. It is deliberately *not* `listPromptProfiles()`: a stray
+ * `profiles/backup/` folder must not become editable just by existing.
  */
-function promptReadPath(filePath: string): string {
+function editableProfileIds(): Set<string> {
+  const allowed = new Set<string>([DEFAULT_PROMPT_PROFILE_ID, getActivePromptProfileId()]);
+  for (const entry of guildPromptProfileService.listConfiguredGuilds()) {
+    allowed.add(entry.label);
+  }
+  return allowed;
+}
+
+/**
+ * Reject a profile the persona routes must not touch, as a 400.
+ *
+ * Two checks, both needed and in this order:
+ *
+ *   1. the explicit allow-list above — this is the one that matters, because
+ *      `getPromptProfileRoot` accepts any *existing* folder, so on its own it
+ *      would happily hand back `profiles/whatever/` and the write would land
+ *      there.
+ *   2. `getPromptProfileRoot`, which is the character/traversal validator. It
+ *      throws both for an unusable id and for an id with no folder; only the
+ *      second is expected here (a guild folder that does not exist yet is a state
+ *      the editor exists to fix), so that one specific case is let through and
+ *      `promptWritePath` does the `mkdir -p`.
+ *
+ * A throw from either becomes a 400 rather than a 500: both are operator input
+ * mistakes, and a 500 would read as "the dashboard is broken".
+ */
+function assertEditableProfile(profileId: string): Response | null {
+  const allowed = editableProfileIds();
+  if (!allowed.has(profileId)) {
+    const names = [...allowed].sort().join(', ');
+    return fail(
+      `"${profileId}" is not an editable prompt profile. Editable: ${names}. ` +
+        'Other profile folders under prompt_storage/profiles/ are not writable from here.',
+      400,
+    );
+  }
+
+  // The character/traversal check, run for its side effect. It cannot reject at
+  // this point — every id in the allow-list was already put through it (guild
+  // labels by `parseGuildPromptProfiles`, the main selection by
+  // `setActivePromptProfileId`) — but calling it makes the guarantee explicit
+  // rather than inferred, and it means `promptWritePath` below is joining onto a
+  // root some validator has approved.
+  //
+  // A *missing folder* is deliberately not an error: that is the normal state of a
+  // guild configured in `.env` and not yet used, and it is how a guild's first
+  // override — and therefore its folder — comes into existence from this UI.
   try {
-    return resolvePromptPath(filePath);
+    getPromptProfileRoot(profileId);
+    return null;
   } catch (error) {
-    console.warn(`📊 [DASHBOARD] Could not resolve ${filePath} against the active profile:`, error);
-    return join(PROMPT_STORAGE_DIR, filePath);
+    // A guild's own label is allowed to have no folder — that is how its first
+    // override, and therefore its folder, comes into existence from this editor.
+    // `default` and the main selection always have one, so for them a throw is a
+    // real error: `getPromptProfileRoot` is reporting an unusable id, and letting
+    // it through would mean joining a path `promptWritePath` never validated.
+    const isGuildLabel = guildPromptProfileService
+      .listConfiguredGuilds()
+      .some((entry) => entry.label === profileId);
+    if (isGuildLabel) return null;
+
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(`📊 [DASHBOARD] Rejected persona profile "${profileId}":`, error);
+    return fail(message, 400);
   }
 }
 
 /**
- * Where a persona **write** must land: always inside the active profile.
+ * Where a persona **read** resolves to for a named profile: the profile's own
+ * copy of the file, or the default root's when it does not ship one.
  *
- * WHY THIS IS NOT `resolvePromptPath`
- * -----------------------------------
- * `resolvePromptPath` is a read resolver. It answers the *default* root's path
- * whenever the profile does not already have its own copy of the file, because
- * at read time that is the file whose bytes the bot will use. Used for a write
- * that rule is actively harmful: the operator has a non-default profile
- * selected, opens a file the profile inherits from `default`, edits it and saves
- * — and the edit lands in `prompt_storage/`, changing the shared default for
- * every profile at once, with no override ever created and no sign in the UI.
+ * This is `resolvePromptPath` with the profile handed in explicitly rather than
+ * taken from the ambient context. The context cannot be used here: the dashboard
+ * has no guild, so `resolvePromptPath` would always answer for the main
+ * selection, and the editor would show the main page's bytes in every group.
+ * Mirrored rather than reused deliberately — the read *and* the write target of
+ * the same row must come from the same profile, and reusing a resolver that reads
+ * the effective profile is how those two drift apart.
  *
- * So writes resolve against the profile root unconditionally, which turns that
- * edit into an explicit override the persona list can show. The relative path
- * comes from {@link PROMPT_FILE_MAP}, which is checked by the caller before any
- * path is built — that allow-list is the traversal guard, and joining a known
- * literal onto the profile root cannot escape it.
+ * Degrades to the default root for a profile with no folder, which is also what
+ * the bot does, so the editor shows the bytes the bot would actually use.
  */
-function promptWritePath(filePath: string): string {
-  const root = activeProfileRoot();
-  return root === null ? join(PROMPT_STORAGE_DIR, filePath) : join(root, filePath);
+function promptReadPathFor(filePath: string, profileId: string): string {
+  const root = namedProfileRoot(profileId);
+  const defaultPath = join(PROMPT_STORAGE_DIR, filePath);
+  if (root === null) return defaultPath;
+
+  const own = join(root, filePath);
+  return existsSync(own) ? own : defaultPath;
 }
 
-/** Every file in the profile overlay, or nothing when `default` is active. */
-async function listProfileFiles(root: string): Promise<string[]> {
-  return listFilesRecursive(root);
+/**
+ * Where a persona **write** must land: always inside the *named* profile.
+ *
+ * WHY THIS IS NOT A READ RESOLVER
+ * -------------------------------
+ * The read resolver answers the *default* root's path whenever the profile does
+ * not already have its own copy of the file, because at read time that is the
+ * file whose bytes the bot will use. Used for a write that rule is actively
+ * harmful: the operator opens a file the profile inherits from `default`, edits
+ * it and saves — and the edit lands in `prompt_storage/`, changing the shared
+ * default for every profile at once, with no override ever created and no sign in
+ * the UI.
+ *
+ * So writes resolve against the named profile's root unconditionally, which turns
+ * that edit into an explicit override the persona list can show. With the profile
+ * dimension this matters *more*, not less: the editor now writes several profiles
+ * side by side, and "which tree did that save touch" is the first question the UI
+ * has to answer for every row.
+ *
+ * The relative path comes from {@link PROMPT_FILE_MAP}, which the route checks
+ * before any path is built — that allow-list is the traversal guard, and joining
+ * a known literal onto a root that {@link assertEditableProfile} has already
+ * approved cannot escape it. A profile with no folder resolves through
+ * `prompt_storage/profiles/<id>` rather than throwing, and the route's
+ * `mkdir -p` creates it on save: that is the mechanism by which a guild's first
+ * override comes into existence.
+ */
+function promptWritePath(filePath: string, profileId: string): string {
+  if (profileId === DEFAULT_PROMPT_PROFILE_ID) return join(PROMPT_STORAGE_DIR, filePath);
+
+  const root = namedProfileRoot(profileId);
+  return root === null ? join(PROMPT_PROFILES_DIR, profileId, filePath) : join(root, filePath);
 }
 
-async function buildPersonaPayload() {
-  const activeProfile = getActivePromptProfileId();
-  const profileRoot = activeProfileRoot();
+/** Every file in the profile overlay, or nothing when there is no overlay root. */
+async function listProfileFiles(root: string | null): Promise<string[]> {
+  return root === null ? [] : listFilesRecursive(root);
+}
+
+/**
+ * The profiles the persona editor lists, in the order the UI shows them.
+ *
+ * `kind` exists so the UI can badge them rather than pattern-matching on the id:
+ * `default` is the shared tree, `main` is whatever the main page currently
+ * resolves to, and `guild` is an eligible guild's own folder. `main` is marked on
+ * exactly one entry, and a guild whose label happens to *be* the main selection
+ * is still reported as `main` — it is one profile with two descriptions, and
+ * listing it twice would give the editor two groups editing the same bytes.
+ */
+function personaProfileGroups() {
+  const mainId = getActivePromptProfileId();
+  const groups: Array<{
+    id: string;
+    label: string;
+    kind: 'default' | 'main' | 'guild';
+    main: boolean;
+    guildId?: string;
+  }> = [];
+
+  groups.push({
+    id: DEFAULT_PROMPT_PROFILE_ID,
+    label: DEFAULT_PROMPT_PROFILE_ID,
+    kind: 'default',
+    // `default` is the main selection whenever nothing else resolves to it.
+    main: mainId === DEFAULT_PROMPT_PROFILE_ID,
+  });
+
+  if (mainId !== DEFAULT_PROMPT_PROFILE_ID) {
+    groups.push({ id: mainId, label: mainId, kind: 'main', main: true });
+  }
+
+  for (const entry of guildPromptProfileService.listConfiguredGuilds()) {
+    if (groups.some((group) => group.id === entry.label)) continue;
+    groups.push({ id: entry.label, label: entry.label, kind: 'guild', main: false, guildId: entry.guildId });
+  }
+
+  return groups;
+}
+
+/**
+ * The persona list, scoped to one profile and carrying the group list alongside.
+ *
+ * `profile` is the profile these `files` describe and — for the single-file
+ * routes — the one a save lands in, so the UI never has to keep the two apart.
+ * `profiles` is the whole editor's worth of groups with no guild picker: a
+ * guild's persona is edited in the same place as everything else, and the
+ * operator picks a group rather than a guild.
+ *
+ * Rows for a profile with no folder are listed anyway, with `overridden: false`
+ * and their `exists` reflecting the inherited default. That is deliberate: it is
+ * the state the operator is in the moment they configure `.env`, and hiding the
+ * group would leave no way to create the folder without hand-editing the
+ * filesystem.
+ */
+async function buildPersonaPayload(profileId: string) {
+  const profileRoot = namedProfileRoot(profileId);
 
   // The overlay tree is described by the profile that owns it, not as a pile of
   // loose `profiles/<id>/…` rows. Those raw entries would be listed as paths the
   // bot never loads (every load goes through the profile root) and would
-  // duplicate every row the active profile already contributes below.
+  // duplicate every row the profile already contributes below.
   const onDisk = (await listFilesRecursive(PROMPT_STORAGE_DIR)).filter(
     (path) => !path.startsWith('profiles/'),
   );
-  const profileFiles = profileRoot === null ? [] : await listProfileFiles(profileRoot);
+  const profileFiles = await listProfileFiles(profileRoot);
 
   const known = new Set(PROMPT_FILES.map((f) => f.path));
   const editable = new Set(known);
 
   const files = await Promise.all(
     PROMPT_FILES.map(async (meta) => {
-      const full = promptReadPath(meta.path);
+      const full = promptReadPathFor(meta.path, profileId);
       let size: number | null = null;
       let exists = false;
       try {
@@ -813,9 +1077,12 @@ async function buildPersonaPayload() {
         exists,
         bytes: size,
         editable: editable.has(meta.path),
+        // The profile these rows describe, so a grouped list never has to rely on
+        // the surrounding heading to know where a save would land.
+        profile: profileId,
         // The whole point of a profile: does this profile ship its own copy, or
-        // is it inheriting the default root's? One `existsSync` inside
-        // `resolvePromptPath` already made this decision, so it is a comparison.
+        // is it inheriting the default root's? The read resolver already made
+        // this decision, so it is a comparison.
         overridden: full !== join(PROMPT_STORAGE_DIR, meta.path),
       };
     })
@@ -824,20 +1091,24 @@ async function buildPersonaPayload() {
   // Anything on disk the bot does not read: listed so it is visible, never editable.
   const unlisted = onDisk
     .filter((path) => !known.has(path))
-    .map((path) => ({ path, label: path.split('/').pop() || path, kind: path.endsWith('.json') ? ('json' as const) : ('text' as const), hint: 'Not read by the bot, so editing it has no effect.', exists: true, bytes: null, editable: false, overridden: false }));
+    .map((path) => ({ path, label: path.split('/').pop() || path, kind: path.endsWith('.json') ? ('json' as const) : ('text' as const), hint: 'Not read by the bot, so editing it has no effect.', exists: true, bytes: null, editable: false, overridden: false, profile: DEFAULT_PROMPT_PROFILE_ID }));
 
-  // Files the active profile ships that the default root does not have. Without
-  // these the list would be a union of default only, and a profile that adds a
-  // prompt would be invisible in the one view that is meant to explain it.
+  // Files this profile ships that the default root does not have. Without these
+  // the list would be a union of default only, and a profile that adds a prompt
+  // would be invisible in the one view that is meant to explain it.
   const overlayOnly = profileFiles
     .filter((path) => !known.has(path))
-    .map((path) => ({ path, label: path.split('/').pop() || path, kind: path.endsWith('.json') ? ('json' as const) : ('text' as const), hint: `Only in profile "${activeProfile}".`, exists: true, bytes: null, editable: false, overridden: true }));
+    .map((path) => ({ path, label: path.split('/').pop() || path, kind: path.endsWith('.json') ? ('json' as const) : ('text' as const), hint: `Only in profile "${profileId}".`, exists: true, bytes: null, editable: false, overridden: true, profile: profileId }));
 
   return {
     directory: 'prompt_storage',
-    // Which profile the read/write paths below are resolving against. The UI
-    // needs this to tell the operator where a save will land.
-    profile: profileRoot === null ? DEFAULT_PROMPT_PROFILE_ID : activeProfile,
+    // Which profile the rows below belong to — and which profile a save made from
+    // them lands in. It is the *requested* id even when the folder does not exist
+    // yet, because "this group has no folder of its own" is a state the UI has to
+    // render ("will be created on first save"), not one to paper over by
+    // reporting `default` and quietly sending the save somewhere else.
+    profile: profileId,
+    profiles: personaProfileGroups(),
     files: [...files, ...unlisted, ...overlayOnly].sort((a, b) => a.path.localeCompare(b.path)),
   };
 }
@@ -1055,6 +1326,58 @@ export function startDashboardServer(): DashboardServer | null {
         }
 
         return json({ ok: true, ...buildPromptProfilePayload() });
+      }
+
+      // ---- Per-guild prompt profiles ------------------------------------------
+      // Two routes, structurally identical to the main profile pair above, so
+      // they inherit auth, the Host allowlist and the cross-site mutation check
+      // purely by living in this handler chain.
+      //
+      // `guilds[].profile` is the *effective* profile and `guilds[].source` names
+      // the precedence rule that produced it, so the UI never re-derives the
+      // precedence — which is exactly the duplication that drifts and then
+      // disagrees with what the bot actually does.
+      //
+      // The POST body is `{ guildId, profile }` with `profile: null` clearing.
+      // `setAssignment` owns the accept/reject rule (it is the only thing that
+      // knows the whitelist, the own-label exemption and the cap), so this route
+      // surfaces its messages as 400s rather than re-implementing any of them —
+      // in particular the eligibility gate, which is what makes `.env`
+      // authoritative rather than this file.
+      if (path === '/api/guild-prompt-profiles' && method === 'GET') {
+        return json(buildGuildPromptProfilesPayload());
+      }
+
+      if (path === '/api/guild-prompt-profiles' && method === 'POST') {
+        const body = await readJsonBody(request);
+        if (!body) return fail('Expected a JSON body', 400);
+        if (!('guildId' in body)) return fail('Missing "guildId"', 400);
+        if (!('profile' in body)) return fail('Missing "profile" (use null to clear the assignment)', 400);
+
+        const guildId = asString(body.guildId);
+        if (!guildId) return fail('"guildId" must be a non-empty string', 400);
+
+        const requested = body.profile;
+        // Explicit null clears; anything that is not null must be a string, so a
+        // client sending `{"profile": {}}` gets told so instead of it being
+        // coerced into the id "[object Object]" and rejected with a confusing
+        // allow-list message. Mirrors the `/override` handler exactly.
+        if (requested !== null && asString(requested) === undefined) {
+          return fail('"profile" must be a string or null', 400);
+        }
+
+        try {
+          guildPromptProfileService.setAssignment(guildId, requested as string | null);
+        } catch (error) {
+          // setAssignment only throws its own operator-facing validation messages —
+          // an unlisted guild, an unallowed profile, the cap — which is what the
+          // operator needs and carries no internals. Returned as-is, and logged so
+          // a future failure mode that does leak cannot pass silently.
+          console.warn(`📊 [DASHBOARD] Rejected guild prompt profile for ${guildId}:`, error);
+          return fail(error instanceof Error ? error.message : String(error), 400);
+        }
+
+        return json({ ok: true, ...buildGuildPromptProfilesPayload() });
       }
 
       // ---- LLM usage ---------------------------------------------------
@@ -1340,26 +1663,39 @@ export function startDashboardServer(): DashboardServer | null {
       }
 
       // ---- Persona ---------------------------------------------------------
+      // Both routes take an optional `profile`, and both resolve it through
+      // `requestedProfileId` — so the read and the write of one row always name
+      // the same profile. Omitting it is exactly today's behaviour (the main
+      // selection), which is what keeps existing clients and the existing tests
+      // working against a new field on the payload.
       if (path === '/api/persona' && method === 'GET') {
         const requested = url.searchParams.get('path');
+        const profileId = requestedProfileId(url.searchParams.get('profile'));
 
         if (!requested) {
-          return json(await buildPersonaPayload());
+          return json(await buildPersonaPayload(profileId));
         }
 
         // Allow-listed first: `requested` is untrusted input and
-        // `promptReadPath` joins it onto a directory, so the traversal guard has
-        // to run before any path exists.
+        // `promptReadPathFor` joins it onto a directory, so the traversal guard
+        // has to run before any path exists.
         if (!PROMPT_FILE_MAP.has(requested)) {
           return fail('That file is not editable', 400);
         }
 
-        // Profile-aware: the profile's copy if it has one, else the default
-        // root's. Hardcoding PROMPT_STORAGE_DIR here would show the default
-        // bytes for a profile that overrides the file.
-        const full = promptReadPath(requested);
+        // The profile dimension is validated here too, not just on write. A read
+        // is only a path disclosure, but a folder the operator cannot edit is
+        // still not one they asked to see, and letting GET and PUT disagree about
+        // which ids are real would be its own class of bug.
+        const rejected = assertEditableProfile(profileId);
+        if (rejected) return rejected;
+
+        // Profile-aware: the named profile's copy if it has one, else the default
+        // root's. Hardcoding PROMPT_STORAGE_DIR here would show the default bytes
+        // for a profile that overrides the file.
+        const full = promptReadPathFor(requested, profileId);
         if (!existsSync(full)) {
-          return json({ path: requested, kind: PROMPT_FILE_MAP.get(requested)!.kind, content: '', exists: false, profile: getActivePromptProfileId(), overridden: false });
+          return json({ path: requested, kind: PROMPT_FILE_MAP.get(requested)!.kind, content: '', exists: false, profile: profileId, overridden: false });
         }
         return json({
           path: requested,
@@ -1368,7 +1704,7 @@ export function startDashboardServer(): DashboardServer | null {
           exists: true,
           // Where this save will land, which is not always where these bytes came
           // from: see promptWritePath.
-          profile: getActivePromptProfileId(),
+          profile: profileId,
           overridden: full !== join(PROMPT_STORAGE_DIR, requested),
         });
       }
@@ -1393,6 +1729,21 @@ export function startDashboardServer(): DashboardServer | null {
         const content = asString(body.content);
         if (!filePath) return fail('Missing "path"', 400);
         if (content === undefined) return fail('Missing "content"', 400);
+
+        // Absent `profile` → the main selection, so a client that never heard of
+        // this dimension keeps saving where it always did.
+        const profileId = requestedProfileId(asString(body.profile));
+
+        // THE SECURITY GATE. Run before the write target is built, not after: the
+        // profile root is not sandboxed, so the profile id is what decides which
+        // files this route can reach. `getPromptProfileRoot` alone would accept
+        // any *existing* folder under `prompt_storage/profiles/`, turning the
+        // persona editor into an arbitrary-write primitive over the whole prompt
+        // tree; `assertEditableProfile` restricts it to `default`, the main
+        // selection, and eligible guilds' own labels. Both its checks return 400,
+        // not 500 — this is operator input, not a server fault.
+        const rejected = assertEditableProfile(profileId);
+        if (rejected) return rejected;
 
         const meta = PROMPT_FILE_MAP.get(filePath);
         if (!meta) return fail('That file is not editable', 400);
@@ -1425,10 +1776,12 @@ export function startDashboardServer(): DashboardServer | null {
           }
         }
 
-        // Profile-aware target. Under a non-default profile this is inside that
-        // profile's folder, so an edit to a file the profile inherits creates an
-        // override instead of quietly rewriting the shared default.
-        const full = promptWritePath(filePath);
+        // Profile-aware target, in the *requested* profile. Under a non-default
+        // profile this is inside that profile's folder, so an edit to a file the
+        // profile inherits creates an override instead of quietly rewriting the
+        // shared default. `mkdir -p` below is what creates a guild folder that
+        // does not exist yet.
+        const full = promptWritePath(filePath, profileId);
 
         // Optimistic concurrency. The editor sends the content it loaded as
         // `ifMatch`; if the file changed on disk since then — another tab, a
@@ -1439,14 +1792,15 @@ export function startDashboardServer(): DashboardServer | null {
           return fail('Missing "ifMatch": reload the file and save again', 428);
         }
 
-        // Read the *effective* content, not the file at the write target: the
-        // editor was handed `promptReadPath` bytes, so that is the version the
-        // 409 check has to compare against. Comparing against the write target
-        // instead would make every inherited file answer "not found" here and
-        // reject a perfectly good save with a conflict the operator cannot act
-        // on. It is also the correct scope for the check — two operators editing
-        // the same file under *different* profiles are editing different files.
-        const currentFull = promptReadPath(filePath);
+        // Read the *effective* content in the same profile, not the file at the
+        // write target: the editor was handed `promptReadPathFor` bytes, so that
+        // is the version the 409 check has to compare against. Comparing against
+        // the write target instead would make every inherited file answer "not
+        // found" here and reject a perfectly good save with a conflict the
+        // operator cannot act on. It is also the correct scope for the check —
+        // two operators editing the same file under *different* profiles are
+        // editing different files.
+        const currentFull = promptReadPathFor(filePath, profileId);
         let current = '';
         if (existsSync(currentFull)) {
           try {
@@ -1481,9 +1835,9 @@ export function startDashboardServer(): DashboardServer | null {
           path: filePath,
           bytes: Buffer.byteLength(content, 'utf-8'),
           reloaded: true,
-          // Named so the operator can see the save landed in the profile and not
-          // in the shared default root.
-          profile: getActivePromptProfileId(),
+          // Named so the operator can see which profile the save landed in and
+          // not in the shared default root.
+          profile: profileId,
         });
       }
 
