@@ -1,4 +1,5 @@
 import { AttachmentBuilder, Client, Collection, GatewayIntentBits, Events, Message, TextChannel, ThreadChannel, NewsChannel, VoiceChannel, StageChannel, DMChannel, GuildMember, StickerFormatType, userMention, type Channel } from 'discord.js';
+import { buildResponseCard } from '../utils/response-card';
 import { config } from '../utils/config';
 import { shouldTriggerBot, extractMessageContent, handleMessage, extractTriggerKeywords } from '../services/message-handler';
 import { boredomService } from '../services/boredom';
@@ -1319,8 +1320,11 @@ ${sections.join('\n\n')}
       orchestratorTurnJournal.markGenerated(turnId, eventId, instanceId, response.text, payload);
 
       // Send the response directly to Discord
-      if ((response.text && response.text.trim()) || response.attachments.length > 0) {
-        const sentMessage = await this.sendOrchestratorResponseToDiscord(message, context, response.text, eventId, turnId, allowedMentionUserIds, response.attachments);
+      // A GIF-only turn produces a perfectly valid card (image + footer), so
+        // `gifUrl` counts as sendable content here — without it, `response.text`
+        // being empty would silently drop the GIF.
+        if ((response.text && response.text.trim()) || response.attachments.length > 0 || response.gifUrl) {
+        const sentMessage = await this.sendOrchestratorResponseToDiscord(message, context, response.text, eventId, turnId, allowedMentionUserIds, response.attachments, response.gifUrl);
         if (!sentMessage) {
           orchestratorTurnJournal.markGenerated(turnId, eventId, instanceId, '', payload);
           return '';
@@ -1462,6 +1466,7 @@ ${sections.join('\n\n')}
     turnId: string,
     allowedMentionUserIds: Iterable<string> = [],
     attachments: GeneratedImageAttachment[] = [],
+    gifUrl?: string,
   ): Promise<Message | null> {
     if (!context.replyToMessageId && this.hasAlreadyReplied(message.id)) {
       console.warn(`⚠️ [Orchestrator] Suppressing duplicate reply for message ${message.id} (orchestrator path blocked by cross-path guard)`);
@@ -1470,7 +1475,14 @@ ${sections.join('\n\n')}
 
     console.log(`[Orchestrator] Sending response to Discord for event ${eventId}, turn ${turnId}`);
 
-    const formattedResponseText = formatDiscordResponseText(responseText);
+    // Same card as the direct path, so a reply reads identically whether it came
+    // from an orchestrated turn or a plain mention. The turn journal only
+    // replays `responseText`, so a replayed turn arrives here with no `gifUrl`
+    // and degrades to a text-only card rather than inventing one.
+    const card = config.bot.embed.enabled
+      ? buildResponseCard({ text: responseText, gifUrl })
+      : null;
+    const formattedResponseText = card ? '' : formatDiscordResponseText(responseText);
     const allowedMentions = buildAllowedMentions(allowedMentionUserIds);
     const files = buildDiscordImageFiles(attachments);
 
@@ -1478,6 +1490,7 @@ ${sections.join('\n\n')}
     if (context.replyToMessageId && 'send' in message.channel) {
       sentMessage = await message.channel.send({
         content: formattedResponseText || undefined,
+        embeds: card ? [card] : undefined,
         allowedMentions,
         files,
         reply: { messageReference: context.replyToMessageId, failIfNotExists: false },
@@ -1485,6 +1498,7 @@ ${sections.join('\n\n')}
     } else {
       sentMessage = await message.reply({
         content: formattedResponseText || undefined,
+        embeds: card ? [card] : undefined,
         allowedMentions,
         files,
         failIfNotExists: false,
@@ -2488,10 +2502,23 @@ ${sections.join('\n\n')}
         return;
       }
 
-      // Discord has a 2000 character limit for messages; escape before truncating
-      // because inserted Markdown backslashes count toward that limit.
-      const formattedResponse = formatDiscordResponseText(response.text);
       const allowedMentions = buildAllowedMentions(allowedMentionUserIds);
+
+      // One card per turn: the reply text as the description and the GIF as the
+      // banner image. Previously the text went out as message content and the
+      // GIF followed as a bare link in a second message, purely to keep the link
+      // out of view; an embed image does that without a second message.
+      //
+      // `card` being null is the escape hatch back to that old layout
+      // (EMBED_ENABLED=false), and also the "nothing to say" case.
+      const card = config.bot.embed.enabled
+        ? buildResponseCard({ text: response.text, gifUrl: response.gifUrl })
+        : null;
+
+      // Discord has a 2000 character limit for messages; escape before truncating
+      // because inserted Markdown backslashes count toward that limit. Unused when
+      // the card carries the text, so it is only computed in the text layout.
+      const formattedResponse = card ? '' : formatDiscordResponseText(response.text);
 
       // Check if channel is still available before sending (bot may have been kicked)
       if (!message.channel) {
@@ -2507,6 +2534,7 @@ ${sections.join('\n\n')}
       try {
         sentMessage = await message.reply({
           content: formattedResponse || undefined,
+          embeds: card ? [card] : undefined,
           allowedMentions,
           files,
           failIfNotExists: false,
@@ -2527,6 +2555,7 @@ ${sections.join('\n\n')}
             message.channel instanceof DMChannel) {
           sentMessage = await message.channel.send({
             content: formattedResponse ? `${message.author} ${formattedResponse}` : `${message.author}`,
+            embeds: card ? [card] : undefined,
             allowedMentions: buildAllowedMentions([...allowedMentionUserIds, message.author.id]),
             files,
           });
@@ -2535,8 +2564,11 @@ ${sections.join('\n\n')}
         }
       }
 
-      // Send GIF in a separate message below
-      if (response.gifUrl && 'send' in message.channel) {
+      // Fallback only: when the card is in use the GIF is already rendered as the
+      // embed's image, so posting it again would duplicate the GIF in chat. This
+      // branch is the pre-card layout (EMBED_ENABLED=false), where the GIF had no
+      // other way to render without exposing its link.
+      if (!card && response.gifUrl && 'send' in message.channel) {
         try {
           await message.channel.send(response.gifUrl);
           console.log(`🎬 [CLIENT] Sent GIF in separate message: ${response.gifUrl}`);

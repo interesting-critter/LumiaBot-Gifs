@@ -87,6 +87,32 @@ export function boolEnv(key: string, fallback: boolean): boolean {
   return fallback;
 }
 
+const HEX_COLOR_PATTERN = /^(?:#|0x)?([0-9a-f]{6})$/i;
+
+/**
+ * Read a 24-bit RGB colour tunable, as `0xRRGGBB`.
+ *
+ * Accepts `#9F3C41`, `9F3C41` and `0x9F3C41` (the last so an operator can paste
+ * the number straight out of a Discord client's colour picker). Three-digit
+ * shorthand is deliberately **not** accepted: `FFF` is ambiguous with the
+ * shorthand people copy from CSS, and guessing an expansion here would be a
+ * silent wrong-colour bug rather than a loud fallback. Anything else — a
+ * 3-digit form, a named colour, `0xZZZZZZ` — falls back with a warning, because
+ * a silently ignored colour is far easier to miss than one reported at boot.
+ */
+export function hexColorEnv(key: string, fallback: number, onWarning?: (message: string) => void): number {
+  const raw = rawEnv(key);
+  if (raw === undefined) return fallback;
+  const match = HEX_COLOR_PATTERN.exec(raw);
+  if (!match?.[1]) {
+    (onWarning ?? ((message: string) => console.warn(`⚠️ [Env] ${message}`)))(
+      `${key}="${raw}" is not a 24-bit hex colour (expected #RRGGBB) — using default ${fallback}`,
+    );
+    return fallback;
+  }
+  return Number.parseInt(match[1], 16);
+}
+
 /** Read a string tunable, falling back when unset or blank. */
 export function strEnv(key: string, fallback: string): string {
   const raw = rawEnv(key);

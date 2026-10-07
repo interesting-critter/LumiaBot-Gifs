@@ -17,6 +17,7 @@ import { channelHistoryService } from './channel-history';
 import { getAIService } from './google-genai';
 import { gifService } from './gif';
 import { formatDiscordResponseText } from '../utils/discord-markdown';
+import { buildResponseCard } from '../utils/response-card';
 import { dashboardLoggerService } from './dashboard-logger';
 
 interface BoredomState {
@@ -262,13 +263,32 @@ export class BoredomService {
         ? await gifService.extractAndResolveGif(response)
         : { text: response, gifUrl: undefined };
 
+      // Same single-card layout as the mention and /chat paths: spontaneous
+      // chatter is model output over live channel text, so it gets the identical
+      // treatment rather than a second, differently-formatted send path.
+      const card = config.bot.embed.enabled
+        ? buildResponseCard({ text: textWithoutGif, gifUrl })
+        : null;
+
+      // Always computed, and always the *text* form, because the dashboard log
+      // below records what the model said. Deriving it from the send shape would
+      // log an empty string for every card turn, which would silently blind the
+      // activity log.
       const formatted = formatDiscordResponseText(textWithoutGif);
-      if (!formatted.trim() && !gifUrl) {
+      if (!formatted.trim() && !card) {
         console.warn('⚠️ [BOREDOM] Generated empty message, skipping output.');
         return false;
       }
 
-      if (formatted.trim()) {
+      if (card) {
+        await channel.send({
+          embeds: [card],
+          // See the note below on why this is the shared helper rather than an
+          // inline `{ parse: [] }`. An embed never resolves mentions anyway; the
+          // helper is passed for consistency with the text path.
+          allowedMentions: buildAllowedMentions(),
+        });
+      } else if (formatted.trim()) {
         // The text is model output over whatever the channel was talking about, so
         // it can contain anything the prompt did — including a `@everyone`
         // copied out of a linked page. `buildAllowedMentions` is the shared form
@@ -286,7 +306,11 @@ export class BoredomService {
         });
       }
 
-      if (gifUrl) {
+      // Pre-card layout only. With the card the GIF is already the embed's
+      // image; sending the bare link here too would show it twice and put the
+      // URL back on screen, which is exactly what the card was introduced to
+      // avoid.
+      if (!card && gifUrl) {
         await channel.send(gifUrl);
       }
 

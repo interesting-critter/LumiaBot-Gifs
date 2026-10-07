@@ -1,4 +1,4 @@
-import { boolEnv, floatEnv, intEnv, strEnv } from './env';
+import { boolEnv, floatEnv, hexColorEnv, intEnv, strEnv } from './env';
 
 /**
  * Env vars that are read as bounded numbers, for the boot-time sanity report in
@@ -308,6 +308,23 @@ export const config = {
     // When true, the bot only responds in Discord channels marked NSFW
     // (reuses the same age-gating used for NSFW image generation).
     nsfwOnly: boolEnv('NSFW_ONLY', false),
+    /**
+     * Presentation of the reply "card" (embed) the bot posts instead of a bare
+     * text message — see `src/utils/response-card.ts`.
+     *
+     * `EMBED_ENABLED` exists so the previous plain-text-plus-separate-GIF
+     * layout can be restored without a code change: an operator who preferred
+     * it (or a downstream fork that parses message content) can flip this back
+     * off in `.env` and keep everything else.
+     */
+    embed: {
+      enabled: boolEnv('EMBED_ENABLED', true),
+      color: hexColorEnv('BOT_EMBED_COLOR', 0x9f3c41),
+      // `{botName}` is substituted at render time (not here) so the accent
+      // framing can be reworded without restating the bot's display name.
+      authorTemplate: strEnv('BOT_EMBED_AUTHOR', '⋆˖⁺‧₊☽{botName}☾₊‧⁺˖⋆'),
+      footer: strEnv('BOT_EMBED_FOOTER', '૮₍ ˃ ⤙ ˂ ₎ა arf.'),
+    },
   },
   openai: {
     apiKey: process.env.OPENAI_API_KEY!,

@@ -3,6 +3,8 @@ import { getAIService } from '../services/google-genai';
 import { getErrorMessage } from '../services/prompts';
 import { gifService } from '../services/gif';
 import { formatDiscordResponseText } from '../utils/discord-markdown';
+import { buildResponseCard } from '../utils/response-card';
+import { config } from '../utils/config';
 import { buildAllowedMentions } from '../utils/permissions';
 import type { Command } from '../bot/client';
 
@@ -90,16 +92,28 @@ const command: Command = {
         ? await gifService.extractAndResolveGif(response)
         : { text: response, gifUrl: undefined };
 
-      const formatted = formatDiscordResponseText(textWithoutGif);
+      // One card per turn, same shape as the mention path: the reply is the
+      // description and the GIF is the banner image, so the GIF never appears as
+      // a bare link and no second message is needed.
+      const card = config.bot.embed.enabled
+        ? buildResponseCard({ text: textWithoutGif, gifUrl })
+        : null;
+      const formatted = card ? '' : formatDiscordResponseText(textWithoutGif);
 
       // Model output is attacker-influenceable: the prompt can carry a
       // web-search result or a quoted message containing `@everyone`, and
       // `editReply` with no allowedMentions falls back to discord.js's default
       // of parsing mentions. `parse: []` is the hardened form the mention
       // path already uses.
-      await interaction.editReply({ content: formatted || '...', allowedMentions: buildAllowedMentions() });
+      await interaction.editReply({
+        content: formatted || (card ? undefined : '...'),
+        embeds: card ? [card] : undefined,
+        allowedMentions: buildAllowedMentions(),
+      });
 
-      if (gifUrl) {
+      // Pre-card layout only: with the card the GIF is already rendered as the
+      // embed image, and following up would show it twice.
+      if (!card && gifUrl) {
         await interaction.followUp({ content: gifUrl, allowedMentions: buildAllowedMentions() });
       }
     } catch (error) {

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { boolEnv, floatEnv, intEnv, strEnv } from '../env';
+import { boolEnv, floatEnv, hexColorEnv, intEnv, strEnv } from '../env';
 
 /**
  * These helpers exist because a bare `parseInt(process.env.X || '')` yields NaN
@@ -148,6 +148,38 @@ describe('boolEnv', () => {
     expect(boolEnv(KEY, true)).toBe(true);
     set('2');
     expect(boolEnv(KEY, false)).toBe(false);
+  });
+});
+
+describe('hexColorEnv', () => {
+  test('returns the fallback when the variable is missing or blank', () => {
+    set(undefined);
+    expect(hexColorEnv(KEY, 0x9f3c41)).toBe(0x9f3c41);
+    set('  ');
+    expect(hexColorEnv(KEY, 0x9f3c41)).toBe(0x9f3c41);
+  });
+
+  test('accepts #RRGGBB, bare RRGGBB and 0xRRGGBB', () => {
+    set('#9F3C41');
+    expect(hexColorEnv(KEY, 0)).toBe(0x9f3c41);
+    set('9F3C41');
+    expect(hexColorEnv(KEY, 0)).toBe(0x9f3c41);
+    set('0x9F3C41');
+    expect(hexColorEnv(KEY, 0)).toBe(0x9f3c41);
+    set('  #ffffff  ');
+    expect(hexColorEnv(KEY, 0)).toBe(0xffffff);
+  });
+
+  test('falls back and warns for anything that is not 24-bit hex', () => {
+    // A 3-digit form is rejected rather than expanded: `FFF` is ambiguous with
+    // the CSS shorthand, and guessing would produce a silently wrong colour.
+    for (const bad of ['fff', '#FFF', 'red', '#9F3C4', '#9F3C411', '0xZZZZZZ', '#GGGGGG']) {
+      const warnings: string[] = [];
+      set(bad);
+      expect(hexColorEnv(KEY, 0x9f3c41, (m) => warnings.push(m))).toBe(0x9f3c41);
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain(KEY);
+    }
   });
 });
 
