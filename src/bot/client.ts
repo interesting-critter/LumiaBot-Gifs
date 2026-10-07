@@ -181,7 +181,7 @@ function getMentionedUserDisplayMap(message: Message): Map<string, string> {
   return mentionedUsers;
 }
 
-function buildDiscordImageFiles(attachments: GeneratedImageAttachment[]): AttachmentBuilder[] {
+export function buildDiscordImageFiles(attachments: GeneratedImageAttachment[]): AttachmentBuilder[] {
   return attachments.map((attachment) => new AttachmentBuilder(attachment.data, {
     name: attachment.name,
   }));
