@@ -55,7 +55,7 @@
       "caseSensitive": false
     },
     {
-      "match": "⋆˖⁺‧₊☽𝕔𝕣𝕚𝕥𝕥𝕖𝕣☾₊‧⁺˖⋆",
+      "match": "⋆⋅⁺˖☽𝕔𝕣𝕚𝕥𝕥𝕠𝕣𝕦𝕤☾˖⁺⋅⋆",
       "replace": "Critter",
       "regex": false,
       "caseSensitive": false
