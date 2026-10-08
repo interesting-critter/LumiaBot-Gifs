@@ -33,11 +33,16 @@
  *
  * WHAT IS NOT ASSERTED
  * --------------------
- * The 30-second config cache is deliberately left as it is: keyed on
- * `getPromptCacheGeneration()`, so a profile switch invalidates it. Scenario
- * `override` reads `isConfigured()` immediately after each switch, which is
- * only correct if that invalidation still happens — a fix that dropped the
- * cache would still pass, and one that broke the generation key would not.
+ * Scenario `override` reads `isConfigured()` immediately after each switch, which
+ * is only correct if the cache's `(profile, generation)` invalidation still
+ * happens — a fix that dropped the cache would still pass, and one that broke the
+ * generation key would not.
+ *
+ * Scenario `perGuild` is a separate pin: the same 30s cache, but with two guilds
+ * on two different profiles alternating *inside a single window*. That is the
+ * cross-talk the `(profile, generation)` key exists to prevent, and it is
+ * invisible to any test that only ever switches the main selection, because a
+ * switch also moves the generation.
  *
  * WHY A SUBPROCESS
  * ----------------
@@ -81,6 +86,7 @@ const NEG_PATH = 'config/image_prompt_neg.txt';
 
 const PROFILE_BASE_URL = 'http://art.invalid:7801';
 const DEFAULT_BASE_URL = 'http://default.invalid:7801';
+const PROFILE_B_BASE_URL = 'http://wisp.invalid:7801';
 
 /**
  * The harness, run as a cold `bun` process.
@@ -102,6 +108,9 @@ const REPO = ${JSON.stringify(REPO_ROOT)};
 const ROOT = ${JSON.stringify(root)};
 const SCENARIO = ${JSON.stringify(scenario)};
 const PROFILE = ${JSON.stringify(PROFILE)};
+const PROFILE_B = ${JSON.stringify(PROFILE_B)};
+const GUILD_A = ${JSON.stringify(GUILD_A)};
+const GUILD_B = ${JSON.stringify(GUILD_B)};
 const MARKER = ${JSON.stringify(MARKER)};
 const CONFIG_PATH = ${JSON.stringify(CONFIG_PATH)};
 const POS_PATH = ${JSON.stringify(POS_PATH)};
@@ -169,6 +178,68 @@ read('profile.afterSwitchBack', () => prompts.getActivePromptProfileId());
 read('configured.afterSwitchBack', () => swarmUIService.isConfigured());
 
 read('generationMoved', () => prompts.getPromptCacheGeneration() > genAtStart);
+
+if (SCENARIO === 'perGuild') {
+  // ══ PER-GUILD CROSS-TALK ═══════════════════════════════════════════════════
+  // The guild→profile lookup is injected rather than imported (\`prompts.ts\` is a
+  // leaf module; see its DEPENDENCY DIRECTION note), so the harness stands one in
+  // exactly as the composition root does.
+  prompts.setGuildProfileResolver((guildId) =>
+    guildId === GUILD_A ? PROFILE : guildId === GUILD_B ? PROFILE_B : 'default');
+
+  // The apiUrl the *loader* actually opened, which is stronger evidence than
+  // a boolean: it names the file the value came from.
+  function apiUrlOf() {
+    // \`getConfig()\` is private, and it should stay that way: the only thing
+    // under test is what a *public* caller sees through the cache, and a
+    // test-only accessor would be a second thing to keep correct. Bracket
+    // access is how this harness reads the one thing \`isConfigured()\` hides.
+    const cfg = swarmUIService['getConfig']();
+    return cfg === null ? '(null)' : String(cfg.apiUrl ?? '(none)');
+  }
+
+  const genBefore = prompts.getPromptCacheGeneration();
+
+  read('configured.default', () => swarmUIService.isConfigured());
+
+  // ── Round one, alternating. Nothing here moves the generation counter or the
+  //    main selection, so the profile half of the cache key is all there is.
+  read('profile.guildA', () => prompts.runWithPromptContext(GUILD_A, () =>
+    prompts.getEffectivePromptProfileId()));
+  read('configured.guildA.1', () => prompts.runWithPromptContext(GUILD_A, () =>
+    swarmUIService.isConfigured()));
+  read('apiUrl.guildA', () => prompts.runWithPromptContext(GUILD_A, apiUrlOf));
+
+  read('profile.guildB', () => prompts.runWithPromptContext(GUILD_B, () =>
+    prompts.getEffectivePromptProfileId()));
+  read('configured.guildB.1', () => prompts.runWithPromptContext(GUILD_B, () =>
+    swarmUIService.isConfigured()));
+  read('apiUrl.guildB', () => prompts.runWithPromptContext(GUILD_B, apiUrlOf));
+
+  // ── Round two, same order.
+  read('configured.guildA.2', () => prompts.runWithPromptContext(GUILD_A, () =>
+    swarmUIService.isConfigured()));
+  read('apiUrl.guildA.2', () => prompts.runWithPromptContext(GUILD_A, apiUrlOf));
+  read('configured.guildB.2', () => prompts.runWithPromptContext(GUILD_B, () =>
+    swarmUIService.isConfigured()));
+
+  // ── Round three, reversed: the ordering a shared single slot gets wrong in
+  //    the other direction.
+  read('configured.guildB.3', () => prompts.runWithPromptContext(GUILD_B, () =>
+    swarmUIService.isConfigured()));
+  read('configured.guildA.3', () => prompts.runWithPromptContext(GUILD_A, () =>
+    swarmUIService.isConfigured()));
+
+  // Proves the two halves of the key really are both required: if the profile
+  // half were absent the reads above would have been served from one entry, and
+  // if the generation half were absent this could not be true either.
+  read('generationHeld', () => prompts.getPromptCacheGeneration() === genBefore);
+
+  // ── Outside any wrapper: back to the main selection. A guild-less caller must
+  //    not inherit whichever guild happened to run last.
+  read('effective.outsideAnyWrapper', () => prompts.getEffectivePromptProfileId());
+  read('configured.outsideAnyWrapper', () => swarmUIService.isConfigured());
+}
 
 console.log(MARKER + JSON.stringify(t));
 `;
@@ -257,6 +328,35 @@ function makeOverrideRoot(): string {
   return root;
 }
 
+/**
+ * Fixture C — the shape the per-guild scenario needs, and the one that makes a
+ * shared cache entry impossible to confuse for a correct answer.
+ *
+ * Three different answers are reachable:
+ *
+ *   default        → no file at all              → `isConfigured() === false`
+ *   `art` (A)      → `{ enabled: true }`         → `isConfigured() === true`
+ *   `wisp` (B)     → `{ enabled: false }`        → `isConfigured() === false`
+ *
+ * `wisp` writing an explicit `enabled: false` is deliberate. It distinguishes
+ * "profile B's config says no" from "no config was found", and it makes the
+ * cross-talk regression *detectable in the opposite direction* too: a cache that
+ * latched onto A's `true` entry fails on B, and one that latched onto `default`'s
+ * `null` fails on A.
+ */
+function makePerGuildRoot(): string {
+  const root = mkdtempSync(join(tmpdir(), 'lumia-swarmui-per-guild-'));
+  writeFixture(root, join('profiles', PROFILE, CONFIG_PATH), JSON.stringify({
+    enabled: true,
+    apiUrl: PROFILE_BASE_URL,
+  }));
+  writeFixture(root, join('profiles', PROFILE_B, CONFIG_PATH), JSON.stringify({
+    enabled: false,
+    apiUrl: PROFILE_B_BASE_URL,
+  }));
+  return root;
+}
+
 const scratchDirs: string[] = [];
 
 function tracked(dir: string): string {
@@ -294,10 +394,79 @@ describe('SwarmUI honours the active prompt profile for config/swarm_cfg.json', 
   });
 
   test('the profile switch still invalidates the swarmui config cache', () => {
-    // The cache is keyed on `getPromptCacheGeneration()`, so reading
+    // The cache is keyed on `(profile, generation)`, so reading
     // `isConfigured()` immediately after a switch cannot be served from the
     // previous profile's entry. Deliberately unchanged by the fix.
     expect(t['generationMoved']).toBe('true');
+  });
+});
+
+/**
+ * THE PER-GUILD CROSS-TALK PIN
+ * ---------------------------
+ * Every other scenario here drives the *main* selection, which means it also
+ * moves `getPromptCacheGeneration()` — so those scenarios pass even against a
+ * cache keyed on the generation alone. They therefore prove nothing about two
+ * guilds, and this one exists for that.
+ *
+ * The scenario below runs two guilds on two profiles through
+ * `runWithPromptContext()` and reads `isConfigured()` on each, repeatedly and
+ * with no switch in between — so the generation counter is provably constant for
+ * the whole sequence and the *only* thing that can keep the two apart is the
+ * profile half of the cache key. Against the previous single-slot
+ * `(expiresAt, generation)` cache, whichever guild read first wins for the next
+ * 30 seconds: guild A reports SwarmUI's status from guild B's `swarm_cfg.json`.
+ */
+const PROFILE_B = 'wisp';
+const GUILD_A = '111111111111111678';
+const GUILD_B = '222222222222222678';
+
+describe('two guilds on two profiles do not share the 30s swarm_cfg.json cache', () => {
+  // Default root: no config at all. Profile A: configured. Profile B:
+  // explicitly NOT configured. So `true`/`false`/`true` is a three-way answer
+  // that can only come from three distinct reads.
+  const root = tracked(makePerGuildRoot());
+  const t = runHarness(root, 'perGuild');
+
+  test('the fixture really has three different answers to give', () => {
+    // Control, so a wrongly-built fixture cannot make the assertions below pass
+    // or fail for the wrong reason.
+    expect(t['resolved.cfg.default']).toBe(join(root, CONFIG_PATH));
+    expect(existsSync(join(root, CONFIG_PATH))).toBe(false);
+    expect(t['configured.default']).toBe('false');
+  });
+
+  test('THE REGRESSION: interleaved guilds each read their own profile', () => {
+    expect(t['generationHeld']).toBe('true');
+    expect(t['profile.guildA']).toBe(PROFILE);
+    expect(t['profile.guildB']).toBe(PROFILE_B);
+
+    expect(t['configured.guildA.1']).toBe('true');
+    expect(t['configured.guildB.1']).toBe('false');
+
+    // Round two, same order again. If the cache were keyed on the generation
+    // alone these would repeat round one's answers.
+    expect(t['configured.guildA.2']).toBe('true');
+    expect(t['configured.guildB.2']).toBe('false');
+
+    // And reversed order, which is the ordering a shared slot gets wrong in the
+    // other direction.
+    expect(t['configured.guildB.3']).toBe('false');
+    expect(t['configured.guildA.3']).toBe('true');
+  });
+
+  test('each guild\'s config really did resolve to its own profile\'s file', () => {
+    // Provenance, not just "an answer came back": the apiUrl is read out of
+    // whichever file the loader opened, so this cannot be satisfied by any
+    // single cached entry.
+    expect(t['apiUrl.guildA']).toBe(PROFILE_BASE_URL);
+    expect(t['apiUrl.guildB']).toBe(PROFILE_B_BASE_URL);
+    expect(t['apiUrl.guildA.2']).toBe(PROFILE_BASE_URL);
+  });
+
+  test('a guild-less read still gets the main selection, not whichever guild ran last', () => {
+    expect(t['effective.outsideAnyWrapper']).toBe('default');
+    expect(t['configured.outsideAnyWrapper']).toBe('false');
   });
 });
 

@@ -1,7 +1,8 @@
 import { bot } from './bot/client';
 import { validateConfig, config, isMoonshotProvider } from './utils/config';
 import { loadBotDefinition } from './utils/bot-definition';
-import { setTemplateVariables } from './services/prompts';
+import { setGuildProfileResolver, setTemplateVariables } from './services/prompts';
+import { guildPromptProfileService } from './services/guild-prompt-profiles';
 import { initBalance } from './services/moonshot';
 import { knowledgeGraphService } from './services/knowledge-graph';
 import { modelSelectorService } from './services/model-selector';
@@ -14,6 +15,33 @@ import { Events } from 'discord.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
+
+/**
+ * Hand `prompts.ts` the per-guild profile resolver. This runs at **module init**,
+ * before `main()` and therefore before `bot.login()`, so no turn can ever start
+ * with the resolver unset.
+ *
+ * WHY IT IS INJECTED RATHER THAN IMPORTED (and why this file is the only place
+ * that knows about both halves)
+ * ---------------------------------------------------------------------------
+ * `prompts.ts` has to ask "which profile does the guild in the ambient context
+ * speak with?", but the service that can answer that imports `prompts.ts` for
+ * its default id. A static import in the other direction would be a cycle, and
+ * one of the two would initialise against a half-built namespace — with a
+ * symptom that is a silently wrong prompt profile rather than a crash.
+ *
+ * So `prompts.ts` stays a leaf and takes the lookup as an argument. Until this
+ * line runs, `getEffectivePromptProfileId()` degrades to the main selection —
+ * which is correct for DMs and for every guild-less entry point, and means an
+ * install that never reaches this file behaves exactly as it did before the
+ * feature existed.
+ *
+ * This file is the composition root (it already imports `bot`, the dashboard and
+ * every service), which is what makes it the one spot that can guarantee the
+ * wiring happens before any turn, rather than relying on some later import
+ * happening to pull the service in.
+ */
+setGuildProfileResolver((guildId) => guildPromptProfileService.resolveProfileFor(guildId));
 
 async function loadCommands() {
   const commandsPath = join(__dirname, 'commands');

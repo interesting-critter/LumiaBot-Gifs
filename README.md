@@ -681,6 +681,84 @@ prompt_storage/
 
 See `BOT_SETUP.md` for complete documentation on creating and customizing these files.
 
+### Prompt profiles
+
+A profile is a folder of prompt files under `prompt_storage/profiles/<id>/`,
+alongside the default profile at `prompt_storage/` itself. Only the files a
+profile actually contains are overridden; everything else falls back to the
+default profile, per file. So a profile holding just `persona/identity.txt`
+changes the bot's personality and inherits the guidelines, instructions,
+triggers and JSON configs as normal — you do not have to copy the whole tree.
+
+`PROMPT_PROFILES` is the whitelist of ids the dashboard may activate, as a
+comma-separated list. Ids may contain letters, digits, dot, dash and
+underscore, and must start with a letter or digit. Leaving it unset turns the
+feature off, and the bot behaves exactly as before using `default`.
+
+The profile in effect is, in order of precedence:
+
+1. the manual override picked in the dashboard,
+2. the profile bound to the current model (`MODEL_PROMPT_PROFILES`),
+3. `default`.
+
+> **Switching model clears the manual override.** This is deliberate and it
+> surprises people: switching model in the dashboard (or reverting to
+> `OPENAI_MODEL`) drops a profile you picked by hand and returns to the new
+> model's binding, or to `default`. Bind the profile to the model instead
+> (`MODEL_PROMPT_PROFILES`) if you want it to survive model switches.
+
+### Per-guild prompt profiles
+
+One bot process can speak with more than one persona. Three operator-designated
+guilds (by default) each get a prompt profile of their own; every other server
+keeps following the main page.
+
+```env
+GUILD_PROMPT_PROFILES=guild_a=123456789012345678,my-guild=987654321098765432
+GUILD_PROFILES_MAX=3
+```
+
+The format is comma-separated `(label)=(guildId)` pairs. The guild id is a
+Discord snowflake and the only value ever matched against Discord; the label is
+what the dashboard shows you.
+
+**The label is also that guild's profile folder name** — `guild_a` owns
+`prompt_storage/profiles/guild_a/`. So the label has to be a legal profile id:
+letters, digits, dot, dash and underscore, starting with a letter or digit.
+Write `guild_name` or `my-guild`, not `My Cool Guild`. A label that is not a
+valid profile id is dropped at startup with a warning naming it and the
+character rule, because it could not be used as a folder name — and nothing is
+silently slugified, since a renamed label would put the folder somewhere you
+did not expect. Malformed entries are dropped the same way, and the entries
+that are fine still load.
+
+Three guilds are accepted by default. Entries past the limit are dropped with
+a warning naming the cutoff; raise the ceiling with `GUILD_PROFILES_MAX` if you
+genuinely need more.
+
+Nothing is needed to get started. A guild whose folder already exists on disk
+uses it immediately, with no dashboard action and nothing stored, so the
+feature is useful as soon as the `.env` is in place. The dashboard's **Guilds**
+tab then lists the configured guilds so you can point one at a different
+profile, or clear the assignment to hand it back to that own-folder default.
+
+A guild's effective profile is the first of:
+
+1. an explicit assignment made on the Guilds tab,
+2. the guild's own folder, if it exists on disk,
+3. the main page — override, then model binding, then `default`.
+
+Guilds you did not list are structurally excluded from the feature: they can
+never be assigned, and always resolve to the main-page selection. DMs have no
+guild at all, so they follow it too.
+
+Assignments are persisted, so they survive a restart — and, unlike the
+main-page manual override described above, **a guild assignment survives a
+model change**. Switching models clears only the main page's override; a
+guild's selection is a deliberate per-server decision, not an exception to the
+model's configuration, so it is left alone. Guilds with no assignment are
+simply re-resolved as the main selection moves.
+
 ## Message Triggers
 
 The bot automatically responds to messages when:

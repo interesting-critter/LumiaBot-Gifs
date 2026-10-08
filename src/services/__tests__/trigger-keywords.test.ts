@@ -212,6 +212,162 @@ console.log(MARKER + JSON.stringify(t));
 `;
 }
 
+/**
+ * The **per-profile memoisation** harness.
+ *
+ * The two harnesses above re-derive `compileTriggers()` from the source, which
+ * is right for them (this suite is about the `\b` anchoring) and wrong for this
+ * one: the claim under test is a claim about the *real* memo in
+ * `message-handler.ts`, so the real module is imported. `mock.module` on
+ * `utils/paths.ts` is what redirects the prompt root, and it is registered
+ * before either `prompts.ts` or `message-handler.ts` is evaluated, so both see
+ * the same `prompts` instance — which is the whole point: the resolver and the
+ * memo that consumes it must be the same module pair (`bot-definition.ts`'s
+ * suite documents why that goes wrong in-process).
+ *
+ * `ensureTriggersFresh()` announces each compile on stdout, so the harness
+ * counts those lines instead of adding any production-side hook. That is what
+ * makes this a memoisation test rather than a correctness test: correctness
+ * holds for both a Map and a single slot, but only the Map compiles once.
+ */
+function perProfileHarnessSource(root: string): string {
+  return `
+import { mock } from 'bun:test';
+import { join } from 'node:path';
+
+const REPO = ${JSON.stringify(REPO_ROOT)};
+const ROOT = ${JSON.stringify(root)};
+const MARKER = ${JSON.stringify(MARKER)};
+const GUILD_A = ${JSON.stringify(GUILD_A)};
+const GUILD_B = ${JSON.stringify(GUILD_B)};
+const PROFILE_A = ${JSON.stringify(PROFILE_A)};
+const PROFILE_B = ${JSON.stringify(PROFILE_B)};
+
+const t = {};
+
+mock.module(join(REPO, 'src/utils/paths.ts'), () => ({
+  REPO_ROOT: REPO,
+  PROMPT_STORAGE_DIR: ROOT,
+  DATA_DIR: ROOT,
+  KNOWLEDGE_DOCUMENTS_DIR: join(REPO, 'knowledge_documents'),
+  dbPath: (name) => join(ROOT, name),
+}));
+
+// Imported before message-handler so the resolver is installed in the same
+// instance the memo reads from.
+const prompts = await import(join(REPO, 'src/services/prompts.ts'));
+const handler = await import(join(REPO, 'src/services/message-handler.ts'));
+
+// Count compiles without touching production code. \`ensureTriggersFresh()\`
+// logs one line per compile, naming the profile it compiled for — which doubles
+// as the per-profile assertion: a single global slot would only ever log the
+// profile that happened to be compiled last, and would log it far more often.
+const compiles = [];
+const realLog = console.log;
+console.log = (...args) => {
+  if (typeof args[0] === 'string' && args[0].includes('[HANDLER] Compiled')) {
+    compiles.push(args.join(' '));
+    return;
+  }
+  realLog(...args);
+};
+
+const PROMPTS = {
+  [GUILD_A]: PROFILE_A,
+  [GUILD_B]: PROFILE_B,
+};
+
+prompts.setGuildProfileResolver((guildId) => PROMPTS[guildId] ?? 'default');
+
+function read(label, fn) {
+  t[label] = String(fn());
+  return t[label];
+}
+
+/** Run one message through the real matcher under a guild's profile. */
+function asGuild(guildId, message) {
+  return prompts.runWithPromptContext(guildId, () =>
+    handler.shouldTriggerBot(message, BOT_ID));
+}
+
+function compilesAfter(label, since) {
+  read(label, () => compiles.length - since);
+  return compiles.length;
+}
+
+const BOT_ID = '999888777666555444';
+const A = GUILD_A;
+const B = GUILD_B;
+
+// ── Control: the two profiles really do carry disjoint keyword lists.
+read('keywords.A', () => JSON.stringify(prompts.runWithPromptContext(A, () =>
+  prompts.getTriggerKeywords().botMention)));
+read('keywords.B', () => JSON.stringify(prompts.runWithPromptContext(B, () =>
+  prompts.getTriggerKeywords().botMention)));
+
+// ── Round one, alternating. Each guild must compile exactly once, for its own
+//    profile: one slot cannot hold both lists at once.
+let mark = compiles.length;
+read('trigger.A.alphaUnderA', () => asGuild(A, 'alpha are you there'));
+compilesAfter('compiles.A.1', mark);
+
+mark = compiles.length;
+read('trigger.B.alphaUnderB', () => asGuild(B, 'alpha are you there'));
+read('trigger.B.betaUnderB', () => asGuild(B, 'beta are you there'));
+compilesAfter('compiles.B.1', mark);
+
+mark = compiles.length;
+read('trigger.A.betaUnderA', () => asGuild(A, 'beta are you there'));
+compilesAfter('compiles.A.2', mark);
+
+// ── Round two, same order. Nothing may recompile: this is the memo, and a
+//    single global slot would report 1 compile here for every guild.
+mark = compiles.length;
+read('trigger.A.alphaUnderA.2', () => asGuild(A, 'alpha are you there'));
+read('trigger.B.alphaUnderB.2', () => asGuild(B, 'alpha are you there'));
+read('trigger.A.betaUnderA.2', () => asGuild(A, 'beta are you there'));
+read('trigger.B.betaUnderB.2', () => asGuild(B, 'beta are you there'));
+compilesAfter('compiles.round2', mark);
+
+// ── And the extracted keywords, which is the user-visible form of the same
+//    claim: each guild sees only its own list.
+read('extract.A.alpha', () => JSON.stringify(prompts.runWithPromptContext(A, () =>
+  handler.extractTriggerKeywords('alpha and beta'))));
+read('extract.B.alpha', () => JSON.stringify(prompts.runWithPromptContext(B, () =>
+  handler.extractTriggerKeywords('alpha and beta'))));
+
+// ── Returning to a profile already seen must reuse its slot: A's slot holds
+//    patterns compiled from A's own array, so the answer is still correct and
+//    nothing is recompiled. This is the case a "the map must be dropped so every
+//    profile gets a new array" argument gets wrong.
+mark = compiles.length;
+read('trigger.A.alphaUnderA.3', () => asGuild(A, 'alpha are you there'));
+read('trigger.A.betaUnderA.3', () => asGuild(A, 'beta are you there'));
+compilesAfter('compiles.returnToA', mark);
+
+// Everything above — both guilds, both rounds, plus the return to A — cost
+// exactly two compiles, one per profile.
+read('compiles.total', () => compiles.length);
+read('compiles.log', () => JSON.stringify(compiles));
+
+// ── Outside any wrapper: the main selection, not whichever guild ran last.
+read('effective.outside', () => prompts.getEffectivePromptProfileId());
+read('trigger.outside.alpha', () => handler.shouldTriggerBot('alpha are you there', BOT_ID));
+read('trigger.outside.beta', () => handler.shouldTriggerBot('beta are you there', BOT_ID));
+
+// These two DO recompile, and that is pre-existing behaviour rather than
+// anything about profiles: \`default\` has no \`triggers.json\` here, so
+// \`getTriggerKeywords()\` takes its hardcoded fallback branch, which builds a
+// fresh array on every call. The reference check in \`ensureTriggersFresh()\`
+// cannot hit on a value that is new each time. Recorded so the total above is
+// not mistaken for a leak in the per-profile map.
+read('compiles.afterOutside', () => compiles.length);
+
+console.log = realLog;
+console.log(MARKER + JSON.stringify(t));
+`;
+}
+
 function run(source: string): Transcript {
   const dir = mkdtempSync(join(tmpdir(), 'lumia-triggers-harness-'));
   const harnessPath = join(dir, 'probe.ts');
@@ -268,6 +424,39 @@ function makeExampleRoot(): string {
 /** A prompt root with no `config/triggers.json` at all. */
 function makeBareRoot(): string {
   return mkdtempSync(join(tmpdir(), 'lumia-triggers-bare-'));
+}
+
+const PROFILE_A = 'art';
+const PROFILE_B = 'wisp';
+const GUILD_A = '111111111111111678';
+const GUILD_B = '222222222222222678';
+
+/** A triggers file whose `bot_mention` list is exactly `keywords`. */
+function triggersFile(keywords: string[]): string {
+  return JSON.stringify({
+    triggers: {
+      bot_mention: keywords,
+      search_intent: ['search'],
+      knowledge_intent: ['remember'],
+    },
+  });
+}
+
+/**
+ * Two profiles with **disjoint** trigger lists, and nothing at the default root.
+ *
+ * Disjoint is the whole design: if A's and B's lists shared a keyword, "guild B
+ * triggered on A's keyword" would be indistinguishable from correct behaviour and
+ * the whole scenario would be unfalsifiable. The default root is left empty so
+ * the fallback branch (`['bad kitty', 'lumia']`) is *not* what a guild sees —
+ * if a guild ever resolved to `default` instead of its profile, neither keyword
+ * would fire and the failure would be obvious rather than subtle.
+ */
+function makePerProfileRoot(): string {
+  const root = mkdtempSync(join(tmpdir(), 'lumia-triggers-per-profile-'));
+  writeFixture(root, join('profiles', PROFILE_A, 'config/triggers.json'), triggersFile(['alpha']));
+  writeFixture(root, join('profiles', PROFILE_B, 'config/triggers.json'), triggersFile(['beta']));
+  return root;
 }
 
 const scratchDirs: string[] = [];
@@ -367,6 +556,83 @@ describe('an install with no config/triggers.json still gets the hardcoded fallb
     expect(JSON.parse(t['knowledgeIntent.json'] as string)).toEqual([
       'loom', 'lucid loom',
     ]);
+  });
+});
+
+describe('compiled trigger patterns are memoised per profile, not globally', () => {
+  const root = tracked(makePerProfileRoot());
+  const t = run(perProfileHarnessSource(root));
+
+  test('the two profiles really do carry disjoint keyword lists', () => {
+    // Control. Without this, "guild B did not trigger on A's keyword" could be
+    // explained by a fixture where neither list contained it.
+    expect(JSON.parse(t['keywords.A'] as string)).toEqual(['alpha']);
+    expect(JSON.parse(t['keywords.B'] as string)).toEqual(['beta']);
+  });
+
+  test('THE REGRESSION: one guild\'s keywords do not trigger another', () => {
+    expect(t['trigger.A.alphaUnderA']).toBe('true');
+    // THE REGRESSION. A single global slot would answer `true` here, because the
+    // last guild to arrive would have overwritten the only compiled list.
+    expect(t['trigger.B.alphaUnderB']).toBe('false');
+    expect(t['trigger.B.betaUnderB']).toBe('true');
+    expect(t['trigger.A.betaUnderA']).toBe('false');
+  });
+
+  test('the memo actually memoises: each profile compiles exactly once', () => {
+    // This is what a single slot cannot do. It cannot hold two lists, so every
+    // message from the *other* guild changes `current.source` and recompiles all
+    // of that profile's regexes. Cost-only — correctness holds either way — which
+    // is why the comment in `message-handler.ts` calls it a regression that is
+    // invisible in a single-guild test.
+    expect(t['compiles.A.1']).toBe('1');
+    expect(t['compiles.B.1']).toBe('1');
+    // A's list was already compiled by now, so this must add nothing.
+    expect(t['compiles.A.2']).toBe('0');
+  });
+
+  test('alternating guilds recompile nothing: the hot-path cache is intact', () => {
+    expect(t['compiles.round2']).toBe('0');
+    // Every message so far — six guild-scoped reads across two profiles, plus
+    // the extracted-keyword reads — cost two compiles.
+    expect(t['compiles.total']).toBe('2');
+    // And the compiles that did happen each named their own profile, which is
+    // only possible if the map is keyed on the effective (guild-aware) profile
+    // rather than the main selection.
+    const log = JSON.parse(t['compiles.log'] as string) as string[];
+    expect(log.some((line) => line.includes(`profile ${PROFILE_A}`))).toBe(true);
+    expect(log.some((line) => line.includes(`profile ${PROFILE_B}`))).toBe(true);
+  });
+
+  test('the extracted keywords are per profile too, not just the boolean', () => {
+    // The user-visible form of the same claim: guild A is told "alpha" matched,
+    // guild B is told "beta" matched. A shared list would give both guilds both
+    // keywords, or the wrong one.
+    expect(JSON.parse(t['extract.A.alpha'] as string)).toEqual(['alpha']);
+    expect(JSON.parse(t['extract.B.alpha'] as string)).toEqual(['beta']);
+  });
+
+  test('returning to a profile already seen reuses its slot and stays correct', () => {
+    // The case the "must drop the cache so every profile gets a new array"
+    // argument gets wrong: A's slot holds patterns compiled from A's own array,
+    // so the hit is both free and correct. Nothing recompiles.
+    expect(t['compiles.returnToA']).toBe('0');
+    expect(t['trigger.A.alphaUnderA.3']).toBe('true');
+    expect(t['trigger.A.betaUnderA.3']).toBe('false');
+  });
+
+  test('outside any wrapper the main selection is used, not the last guild', () => {
+    expect(t['effective.outside']).toBe('default');
+    // The default root has no `triggers.json`, so the hardcoded fallback
+    // `['bad kitty', 'lumia']` applies and neither fixture keyword fires.
+    expect(t['trigger.outside.alpha']).toBe('false');
+    expect(t['trigger.outside.beta']).toBe('false');
+    // Two more compiles here, and correctly so: the fallback branch hands back a
+    // fresh array every call, so there is nothing stable to memoise against. This
+    // is why the per-profile compiles are counted *before* this block rather
+    // than after it — otherwise a pre-existing property of the no-file branch
+    // would read as a leak in the map.
+    expect(t['compiles.afterOutside']).toBe('4');
   });
 });
 

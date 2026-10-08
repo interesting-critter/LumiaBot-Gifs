@@ -642,6 +642,22 @@ details.reveal{border:0;background:none;box-shadow:none;backdrop-filter:none;-we
 .pfile-path{display:block;font-size:.6875rem;color:var(--muted-foreground);overflow-wrap:anywhere}
 .code-area{height:19rem;min-height:12rem;font-family:var(--font-mono,ui-monospace,monospace);font-size:.8125rem;line-height:1.55}
 .dirty-dot{display:inline-block;width:.45rem;height:.45rem;border-radius:999px;background:var(--pop-orange);margin-left:.4rem;vertical-align:middle}
+/* ---- Persona groups: one block per profile ----
+   The card used to hold a single scrollable list. With default + main + every
+   guild folder on one page, four independent 24rem scroll windows would be
+   four scrollbars and no way to see that another group had rows at all — so the
+   page scrolls once and each group is a plain block. */
+.pgroup-list{display:grid;gap:1.15rem}
+.pgroup{display:grid;gap:.45rem}
+.pgroup-head{display:flex;align-items:baseline;gap:.5rem;flex-wrap:wrap;margin:0}
+.pgroup-name{font-size:.875rem;font-weight:600;overflow-wrap:anywhere}
+.pgroup>.pfile-list{max-height:none;overflow:visible;-webkit-mask-image:none;mask-image:none}
+
+/* One card per guild, nested in the panel that explains them. The gap lives
+   here because #guild-list is a bare div: without it the cards butt together
+   and read as one card with three sets of controls. */
+#guild-list{display:grid;gap:.75rem;margin-top:1rem}
+#guild-list:empty{margin-top:0}
 
 /* ---- More sheet: a native dialog, using the system's overlay tokens ----
    showModal() supplies the focus trap, Escape handling and focus return, so
@@ -795,36 +811,8 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
     </div>
   </section>
 
-  <!-- ============ MEMORY ============ -->
-  <section class="view" id="view-memory" role="tabpanel" aria-labelledby="tab-memory" tabindex="-1">
-    <div class="stack stack-list">
-      <article class="ds-card">
-        <div class="card-pad">
-          <dl class="tiles tiles-2" style="margin-top:0">
-            <div class="tile"><dt>People</dt><dd id="mem-users">—</dd></div>
-            <div class="tile"><dt>Memories</dt><dd id="mem-entries">—</dd></div>
-            <div class="tile"><dt>Opinions</dt><dd id="mem-opinions">—</dd></div>
-            <div class="tile"><dt>Third party</dt><dd id="mem-third">—</dd></div>
-          </dl>
-          <div class="ds-field" style="margin:1rem 0 0">
-            <label class="ds-label" for="mem-q">Search people</label>
-            <input class="ds-input" type="search" id="mem-q" placeholder="Name or user ID" autocomplete="off">
-          </div>
-          <div class="ds-row">
-            <button class="ds-btn ds-btn-secondary" id="mem-refresh">
-              <svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.67981 13L3.67981 11.3333C3.67981 6.73096 7.4402 3 12.0789 3C15.1178 3 17.7799 4.60136 19.2545 7M2 11.3333L3.67981 13L5.35962 11.3333"/><path d="M20.3139 11V12.6667C20.3139 17.269 16.5391 21 11.8827 21C8.83213 21 6.15995 19.3986 4.67969 17M22.0001 12.6667L20.3139 11L18.6277 12.6667"/></svg>
-              Refresh
-            </button>
-          </div>
-        </div>
-      </article>
-
-      <div id="mem-list"></div>
-    </div>
-  </section>
-
   <!-- ============ SETUP ============ -->
-  <section class="view" id="view-setup" role="tabpanel" aria-labelledby="tab-setup" tabindex="-1">
+  <section class="view" id="view-setup" role="tabpanel" aria-labelledby="tab-more" tabindex="-1">
     <div class="stack stack-list">
 
       <article class="ds-card">
@@ -913,41 +901,6 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
     </div>
   </section>
 
-  <!-- ============ KNOWLEDGE ============ -->
-  <section class="view" id="view-knowledge" role="tabpanel" aria-labelledby="tab-knowledge" tabindex="-1">
-    <div class="stack stack-list">
-      <article class="ds-card">
-        <div class="card-pad">
-          <dl class="tiles tiles-2" style="margin-top:0">
-            <div class="tile"><dt>Documents</dt><dd id="kb-docs">&mdash;</dd></div>
-            <div class="tile"><dt>Topics</dt><dd id="kb-topics">&mdash;</dd></div>
-          </dl>
-          <div class="ds-field" style="margin:1rem 0 0">
-            <label class="ds-label" for="kb-q">Search documents</label>
-            <input class="ds-input" type="search" id="kb-q" placeholder="Keyword, title or body text" autocomplete="off">
-          </div>
-          <div class="filter-grid">
-            <div class="ds-field">
-              <label class="ds-label" for="kb-topic">Topic</label>
-              <select class="ds-select" id="kb-topic"><option value="">All topics</option></select>
-            </div>
-            <div class="ds-field" style="display:flex;align-items:flex-end">
-              <button class="ds-btn ds-btn-primary" id="kb-new" style="width:100%">New document</button>
-            </div>
-          </div>
-          <div class="ds-row">
-            <button class="ds-btn ds-btn-outline" id="kb-sync">
-              <svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.67981 13L3.67981 11.3333C3.67981 6.73096 7.4402 3 12.0789 3C15.1178 3 17.7799 4.60136 19.2545 7M2 11.3333L3.67981 13L5.35962 11.3333"/><path d="M20.3139 11V12.6667C20.3139 17.269 16.5391 21 11.8827 21C8.83213 21 6.15995 19.3986 4.67969 17M22.0001 12.6667L20.3139 11L18.6277 12.6667"/></svg>
-              Reload from files
-            </button>
-          </div>
-          <p class="hint" id="kb-hint"></p>
-        </div>
-      </article>
-      <div id="kb-list"></div>
-    </div>
-  </section>
-
   <!-- ============ CONVERSATIONS ============ -->
   <section class="view" id="view-conversations" role="tabpanel" aria-labelledby="tab-more" tabindex="-1">
     <div class="stack stack-list">
@@ -997,8 +950,78 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
     </div>
   </section>
 
+  <!-- ============ MEMORY ============ -->
+  <section class="view" id="view-memory" role="tabpanel" aria-labelledby="tab-more" tabindex="-1">
+    <div class="stack stack-list">
+      <article class="ds-card">
+        <div class="card-pad">
+          <dl class="tiles tiles-2" style="margin-top:0">
+            <div class="tile"><dt>People</dt><dd id="mem-users">—</dd></div>
+            <div class="tile"><dt>Memories</dt><dd id="mem-entries">—</dd></div>
+            <div class="tile"><dt>Opinions</dt><dd id="mem-opinions">—</dd></div>
+            <div class="tile"><dt>Third party</dt><dd id="mem-third">—</dd></div>
+          </dl>
+          <div class="ds-field" style="margin:1rem 0 0">
+            <label class="ds-label" for="mem-q">Search people</label>
+            <input class="ds-input" type="search" id="mem-q" placeholder="Name or user ID" autocomplete="off">
+          </div>
+          <div class="ds-row">
+            <button class="ds-btn ds-btn-secondary" id="mem-refresh">
+              <svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.67981 13L3.67981 11.3333C3.67981 6.73096 7.4402 3 12.0789 3C15.1178 3 17.7799 4.60136 19.2545 7M2 11.3333L3.67981 13L5.35962 11.3333"/><path d="M20.3139 11V12.6667C20.3139 17.269 16.5391 21 11.8827 21C8.83213 21 6.15995 19.3986 4.67969 17M22.0001 12.6667L20.3139 11L18.6277 12.6667"/></svg>
+              Refresh
+            </button>
+          </div>
+        </div>
+      </article>
+
+      <div id="mem-list"></div>
+    </div>
+  </section>
+
+  <!-- ============ KNOWLEDGE ============ -->
+  <section class="view" id="view-knowledge" role="tabpanel" aria-labelledby="tab-more" tabindex="-1">
+    <div class="stack stack-list">
+      <article class="ds-card">
+        <div class="card-pad">
+          <dl class="tiles tiles-2" style="margin-top:0">
+            <div class="tile"><dt>Documents</dt><dd id="kb-docs">&mdash;</dd></div>
+            <div class="tile"><dt>Topics</dt><dd id="kb-topics">&mdash;</dd></div>
+          </dl>
+          <div class="ds-field" style="margin:1rem 0 0">
+            <label class="ds-label" for="kb-q">Search documents</label>
+            <input class="ds-input" type="search" id="kb-q" placeholder="Keyword, title or body text" autocomplete="off">
+          </div>
+          <div class="filter-grid">
+            <div class="ds-field">
+              <label class="ds-label" for="kb-topic">Topic</label>
+              <select class="ds-select" id="kb-topic"><option value="">All topics</option></select>
+            </div>
+            <div class="ds-field" style="display:flex;align-items:flex-end">
+              <button class="ds-btn ds-btn-primary" id="kb-new" style="width:100%">New document</button>
+            </div>
+          </div>
+          <div class="ds-row">
+            <button class="ds-btn ds-btn-outline" id="kb-sync">
+              <svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.67981 13L3.67981 11.3333C3.67981 6.73096 7.4402 3 12.0789 3C15.1178 3 17.7799 4.60136 19.2545 7M2 11.3333L3.67981 13L5.35962 11.3333"/><path d="M20.3139 11V12.6667C20.3139 17.269 16.5391 21 11.8827 21C8.83213 21 6.15995 19.3986 4.67969 17M22.0001 12.6667L20.3139 11L18.6277 12.6667"/></svg>
+              Reload from files
+            </button>
+          </div>
+          <p class="hint" id="kb-hint"></p>
+        </div>
+      </article>
+      <div id="kb-list"></div>
+    </div>
+  </section>
+
   <!-- ============ PERSONA ============ -->
-  <section class="view" id="view-persona" role="tabpanel" aria-labelledby="tab-more" tabindex="-1">
+  <!-- Every profile gets its own group here, not a dropdown. The picker this
+       replaced made the operator choose a guild and then remember that choice
+       while editing, and the failure was silent: saving into the main selection
+       when you believed you were in a guild's folder changed the *wrong* tree
+       with no error anywhere. Listing the groups side by side makes the target
+       of a save something you can see rather than something you have to
+       remember. -->
+  <section class="view" id="view-persona" role="tabpanel" aria-labelledby="tab-persona" tabindex="-1">
     <div class="stack stack-list">
       <article class="ds-card">
         <div class="card-pad">
@@ -1006,7 +1029,7 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
             <h2 class="ds-section-title">Prompt files</h2>
             <span class="ds-badge" id="persona-count">&mdash;</span>
           </div>
-          <div class="pfile-list" id="persona-list"></div>
+          <div class="pgroup-list" id="persona-list"></div>
           <p class="hint" id="persona-profile-hint" hidden></p>
         </div>
       </article>
@@ -1031,6 +1054,25 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
     </div>
   </section>
 
+  <!-- ============ GUILDS ============ -->
+  <section class="view" id="view-guilds" role="tabpanel" aria-labelledby="tab-guilds" tabindex="-1">
+    <div class="stack stack-list">
+      <article class="ds-card">
+        <div class="card-pad">
+          <div class="card-head">
+            <h2 class="ds-section-title">Per-guild prompt profiles</h2>
+            <span class="ds-badge" id="guild-count">&mdash;</span>
+          </div>
+          <p class="hint">Each guild below can read a different set of prompt files from
+            every other guild. The main page selection still applies to any guild with no
+            assignment of its own.</p>
+          <p class="hint" id="guild-hint"></p>
+          <div id="guild-list"></div>
+        </div>
+      </article>
+    </div>
+  </section>
+
 </main>
 <nav class="ds-tabs" aria-label="Primary">
   <button type="button" class="ds-tab active" data-view="overview" aria-selected="true" aria-controls="view-overview" role="tab" id="tab-overview">
@@ -1041,13 +1083,17 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
     <span class="ico" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M12 22C17.5228 22 22 17.5228 22 12C22 6.47715 17.5228 2 12 2C6.47715 2 2 6.47715 2 12C2 13.5997 2.37562 15.1116 3.04346 16.4525C3.22094 16.8088 3.28001 17.2161 3.17712 17.6006L2.58151 19.8267C2.32295 20.793 3.20701 21.677 4.17335 21.4185L6.39939 20.8229C6.78393 20.72 7.19121 20.7791 7.54753 20.9565C8.88837 21.6244 10.4003 22 12 22Z"/></svg></span>
     Log
   </button>
-  <button type="button" class="ds-tab" data-view="memory" aria-selected="false" aria-controls="view-memory" role="tab" id="tab-memory">
-    <span class="ico" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="9" cy="9" r="2"/><path d="M13 15C13 16.1046 13 17 9 17C5 17 5 16.1046 5 15C5 13.8954 6.79086 13 9 13C11.2091 13 13 13.8954 13 15Z"/><path d="M2 12C2 8.22876 2 6.34315 3.17157 5.17157C4.34315 4 6.22876 4 10 4H14C17.7712 4 19.6569 4 20.8284 5.17157C22 6.34315 22 8.22876 22 12C22 15.7712 22 17.6569 20.8284 18.8284C19.6569 20 17.7712 20 14 20H10C6.22876 20 4.34315 20 3.17157 18.8284C2 17.6569 2 15.7712 2 12Z"/><path d="M19 12H15"/><path d="M19 9H14"/><path d="M19 15H16"/></svg></span>
-    Memory
+  <!-- Persona and Guilds took Memory's and Knowledge's slots. They are the two
+       controls this feature exists to expose, and burying both behind a sheet
+       would have left the operator one tap away from the thing they came for
+       while the log — which is a read-only viewer — kept a primary slot. -->
+  <button type="button" class="ds-tab" data-view="persona" aria-selected="false" aria-controls="view-persona" role="tab" id="tab-persona">
+    <span class="ico" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M9 11H15C16.1046 11 17 11.8954 17 13V19C17 20.1046 16.1046 21 15 21H9C7.89543 21 7 20.1046 7 19V13C7 11.8954 7.89543 11 9 11Z"/><path d="M12 7V4"/><path d="M9.5 4H14.5"/></svg></span>
+    Persona
   </button>
-  <button type="button" class="ds-tab" data-view="knowledge" aria-selected="false" aria-controls="view-knowledge" role="tab" id="tab-knowledge">
-    <span class="ico" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M4 19.5C4 20.8807 5.11929 22 6.5 22H20"/><path d="M6.5 2H20V22H6.5C5.11929 22 4 20.8807 4 19.5V4.5C4 3.11929 5.11929 2 6.5 2Z"/><path d="M9 7H16"/><path d="M9 11H16"/></svg></span>
-    Knowledge
+  <button type="button" class="ds-tab" data-view="guilds" aria-selected="false" aria-controls="view-guilds" role="tab" id="tab-guilds">
+    <span class="ico" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M16 21V19A4 4 0 0 0 12 15H6A4 4 0 0 0 2 19V21"/><circle cx="9" cy="7" r="4"/><path d="M22 21V19A4 4 0 0 0 18 15"/><path d="M16 3.13A4 4 0 0 1 16 11"/></svg></span>
+    Guilds
   </button>
   <button type="button" class="ds-tab" data-view="more" aria-selected="false" aria-haspopup="dialog" role="tab" id="tab-more">
     <span class="ico" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M12 13C13.6569 13 15 14.3431 15 16C15 17.6569 13.6569 19 12 19C10.3431 19 9 17.6569 9 16C9 14.3431 10.3431 13 12 13Z"/><path d="M12 5C13.6569 5 15 6.34315 15 8C15 9.65685 13.6569 11 12 11C10.3431 11 9 9.65685 9 8C9 6.34315 10.3431 5 12 5Z"/><path d="M12 21C10.3431 21 9 19.6569 9 18C9 16.3431 10.3431 15 12 15C13.6569 15 15 16.3431 15 18C15 19.6569 13.6569 21 12 21Z"/><path d="M12 3C10.3431 3 9 4.34315 9 6C9 7.65685 10.3431 9 12 9C13.6569 9 15 7.65685 15 6C15 4.34315 13.6569 3 12 3Z"/></svg></span>
@@ -1069,9 +1115,13 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
       <span class="ico" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M18.7083 8.5C18.7083 9.8377 17.9683 11.0437 16.8835 11.8215C16.5534 11.9939 16.2104 12.1418 15.8568 12.2628C15.3832 12.4257 15 12.8585 15 13.3666V14.5H9V13.3666C9 12.8585 8.61679 12.4257 8.14319 12.2628C7.7896 12.1418 7.44665 11.9939 7.11649 11.8215C6.03172 11.0437 5.29167 9.8377 5.29167 8.5C5.29167 4.98172 8.00992 2 12 2C15.9901 2 18.7083 4.98172 18.7083 8.5Z"/><path d="M12 15V22"/><path d="M9 18H15"/></svg></span>
       <span class="sheet-item-text"><span class="sheet-item-label">Integrations</span><span class="sheet-item-hint">Check the search and music servers</span></span>
     </button>
-    <button type="button" class="sheet-item" data-goto="persona">
-      <span class="ico" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M9 11H15C16.1046 11 17 11.8954 17 13V19C17 20.1046 16.1046 21 15 21H9C7.89543 21 7 20.1046 7 19V13C7 11.8954 7.89543 11 9 11Z"/><path d="M12 7V4"/><path d="M9.5 4H14.5"/></svg></span>
-      <span class="sheet-item-text"><span class="sheet-item-label">Persona</span><span class="sheet-item-hint">Edit the prompt files the bot reads</span></span>
+    <button type="button" class="sheet-item" data-goto="memory">
+      <span class="ico" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="9" cy="9" r="2"/><path d="M13 15C13 16.1046 13 17 9 17C5 17 5 16.1046 5 15C5 13.8954 6.79086 13 9 13C11.2091 13 13 13.8954 13 15Z"/><path d="M2 12C2 8.22876 2 6.34315 3.17157 5.17157C4.34315 4 6.22876 4 10 4H14C17.7712 4 19.6569 4 20.8284 5.17157C22 6.34315 22 8.22876 22 12C22 15.7712 22 17.6569 20.8284 18.8284C19.6569 20 17.7712 20 14 20H10C6.22876 20 4.34315 20 3.17157 18.8284C2 17.6569 2 15.7712 2 12Z"/><path d="M19 12H15"/><path d="M19 9H14"/><path d="M19 15H16"/></svg></span>
+      <span class="sheet-item-text"><span class="sheet-item-label">Memory</span><span class="sheet-item-hint">What the bot remembers about people</span></span>
+    </button>
+    <button type="button" class="sheet-item" data-goto="knowledge">
+      <span class="ico" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M4 19.5C4 20.8807 5.11929 22 6.5 22H20"/><path d="M6.5 2H20V22H6.5C5.11929 22 4 20.8807 4 19.5V4.5C4 3.11929 5.11929 2 6.5 2Z"/><path d="M9 7H16"/><path d="M9 11H16"/></svg></span>
+      <span class="sheet-item-text"><span class="sheet-item-label">Knowledge</span><span class="sheet-item-hint">Search and edit the document store</span></span>
     </button>
     <button type="button" class="sheet-item" data-goto="setup">
       <span class="ico" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M13.7654 2.15224C13.3978 2 12.9319 2 12 2C11.0681 2 10.6022 2 10.2346 2.15224C9.74457 2.35523 9.35522 2.74458 9.15223 3.23463C9.05957 3.45834 9.0233 3.7185 9.00911 4.09799C8.98826 4.65568 8.70226 5.17189 8.21894 5.45093C7.73564 5.72996 7.14559 5.71954 6.65219 5.45876C6.31645 5.2813 6.07301 5.18262 5.83294 5.15102C5.30704 5.08178 4.77518 5.22429 4.35436 5.5472C4.03874 5.78938 3.80577 6.1929 3.33983 6.99993C2.87389 7.80697 2.64092 8.21048 2.58899 8.60491C2.51976 9.1308 2.66227 9.66266 2.98518 10.0835C3.13256 10.2756 3.3397 10.437 3.66119 10.639C4.1338 10.936 4.43789 11.4419 4.43786 12C4.43783 12.5581 4.13375 13.0639 3.66118 13.3608C3.33965 13.5629 3.13248 13.7244 2.98508 13.9165C2.66217 14.3373 2.51966 14.8691 2.5889 15.395C2.64082 15.7894 2.87379 16.193 3.33973 17C3.80568 17.807 4.03865 18.2106 4.35426 18.4527C4.77508 18.7756 5.30694 18.9181 5.83284 18.8489C6.07289 18.8173 6.31632 18.7186 6.65204 18.5412C7.14547 18.2804 7.73556 18.27 8.2189 18.549C8.70224 18.8281 8.98826 19.3443 9.00911 19.9021C9.02331 20.2815 9.05957 20.5417 9.15223 20.7654C9.35522 21.2554 9.74457 21.6448 10.2346 21.8478C10.6022 22 11.0681 22 12 22C12.9319 22 13.3978 22 13.7654 21.8478C14.2554 21.6448 14.6448 21.2554 14.8477 20.7654C14.9404 20.5417 14.9767 20.2815 14.9909 19.902C15.0117 19.3443 15.2977 18.8281 15.781 18.549C16.2644 18.2699 16.8544 18.2804 17.3479 18.5412C17.6836 18.7186 17.927 18.8172 18.167 18.8488C18.6929 18.9181 19.2249 18.7756 19.6457 18.4527C19.9612 18.2105 20.1942 17.807 20.6601 16.9999C21.1261 16.1929 21.3591 15.7894 21.411 15.395C21.4803 14.8691 21.3377 14.3372 21.0148 13.9164C20.8674 13.7243 20.6602 13.5628 20.3387 13.3608C19.8662 13.0639 19.5621 12.558 19.5621 11.9999C19.5621 11.4418 19.8662 10.9361 20.3387 10.6392C20.6603 10.4371 20.8675 10.2757 21.0149 10.0835C21.3378 9.66273 21.4803 9.13087 21.4111 8.60497C21.3592 8.21055 21.1262 7.80703 20.6602 7C20.1943 6.19297 19.9613 5.78945 19.6457 5.54727C19.2249 5.22436 18.693 5.08185 18.167 5.15109C17.927 5.18269 17.6837 5.28136 17.3479 5.4588C16.8545 5.71959 16.2644 5.73002 15.7811 5.45096C15.2977 5.17191 15.0117 4.65566 14.9909 4.09794C14.9767 3.71848 14.9404 3.45833 14.8477 3.23463C14.6448 2.74458 14.2554 2.35523 13.7654 2.15224Z"/></svg></span>
@@ -1272,17 +1322,28 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
     personaPath: null, personaOriginal: null, personaProfile: null,
   };
 
-  // Five destinations is the ceiling for a bottom bar, so the four secondary
-  // views live behind the More sheet rather than becoming unreachable tabs.
-  var PRIMARY_VIEWS = ['overview', 'log', 'memory', 'knowledge'];
-  var MORE_VIEWS = ['conversations', 'integrations', 'persona', 'setup'];
+  // Five destinations is the ceiling for a bottom bar *as laid out* — not a
+  // property of the dashboard. The More sheet has no such limit and now carries
+  // five of its own, so this is a layout budget, not an architectural one.
+  //
+  // Persona and Guilds took Memory's and Knowledge's primary slots rather than
+  // displacing More. They are the controls this build exists to expose, and a
+  // feature you have to go looking for is a feature nobody reconfigures.
+  var PRIMARY_VIEWS = ['overview', 'log', 'persona', 'guilds'];
+  // Listed for documentation only — nothing branches on it. switchView picks
+  // the highlighted tab with `PRIMARY_VIEWS.indexOf(...) >= 0 ? name : 'more'`,
+  // so anything not named above highlights More, which is what lets a sheet
+  // item light up the tab it came from without the two lists having to agree.
+  var MORE_VIEWS = ['conversations', 'integrations', 'memory', 'knowledge', 'setup'];
 
   // ---- Navigation --------------------------------------------------------
 
   function switchView(name) {
     if (name === 'more') { openSheet(); return; }
 
-    // Never lose edits silently.
+    // Never lose edits silently. Persona used to sit behind the sheet, so this only
+    // fired on the way out of the sheet; now that it is a primary tab it fires
+    // on every tab change, which is the point.
     if (state.view === 'persona' && name !== 'persona' && personaDirty()) {
       if (!confirm('Discard unsaved persona changes?')) return;
       resetPersona();
@@ -1307,6 +1368,7 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
     if (name === 'conversations') loadConversations();
     if (name === 'integrations') loadIntegrations();
     if (name === 'persona') loadPersona();
+    if (name === 'guilds') loadGuildProfiles();
     if (name === 'overview') loadOverview();
   }
 
@@ -2612,6 +2674,15 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
 
   // ---- Persona -----------------------------------------------------------
 
+  // A file is only identified by `{profile, path}`. Keying on the path alone was
+  // the bug this section grew: `identity.txt` exists once per profile, so the
+  // second group's row overwrote the first in PERSONA_META and a save read the
+  // wrong file's `kind` — which meant the JSON guard silently did not apply to
+  // the group rendered last.
+  function personaKey(profile, path) {
+    return (profile || 'default') + ' ' + path;
+  }
+
   function personaDirty() {
     if (!state.personaPath) return false;
     var el = document.getElementById('persona-content');
@@ -2639,7 +2710,10 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
   function paintPersonaList() {
     var list = document.querySelectorAll('#persona-list .pfile');
     Array.prototype.forEach.call(list, function (b) {
-      var on = b.dataset.path === state.personaPath;
+      // Both halves of the key. `identity` in two profiles is two files, and a
+      // match on the path alone would paint the current one in both groups.
+      var on = b.dataset.path === state.personaPath &&
+        (b.dataset.profile || 'default') === (state.personaProfile || 'default');
       b.setAttribute('aria-current', on ? 'true' : 'false');
       var dot = b.querySelector('.dirty-dot');
       if (dot) dot.remove();
@@ -2652,19 +2726,33 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
     });
   }
 
-  function openPersonaFile(path) {
-    if (personaDirty() && path !== state.personaPath) {
+  function openPersonaFile(profile, path) {
+    profile = profile || 'default';
+    // Both halves again. On the path alone, `identity` in one profile and
+    // `identity` in another looked like "the same file", so opening a second
+    // group's row discarded the first group's edits without the confirm() that
+    // was written to stop exactly that.
+    if (personaDirty() &&
+        (path !== state.personaPath || profile !== state.personaProfile)) {
       if (!confirm('Discard unsaved changes to ' + state.personaPath + '?')) return;
     }
 
-    return api('/api/persona?path=' + encodeURIComponent(path)).then(function (data) {
+    // Both halves go on the wire. `profile` selects the read root, and the
+    // response echoes it back, so the save can trust the server's answer rather
+    // than assume the request was honoured. Omitting it for `default` keeps the
+    // pre-existing request shape byte-for-byte for the default group.
+    var qs = '?path=' + encodeURIComponent(path) +
+      (profile === 'default' ? '' : '&profile=' + encodeURIComponent(profile));
+
+    return api('/api/persona' + qs).then(function (data) {
       state.personaPath = data.path;
       state.personaOriginal = data.content;
-      state.personaProfile = data.profile || null;
+      state.personaProfile = data.profile || profile;
 
       document.getElementById('persona-title').textContent = path.split('/').pop();
       document.getElementById('persona-kind').textContent = data.kind === 'json' ? 'JSON' : 'text';
-      var meta = PERSONA_META[path] || {};
+      var meta = PERSONA_META[personaKey(state.personaProfile, data.path)] ||
+        PERSONA_META[personaKey(profile, path)] || {};
       document.getElementById('persona-desc').textContent = meta.hint || path;
       document.getElementById('persona-content').value = data.content;
       // Name the profile before the save, not after: under a profile the file
@@ -2685,44 +2773,107 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
 
   var PERSONA_META = {};
 
+  /**
+   * One file row.
+   *
+   * `f.profile` is the row's group. It is NOT the response's top-level
+   * `profile`: the response now lists every profile at once, so the top-level
+   * field only records which one the server would have picked had the caller
+   * not named another, and reading it here would label all thirty rows with one
+   * profile's name.
+   */
+  function personaFileHtml(f) {
+    var profile = f.profile || 'default';
+    var scoped = profile !== 'default';
+    return '<button type="button" class="pfile" data-profile="' + esc(profile) + '" data-path="' + esc(f.path) + '"' +
+      (f.editable ? '' : ' aria-disabled="true"') + '>' +
+      '<span class="pfile-id">' +
+        '<span class="pfile-label">' + esc(f.label) +
+          // The profile name is repeated on the row rather than left to the
+          // group heading. The list scrolls, and a heading scrolls off first, so
+          // a bare `identity` halfway down the page would say nothing about
+          // which tree a save is about to write.
+          (scoped ? ' &mdash; ' + esc(profile) : '') +
+        '</span>' +
+        '<span class="pfile-path">' + esc(f.path) +
+          (f.exists ? '' : ', not created yet') +
+          // Static suffixes, so they sit outside esc() alongside the rest of
+          // this line's literal text.
+          (scoped ? (f.overridden ? ' · overridden here' : ' · inherited from default') : '') +
+          '</span>' +
+      '</span>' +
+      (f.editable ? '' : '<span class="ds-badge">read-only</span>') +
+    '</button>';
+  }
+
+  /**
+   * One profile group.
+   *
+   * A guild folder that does not exist on disk is listed anyway, marked as not
+   * yet created. Hiding it would leave no way to make the first override
+   * through the UI at all — the operator would have to hand-create the
+   * directory — and the failure mode of forgetting that is a guild folder that
+   * exists and is silently never used, which is the whole class of silent
+   * no-op this feature exists to remove.
+   */
+  function personaGroupHtml(p, files) {
+    var anyExists = files.some(function (f) { return f.exists; });
+    var badge = p.kind === 'main'
+      ? '<span class="ds-badge ds-badge-primary">main selection</span>'
+      : (p.kind === 'guild'
+        ? '<span class="ds-badge ds-badge-verified">guild</span>'
+        : '<span class="ds-badge">default</span>');
+    var fresh = p.kind === 'guild' && !anyExists
+      ? '<span class="ds-badge ds-badge-unknown">created on first save</span>'
+      : '';
+
+    return '<div class="pgroup">' +
+      '<h3 class="pgroup-head">' +
+        '<span class="pgroup-name">' + esc(p.label || p.id) + '</span>' +
+        badge + fresh +
+      '</h3>' +
+      '<div class="pfile-list">' + files.map(personaFileHtml).join('') + '</div>' +
+    '</div>';
+  }
+
   function loadPersona() {
     return api('/api/persona').then(function (data) {
       var list = document.getElementById('persona-list');
-      var editable = data.files.filter(function (f) { return f.editable; });
-      PERSONA_META = {};
-      data.files.forEach(function (f) { PERSONA_META[f.path] = f; });
+      var files = data.files || [];
+      var editable = files.filter(function (f) { return f.editable; });
 
-      // Under a profile the interesting question per file is whether the profile
-      // ships its own copy or inherits the default root's. That is what makes a
-      // profile cheap to author — one file copied, thirty inherited — so it is
-      // said on every row rather than left for the operator to infer.
-      var profile = data.profile || 'default';
-      var scoped = profile !== 'default';
+      // `profiles[]` is the authority on which profiles exist and which one is
+      // the main selection. The set of folders on disk is a different set: a
+      // guild folder may not exist yet, and a profile folder may exist without
+      // belonging to any guild, so neither can be derived from the other.
+      var profiles = (data.profiles && data.profiles.length)
+        ? data.profiles
+        // No `profiles[]` — an older server, or a payload from before the
+        // dimension landed. One group is exactly what this used to render, so
+        // degrade to that instead of throwing on the first click.
+        : [{ id: data.profile || 'default', label: data.profile || 'default', kind: 'default', main: false }];
+
+      PERSONA_META = {};
+      files.forEach(function (f) {
+        PERSONA_META[personaKey(f.profile || data.profile, f.path)] = f;
+      });
 
       document.getElementById('persona-count').textContent =
-        editable.length + ' editable' + (scoped ? ' · ' + profile : '');
+        editable.length + ' editable · ' + plural(profiles.length, 'profile');
 
       var profileHint = document.getElementById('persona-profile-hint');
-      profileHint.hidden = !scoped;
-      profileHint.textContent = scoped
-        ? 'Profile "' + profile + '" is active. Saving writes into it; anything marked ' +
-          '"inherited from default" gets its own copy here on first save.'
-        : '';
+      profileHint.hidden = profiles.length <= 1;
+      profileHint.textContent = profiles.length <= 1
+        ? ''
+        : 'Every profile is listed, and each row saves into the profile it is ' +
+          'filed under — anything marked "inherited from default" gets its own ' +
+          'copy there on first save.';
 
-      list.innerHTML = data.files.map(function (f) {
-        return '<button type="button" class="pfile" data-path="' + esc(f.path) + '"' +
-          (f.editable ? '' : ' aria-disabled="true"') + '>' +
-          '<span class="pfile-id">' +
-            '<span class="pfile-label">' + esc(f.label) + '</span>' +
-            '<span class="pfile-path">' + esc(f.path) +
-              (f.exists ? '' : ', not created yet') +
-              // Static suffixes, so they sit outside esc() alongside the rest of
-              // this line's literal text.
-              (scoped ? (f.overridden ? ' · overridden here' : ' · inherited from default') : '') +
-              '</span>' +
-          '</span>' +
-          (f.editable ? '' : '<span class="ds-badge">read-only</span>') +
-        '</button>';
+      list.innerHTML = profiles.map(function (p) {
+        var mine = files.filter(function (f) {
+          return (f.profile || 'default') === (p.id || 'default');
+        });
+        return personaGroupHtml(p, mine);
       }).join('');
 
       // No auto-open: the editor appears once someone picks a file, which keeps
@@ -2734,7 +2885,7 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
   document.getElementById('persona-list').addEventListener('click', function (ev) {
     var btn = ev.target && ev.target.closest ? ev.target.closest('.pfile') : null;
     if (!btn || btn.getAttribute('aria-disabled') === 'true') return;
-    openPersonaFile(btn.dataset.path);
+    openPersonaFile(btn.dataset.profile, btn.dataset.path);
   });
 
   document.getElementById('persona-content').addEventListener('input', paintPersonaList);
@@ -2749,7 +2900,10 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
   document.getElementById('persona-save').addEventListener('click', function () {
     var btn = this;
     var content = document.getElementById('persona-content').value;
-    var kind = (PERSONA_META[state.personaPath] || {}).kind;
+    // Same key as the read, so the JSON guard applies to the group this editor
+    // is actually showing rather than to whichever group rendered last.
+    var meta = PERSONA_META[personaKey(state.personaProfile, state.personaPath)] || {};
+    var kind = meta.kind;
 
     // Catch it before the round trip so the failure is instant.
     if (kind === 'json') {
@@ -2767,9 +2921,12 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
       headers: { 'Content-Type': 'application/json' },
       // `ifMatch` is the content this editor loaded. If the file changed on disk
       // since — another tab, a hand edit, a second device — the server answers
-      // 409 rather than silently overwriting it.
+      // 409 rather than silently overwriting it. `profile` is the other half of
+      // the write target and goes with it: without it the save lands in the main
+      // selection, which is exactly the mistake this view exists to prevent.
       body: JSON.stringify({
         path: state.personaPath,
+        profile: state.personaProfile || 'default',
         content: content,
         ifMatch: state.personaOriginal,
       })
@@ -2780,11 +2937,205 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
     }).catch(function (err) {
       if (err.status === 409) {
         toast('This file changed on disk. Reload it before saving.', 'bad');
-        openPersonaFile(state.personaPath);
+        openPersonaFile(state.personaProfile, state.personaPath);
         return;
       }
       toast(err.message, 'bad');
     }).finally(function () { btn.disabled = false; });
+  });
+
+  // ---- Per-guild prompt profiles ------------------------------------------
+
+  /**
+   * Where a guild's effective profile came from, in words.
+   *
+   * The profile id on its own is ambiguous in a way that matters. A guild
+   * reading `big-rpd` because the main page happens to select `big-rpd` and one
+   * with `big-rpd` assigned to it show the same string, but only the second
+   * survives a change to the main selection. So the source is spelled out on
+   * every card rather than left for the operator to infer from a dropdown that
+   * has since been changed.
+   */
+  var GUILD_SOURCE = {
+    assignment: 'its own assignment',
+    'own-folder': 'its own folder, reached because the main page selects it',
+    main: 'the main page selection — nothing of its own',
+  };
+
+  /**
+   * The option list for one guild's picker.
+   *
+   * `selectable` is the whitelist plus `default`. The guild's own label is added
+   * on top, because a guild authorises itself with its GUILD_PROMPT_PROFILES
+   * entry and the whitelist is not also required to name it. Without that row
+   * there is no way to point a guild at the folder named after it, and so no
+   * way to create that folder from the UI at all.
+   */
+  function guildOptions(guild, data) {
+    var list = (data.selectable || []).slice();
+    if (list.indexOf(guild.label) < 0) list.push(guild.label);
+    return list;
+  }
+
+  function guildCardHtml(guild, data) {
+    var mainActive = data.mainActive || 'default';
+    var assigned = guild.profile || null;
+    // `source` is the server's answer and wins. The fallback only runs on a
+    // payload without it, where "has an assignment" is the best guess left.
+    var source = guild.source || (assigned ? 'assignment' : 'main');
+
+    var options = ['<option value=""' + (assigned ? '' : ' selected') + '>Use main page (currently ' +
+        esc(mainActive) + ')</option>']
+      .concat(guildOptions(guild, data).map(function (id) {
+        return '<option value="' + esc(id) + '"' + (id === assigned ? ' selected' : '') + '>' +
+          esc(id) + '</option>';
+      })).join('');
+
+    // The env file stores a label, never a Discord name, so the two disagreeing
+    // is normal — which is exactly why the name is only worth showing when it
+    // differs, to answer "is this the guild I meant?".
+    var live = guild.name && guild.name !== guild.label ? guild.name : null;
+
+    return '<article class="ds-card" data-guild="' + esc(guild.guildId) + '">' +
+      '<div class="card-pad">' +
+        '<div class="card-head">' +
+          '<h3 class="ds-section-title" style="font-size:1rem">' + esc(guild.label) + '</h3>' +
+          (guild.inCache
+            ? '<span class="ds-badge ds-badge-safe">bot is in this guild</span>'
+            : '<span class="ds-badge ds-badge-warn">bot is not in this guild</span>') +
+        '</div>' +
+        (live ? '<p class="hint" style="margin:0 0 .8rem">In Discord as "' + esc(live) + '"</p>' : '') +
+        '<div class="ds-control-row">' +
+          '<div class="ds-field">' +
+            '<label class="ds-label" for="guild-select-' + esc(guild.guildId) + '">Prompt profile for this guild</label>' +
+            '<select class="ds-select" id="guild-select-' + esc(guild.guildId) + '">' + options + '</select>' +
+          '</div>' +
+          '<button class="ds-btn ds-btn-primary" data-act="apply">Apply</button>' +
+        '</div>' +
+        (assigned
+          ? '<div class="ds-row" style="margin-top:.75rem"><button class="ds-btn ds-btn-ghost" data-act="clear">Stop overriding</button></div>'
+          : '') +
+        '<dl class="facts" style="margin-top:.9rem">' +
+          rawFact('Reading', '<strong>' + esc(guild.profile || mainActive) + '</strong> — ' +
+            esc(GUILD_SOURCE[source] || source)) +
+          // `changedAt` is the assignment's timestamp, not the profile's, so it
+          // is rendered only when there is an assignment. An unassigned guild
+          // showing "assigned 3d ago" reads as though this guild had been
+          // changed, which is the opposite of what "unassigned" means.
+          (guild.changedAt ? fact('Assigned', timeAgo(guild.changedAt)) : '') +
+          (guild.eligible === false
+            ? fact('Not eligible', 'this entry was rejected at startup — check GUILD_PROMPT_PROFILES')
+            : '') +
+        '</dl>' +
+      '</div>' +
+    '</article>';
+  }
+
+  /**
+   * The notes above the cards: no configuration at all, or a list that has hit
+   * the ceiling.
+   *
+   * Both states used to render as a blank panel, and a blank panel reads as
+   * "nothing to do here" rather than "you have not turned this on". The format
+   * line is quoted verbatim because the label doubling as the folder name, and
+   * the parens the operator will inevitably write, are both load-bearing and
+   * neither is guessable from a prose description.
+   */
+  function guildEmptyHtml(data, guilds) {
+    // Nothing configured. Not "nothing to do": the operator has not turned the
+    // feature on yet, and the format line is the whole of what they need.
+    // `maxGuilds` stays 3 with an empty list — it is the configured ceiling,
+    // not a count — so the test cannot be the list length alone.
+    if (!guilds.length) {
+      return '<p class="hint">No guilds are configured, so there is nothing to assign. Add ' +
+        'entries to <span class="ds-kbd">GUILD_PROMPT_PROFILES</span> in the env file, as ' +
+        '<span class="ds-kbd">(guild_label)=123456789012345678,(other)=987654321098765432</span> — ' +
+        'comma separated, dashboard label on the left, Discord guild ID on the right. The label ' +
+        'also names the profile folder, so it has to be a bare id with no spaces in it.</p>';
+    }
+
+    var maxGuilds = typeof data.maxGuilds === 'number' ? data.maxGuilds : guilds.length;
+    var bare = (data.selectable || []).length <= 1;
+    return '<p class="hint">The ceiling is ' + esc(maxGuilds) + ' guild' + (maxGuilds === 1 ? '' : 's') +
+      '. Entries past it were dropped at startup with a warning naming the cutoff; raise ' +
+      '<span class="ds-kbd">GUILD_PROFILES_MAX</span> to go further.</p>' +
+      (bare ? '<p class="hint"><span class="ds-kbd">PROMPT_PROFILES</span> is unset, so ' +
+        '<span class="ds-kbd">default</span> is the only shared profile available. Each guild can ' +
+        'still use its own folder, named after its label.</p>' : '');
+  }
+
+  function renderGuildProfiles(data) {
+    var host = document.getElementById('guild-list');
+    var guilds = data.guilds || [];
+
+    document.getElementById('guild-count').textContent = guilds.length
+      ? guilds.length + ' of ' + data.maxGuilds
+      : 'none';
+
+    // Not gated on `guilds.length`. The "no guilds configured" note is the most
+    // useful thing on the page in the state where a first-time operator is
+    // looking at it, and gating it on having cards would have made it dead
+    // code — exactly the blank panel it exists to replace.
+    document.getElementById('guild-hint').innerHTML = guildEmptyHtml(data, guilds);
+
+    host.innerHTML = guilds.length
+      ? guilds.map(function (g) { return guildCardHtml(g, data); }).join('')
+      : '';
+  }
+
+  function loadGuildProfiles() {
+    var host = document.getElementById('guild-list');
+    // Only on a genuinely empty host: a reload over existing cards would wipe a
+    // half-filled dropdown the operator is looking at.
+    if (!host.innerHTML) host.innerHTML = '<div class="empty">Loading…</div>';
+    return api('/api/guild-prompt-profiles').then(renderGuildProfiles)
+      .catch(function (err) {
+        document.getElementById('guild-hint').textContent = '';
+        host.innerHTML = '<div class="empty">' + esc(err.message) + '</div>';
+      });
+  }
+
+  /**
+   * Assign, or clear, one guild's profile.
+   *
+   * A null profile is the clear case, matching the main-page override route. The
+   * cards are re-rendered from the response rather than patched locally,
+   * because the effective profile and its source are derived server-side and a
+   * locally guessed copy is precisely the kind of stale label this view exists
+   * to eliminate.
+   */
+  function setGuildProfile(guildId, profile) {
+    return api('/api/guild-prompt-profiles', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ guildId: guildId, profile: profile })
+    }).then(function () {
+      toast(profile ? 'Guild set to ' + profile : 'Override cleared; back to the main page', 'ok');
+      return loadGuildProfiles();
+    }).catch(function (err) {
+      toast(err.message, 'bad');
+      return loadGuildProfiles();
+    });
+  }
+
+  // One delegated handler for the whole list. The cards are thrown away and
+  // rebuilt on every response, so per-button listeners attached at render time
+  // would be attached to nodes that no longer exist.
+  document.getElementById('guild-list').addEventListener('click', function (ev) {
+    var btn = ev.target && ev.target.closest ? ev.target.closest('button[data-act]') : null;
+    if (!btn) return;
+    var card = btn.closest('[data-guild]');
+    if (!card) return;
+
+    btn.disabled = true;
+    if (btn.dataset.act === 'clear') {
+      setGuildProfile(card.dataset.guild, null);
+      return;
+    }
+    var select = card.querySelector('.ds-select');
+    // The empty option means "the main page", not an assignment. Sending it as
+    // a profile string would ask the server to assign a profile called "".
+    setGuildProfile(card.dataset.guild, select && select.value ? select.value : null);
   });
 
   // ---- Delegated memory actions -----------------------------------------

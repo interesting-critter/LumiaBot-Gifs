@@ -12,7 +12,7 @@
  */
 
 import {
-  getActivePromptProfileId,
+  getEffectivePromptProfileId,
   getBotIdentity,
   getPromptCacheGeneration,
   reloadPrompts,
@@ -74,17 +74,57 @@ import {
  *
  * Between those events the generation is stable and the cache holds, so the
  * per-turn saving is preserved.
+ *
+ * THE SECOND CROSS-TALK: (EFFECTIVE PROFILE, GENERATION)
+ * ------------------------------------------------------
+ * The paragraph above names `getActivePromptProfileId()` as the profile
+ * dimension, and that was correct when the key was written. Per-guild prompt
+ * profiles made it wrong: `getActivePromptProfileId()` answers the *global*
+ * question "what has the dashboard's main page selected?", while the value this
+ * memo actually depends on is the profile the **current turn** resolves against
+ * — which, inside a turn carrying a guild, may be that guild's own profile.
+ *
+ * Keying on the main selection here is not a staleness bug that self-heals on
+ * the next edit; it is two guilds reading each other's persona for as long as
+ * they run, because the key never moves. Guild A (profile `art`) and guild B
+ * (profile `wisp`) both compute the same key, so whichever turn populated the
+ * memo first is served to both until the generation happens to move. And the
+ * symptom is uniquely confusing: *every other* prompt file the same turn reads —
+ * reinforcement, guidelines, the untrusted-data clause — follows the guild
+ * correctly through `resolvePromptPath()`. Only `<identity>`, the very first
+ * block of the system prompt, is wrong, so the bot appears to have a stale
+ * persona layered on top of an otherwise-correct profile.
+ *
+ * So the profile dimension is `getEffectivePromptProfileId()`: the guild-aware
+ * resolver that `resolvePromptPath()` itself uses, which is exactly the
+ * principle this header already argues for — *key the cache on everything the
+ * assembled string is a function of, so correctness does not depend on
+ * remembering to invalidate*. `getActivePromptProfileId()` keeps its meaning and
+ * its callers (the dashboard, the prompt selector's reconciliation); only this
+ * memo, which sits on the message path, follows the guild.
+ *
+ * This does not change the argument for why the fix lives here rather than in
+ * `prompts.ts`: `getEffectivePromptProfileId()` is a cheap read of a leaf module,
+ * so the dependency direction and the absence of a callback are both unchanged.
+ * Outside a guild context it returns the main selection, so DMs, the dashboard's
+ * own reads and every guild-less entry point key exactly as they did before.
  */
 let cachedDefinition: { key: string; definition: string } | null = null;
 
 /**
  * The cache key for the current state of the prompt layer.
  *
+ * The profile half is the **effective** (guild-aware) profile, because that is
+ * what `getBotIdentity()` resolved the string from — see the second cross-talk
+ * block in the header. Using the main selection here would make every guild in
+ * the process share one key, and the first turn to arrive would answer for all
+ * of them.
+ *
  * Both halves are cheap reads of module-level state — no I/O, no allocation
  * beyond the key string — so this is safe to call on the per-turn path.
  */
 function currentDefinitionKey(): string {
-  return `${getActivePromptProfileId()}:${getPromptCacheGeneration()}`;
+  return `${getEffectivePromptProfileId()}:${getPromptCacheGeneration()}`;
 }
 
 /**

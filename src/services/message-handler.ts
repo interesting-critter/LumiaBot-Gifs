@@ -2,7 +2,11 @@ import { getAIService, getVisionService } from './google-genai';
 import { parseMessage, storeParsedInformation, type ParsedMessage } from './message-parser';
 import { conversationHistoryService } from './conversation-history';
 import { channelHistoryService } from './channel-history';
-import { getTriggerKeywords, getErrorMessage } from './prompts';
+import {
+  getEffectivePromptProfileId,
+  getTriggerKeywords,
+  getErrorMessage,
+} from './prompts';
 import { knowledgeGraphService } from './knowledge-graph';
 import { config } from '../utils/config';
 import { gifService } from './gif';
@@ -34,7 +38,38 @@ const EMPTY_TRIGGER_PATTERNS: TriggerPatterns = {
   stripLeading: [],
 };
 
-let TRIGGER_PATTERNS: TriggerPatterns = EMPTY_TRIGGER_PATTERNS;
+/**
+ * Compiled patterns, one slot per **prompt profile**.
+ *
+ * WHY A MAP AND NOT A SINGLE SLOT
+ * -------------------------------
+ * `getTriggerKeywords()` resolves `config/triggers.json` through the prompt
+ * cache, which is keyed on the *resolved absolute path* — so with per-guild
+ * profiles two guilds on two profiles legitimately hold two different arrays,
+ * each stable until something clears the cache. A single module-level slot
+ * cannot hold both. Guild A's patterns and guild B's patterns would evict each
+ * other on every message, so the reference check in `ensureTriggersFresh()`
+ * below would fail on *every* call and `compileTriggers()` would rebuild every
+ * `RegExp` for every keyword, on the hottest path in the bot, for the rest of
+ * the process. That is a real regression introduced by making triggers
+ * guild-dependent, and it is invisible in a single-guild test: correctness
+ * holds either way, only the cost changes.
+ *
+ * Keying on `getEffectivePromptProfileId()` rather than
+ * `getActivePromptProfileId()` for the same reason `swarmui.ts` and
+ * `bot-definition.ts` do: the profile the *current turn* resolves against is the
+ * one these patterns were compiled from. The main selection is a global answer
+ * and would collapse every guild onto one slot again.
+ *
+ * Bounded by construction: the map only ever holds one entry per profile that
+ * has actually resolved a keyword list in this process, and a profile that has
+ * not been seen holds nothing. Entries are not evicted on a cache clear — that
+ * is fine, and is exactly the behaviour we want: a cleared cache yields a *new*
+ * array object, the reference check misses, and the slot recompiles once. No
+ * profile ids accumulate beyond the handful of `profiles/` directories the
+ * operator can create.
+ */
+const TRIGGER_PATTERNS_BY_PROFILE = new Map<string, TriggerPatterns>();
 
 const MARKDOWN_LINK_PATTERN = /\[([^\]]*)\]\(https?:\/\/[^\s)]+\)/gi;
 const BARE_URL_PATTERN = /https?:\/\/[^\s<>"'\)\]]+/gi;
@@ -63,34 +98,67 @@ function compileTriggers(keywords: readonly string[]): TriggerPatterns {
 }
 
 /**
- * Keep the compiled patterns in step with `prompt_storage/config/triggers.json`.
+ * Keep the compiled patterns in step with `prompt_storage/config/triggers.json`,
+ * **for whichever profile the current turn belongs to**.
  *
- * `getTriggerKeywords()` reads through the prompt cache, so it returns the
- * *same array object* until something clears that cache (the dashboard does,
- * via `reloadBotDefinition()` → `reloadPrompts()` → `clearCache()`, when an
- * operator saves new triggers). Comparing by reference therefore costs one
- * `Map.get` in the common case and recompiles exactly when the list changed —
- * and a stale pattern cache cannot win a comparison, because the cache key *is*
- * the list the patterns were compiled from.
+ * `getTriggerKeywords()` reads through the prompt cache, so for a given profile
+ * it returns the *same array object* until something clears that cache (the
+ * dashboard does, via `reloadBotDefinition()` → `reloadPrompts()` →
+ * `clearCache()`, when an operator saves new triggers). Comparing by reference
+ * therefore costs one `Map.get` in the common case and recompiles exactly when
+ * the list changed — and a stale pattern cache cannot win a comparison, because
+ * the cache key *is* the list the patterns were compiled from.
+ *
+ * The profile is the outer key and the array reference is the inner one, because
+ * they answer different questions and both are needed:
+ *
+ *   - the **profile** says *whose* triggers these are. With per-guild profiles
+ *     two guilds can genuinely hold different keyword lists, so the slot has to
+ *     follow the turn. Getting this wrong is the cross-talk `swarmui.ts` and
+ *     `bot-definition.ts` also guard against, and unlike them the failure here
+ *     is a cost problem as much as a correctness one: one shared slot means
+ *     alternating guilds invalidate each other on every message and recompile
+ *     every regex every time. See `TRIGGER_PATTERNS_BY_PROFILE`.
+ *   - the **array reference** says whether *this* profile's list changed on disk.
+ *     It keeps working unchanged now that each profile owns a slot: an operator
+ *     saving new triggers clears the prompt cache, which hands back a new array,
+ *     and that profile's slot recompiles on its next message. A fix that keyed
+ *     only on the profile would silently freeze every profile's triggers until a
+ *     restart — the very defect the reference check was introduced to end.
  *
  * The old code read the keyword list once at module load and never again, so
  * editing triggers.json on the dashboard had no effect until a restart.
  */
 function ensureTriggersFresh(): TriggerPatterns {
+  const profile = getEffectivePromptProfileId();
+  // Before this was per-profile, this was a single module-level slot, so a
+  // non-array keyword list kept whatever the last guild had compiled. Falling
+  // back to *this profile's* slot keeps the "degrade to no new keywords, never
+  // throw" contract without letting one guild's patterns stand in for another's.
+  const current = TRIGGER_PATTERNS_BY_PROFILE.get(profile) ?? EMPTY_TRIGGER_PATTERNS;
+
   const keywords = getTriggerKeywords().botMention;
   if (!Array.isArray(keywords)) {
-    return TRIGGER_PATTERNS;
+    return current;
   }
-  if (TRIGGER_PATTERNS.source !== keywords) {
-    TRIGGER_PATTERNS = compileTriggers(keywords);
-    console.log(`🎯 [HANDLER] Compiled ${TRIGGER_PATTERNS.wholeWord.length} trigger pattern(s)`);
+  if (current.source !== keywords) {
+    const compiled = compileTriggers(keywords);
+    TRIGGER_PATTERNS_BY_PROFILE.set(profile, compiled);
+    console.log(`🎯 [HANDLER] Compiled ${compiled.wholeWord.length} trigger pattern(s) for profile ${profile}`);
+    return compiled;
   }
-  return TRIGGER_PATTERNS;
+  return current;
 }
 
-/** Force a trigger re-read and recompile (exported for in-process reloads). */
+/**
+ * Force a trigger re-read and recompile (exported for in-process reloads).
+ *
+ * Every profile's slot is dropped, not just the current one: the caller is
+ * asserting "the files on disk changed", which is a statement about the disk and
+ * not about whichever guild happened to be in scope when they called.
+ */
 export function reloadTriggers(): void {
-  TRIGGER_PATTERNS = EMPTY_TRIGGER_PATTERNS;
+  TRIGGER_PATTERNS_BY_PROFILE.clear();
   ensureTriggersFresh();
 }
 
@@ -128,7 +196,10 @@ function stripUrls(text: string): string {
  * @returns boolean indicating if bot should respond
  */
 export function shouldTriggerBot(content: string, botId: string): boolean {
-  ensureTriggersFresh();
+  // The patterns come back from the call rather than a module-level slot: which
+  // slot applies depends on the turn's guild, so there is no longer one global
+  // `TRIGGER_PATTERNS` for a later line to reach for.
+  const patterns = ensureTriggersFresh();
 
   // Check if bot is mentioned (against original content, before URL stripping)
   if (mentionPatterns(botId).single.test(content)) {
@@ -139,7 +210,7 @@ export function shouldTriggerBot(content: string, botId: string): boolean {
   const lowerContent = stripUrls(content).toLowerCase().trim();
 
   // Check for trigger keywords (only match whole words/phrases)
-  return TRIGGER_PATTERNS.wholeWord.some((pattern) => pattern.test(lowerContent));
+  return patterns.wholeWord.some((pattern) => pattern.test(lowerContent));
 }
 
 /**
@@ -148,14 +219,14 @@ export function shouldTriggerBot(content: string, botId: string): boolean {
  * @returns Array of matched trigger keywords
  */
 export function extractTriggerKeywords(content: string): string[] {
-  ensureTriggersFresh();
+  const patterns = ensureTriggersFresh();
 
   // Strip URLs so trigger words inside links are ignored
   const lowerContent = stripUrls(content).toLowerCase().trim();
   const matched: string[] = [];
 
-  TRIGGER_PATTERNS.wholeWord.forEach((pattern, index) => {
-    const keyword = TRIGGER_PATTERNS.keywords[index];
+  patterns.wholeWord.forEach((pattern, index) => {
+    const keyword = patterns.keywords[index];
     if (keyword !== undefined && pattern.test(lowerContent)) {
       matched.push(keyword);
     }
@@ -170,7 +241,7 @@ export function extractTriggerKeywords(content: string): string[] {
  * @returns The cleaned message content
  */
 export function extractMessageContent(content: string, botId: string): string {
-  ensureTriggersFresh();
+  const patterns = ensureTriggersFresh();
 
   let cleaned = content;
 
@@ -179,7 +250,7 @@ export function extractMessageContent(content: string, botId: string): string {
 
   // Remove trigger keywords from the beginning of the message
   const lowerCleaned = cleaned.toLowerCase();
-  for (const pattern of TRIGGER_PATTERNS.stripLeading) {
+  for (const pattern of patterns.stripLeading) {
     if (pattern.test(lowerCleaned)) {
       cleaned = cleaned.replace(pattern, '').trim();
       break; // Only remove the first matching keyword

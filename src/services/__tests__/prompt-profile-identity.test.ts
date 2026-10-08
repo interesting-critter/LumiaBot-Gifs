@@ -27,8 +27,12 @@
  * A cold child process runs the real modules against a temporary prompt root and
  * emits a labelled transcript of every read. The parent asserts on that
  * transcript, so a failure names the exact step that diverged. Scenario
- * `overlay` covers the switch itself; scenario `example` covers an install with
- * no `profiles/` directory at all.
+ * `overlay` covers the main-selection switch itself; scenario `example` covers an
+ * install with no `profiles/` directory at all; scenario `perGuild` covers the
+ * second, subtler cross-talk that per-guild profiles introduce — two guilds, two
+ * profiles, and a memo that must be keyed on the guild-aware profile rather than
+ * the main selection. The `overlay` scenario cannot see that bug, because a main
+ * switch also moves the generation and so invalidates the memo for free.
  *
  * WHY A SUBPROCESS
  * ----------------
@@ -76,8 +80,18 @@ const EXAMPLE_DIR = resolve(REPO_ROOT, 'prompt_storage.example');
 /** Profile id used by the overlay fixture; valid per `prompts.ts`' own rules. */
 const PROFILE = 'creative';
 
+/** Second profile, for the per-guild scenario. */
+const PROFILE_B = 'art';
+
+/** Guild A is on `PROFILE`, guild B on `PROFILE_B`, and C has no assignment. */
+const GUILD_A = '111111111111111678';
+const GUILD_B = '222222222222222678';
+const GUILD_C = '333333333333333678';
+
 const DEFAULT_IDENTITY = 'DEFAULT IDENTITY — you are the stock persona.';
 const CREATIVE_IDENTITY = 'CREATIVE IDENTITY — you are the profile persona.';
+const GUILD_A_IDENTITY = 'GUILD A IDENTITY — you are creative.';
+const GUILD_B_IDENTITY = 'GUILD B IDENTITY — you are art.';
 const EDITED_IDENTITY = 'EDITED IDENTITY — written through the dashboard path.';
 
 /** Pull the payload line out of stderr/stdout noise and parse it. */
@@ -107,6 +121,11 @@ const REPO = ${JSON.stringify(REPO_ROOT)};
 const ROOT = ${JSON.stringify(root)};
 const SCENARIO = ${JSON.stringify(scenario)};
 const PROFILE = ${JSON.stringify(PROFILE)};
+const PROFILE_B = ${JSON.stringify(PROFILE_B)};
+const GUILD_A = ${JSON.stringify(GUILD_A)};
+const GUILD_B = ${JSON.stringify(GUILD_B)};
+const GUILD_C = ${JSON.stringify(GUILD_C)};
+const GUILD_A_IDENTITY = ${JSON.stringify(GUILD_A_IDENTITY)};
 const MARKER = ${JSON.stringify(MARKER)};
 
 const t = {};
@@ -195,6 +214,66 @@ if (SCENARIO === 'overlay') {
   // is consistent with whatever the transcript claims about it.
   writeFileSync(identityPath, before, 'utf-8');
   writeFileSync(profileIdentityPath, profileBefore, 'utf-8');
+} else if (SCENARIO === 'perGuild') {
+  // ══ THE SECOND CROSS-TALK: (EFFECTIVE PROFILE, GENERATION) ═══════════════════
+  // Everything above drives the *main* selection, which also moves the
+  // generation counter — so every one of those reads would pass even against a
+  // memo keyed on the generation alone. This scenario moves neither: two guilds,
+  // two profiles, and a generation counter held constant for the whole sequence,
+  // so the profile half of \`currentDefinitionKey()\` is the only thing keeping
+  // the two apart.
+  //
+  // The symptom this pins is the confusing one: only \`<identity>\` would be
+  // wrong, while every other prompt file the same turn reads followed its guild
+  // correctly through \`resolvePromptPath()\`. So each read is paired with the
+  // resolver's own answer — a disagreement between the two is the bug, and a
+  // disagreement in the same direction for both guilds means the *resolver* is
+  // wrong instead.
+  prompts.setGuildProfileResolver((guildId) =>
+    guildId === GUILD_A ? PROFILE : guildId === GUILD_B ? PROFILE_B : 'default');
+
+  const genBefore = prompts.getPromptCacheGeneration();
+
+  function asGuild(guildId, fn) {
+    return prompts.runWithPromptContext(guildId, fn);
+  }
+
+  // ── Round one: guild A only. This populates the memo under profile A, which
+  //    is what makes the next guild's read a cross-talk rather than a cold miss.
+  read('effective.guildA', () => asGuild(GUILD_A, () => prompts.getEffectivePromptProfileId()));
+  read('identity.guildA', () => asGuild(GUILD_A, () => prompts.getBotIdentity()));
+  read('def.guildA', () => asGuild(GUILD_A, () => botDefinition.getBotDefinition()));
+
+  // ── Guild B next, interleaved with A again. THE REGRESSION: against a memo
+  //    keyed on the main selection, \`def.guildB\` is guild A's persona, because
+  //    both guilds compute the same key.
+  read('effective.guildB', () => asGuild(GUILD_B, () => prompts.getEffectivePromptProfileId()));
+  read('identity.guildB', () => asGuild(GUILD_B, () => prompts.getBotIdentity()));
+  read('def.guildB', () => asGuild(GUILD_B, () => botDefinition.getBotDefinition()));
+
+  // ── Back to A, then B: a latch would pass the round above and fail here.
+  read('def.guildA.2', () => asGuild(GUILD_A, () => botDefinition.getBotDefinition()));
+  read('def.guildB.2', () => asGuild(GUILD_B, () => botDefinition.getBotDefinition()));
+
+  // ── A third guild with no assignment, and a DM. Both follow the main page,
+  //    which is the documented fallback and must not inherit a guild's persona.
+  read('effective.guildUnassigned', () => asGuild(GUILD_C, () =>
+    prompts.getEffectivePromptProfileId()));
+  read('def.guildUnassigned', () => asGuild(GUILD_C, () => botDefinition.getBotDefinition()));
+  read('effective.dm', () => asGuild(null, () => prompts.getEffectivePromptProfileId()));
+  read('def.dm', () => asGuild(null, () => botDefinition.getBotDefinition()));
+
+  // Neither the generation nor the main selection moved at any point above, so
+  // the only thing separating these reads was the effective profile.
+  read('generationHeld', () => prompts.getPromptCacheGeneration() === genBefore);
+  read('mainSelectionUnchanged', () => prompts.getActivePromptProfileId());
+
+  // ── The cache still caches. Read A's persona twice in a row with nothing in
+  //    between: if this ever stops being stable the fix has been made by deleting
+  //    the memo, which is not the fix.
+  const firstA = asGuild(GUILD_A, () => botDefinition.getBotDefinition());
+  const secondA = asGuild(GUILD_A, () => botDefinition.getBotDefinition());
+  read('cacheStillCaches', () => firstA === secondA && firstA === GUILD_A_IDENTITY);
 } else if (SCENARIO === 'example') {
   // An install with no \`profiles/\` directory: the pre-feature layout.
   read('profile.atStart', () => prompts.getActivePromptProfileId());
@@ -269,6 +348,24 @@ function makeOverlayRoot(): string {
   return root;
 }
 
+/**
+ * Root for the per-guild scenario: a default identity plus **two** profiles,
+ * each overriding only `persona/identity.txt`, each with text that names its own
+ * guild's assignment.
+ *
+ * The identities are worded so a cross-talk is legible in a failure message
+ * ("GUILD A IDENTITY" served to guild B) rather than just an inequality.
+ * `makeOverlayRoot()` cannot be reused: it has one profile, which is enough for a
+ * main-selection switch and not enough to have two guilds disagree.
+ */
+function makePerGuildRoot(): string {
+  const root = mkdtempSync(join(tmpdir(), 'lumia-def-per-guild-'));
+  writeFixture(root, 'persona/identity.txt', DEFAULT_IDENTITY);
+  writeFixture(root, join('profiles', PROFILE, 'persona/identity.txt'), GUILD_A_IDENTITY);
+  writeFixture(root, join('profiles', PROFILE_B, 'persona/identity.txt'), GUILD_B_IDENTITY);
+  return root;
+}
+
 /** A copy of the shipped example tree, which has no `profiles/` directory. */
 function makeExampleRoot(): string {
   const root = mkdtempSync(join(tmpdir(), 'lumia-def-example-'));
@@ -328,6 +425,59 @@ describe('an active profile switch changes the cached bot definition', () => {
     expect(t['def.profile.baseline']).toBe(CREATIVE_IDENTITY);
     expect(t['def.profile.afterDiskEditNoReload']).toBe(CREATIVE_IDENTITY);
     expect(t['def.profile.afterReloadBotDefinition']).toBe('CREATIVE IDENTITY — edited.');
+  });
+});
+
+describe('two guilds on two profiles do not share the cached bot definition', () => {
+  const root = tracked(makePerGuildRoot());
+  const t = runHarness(root, 'perGuild');
+
+  test('neither the generation nor the main selection moved: only the guild did', () => {
+    // Without this control, a memo keyed on the main selection plus the
+    // generation would look like it was working, because the scenario below
+    // never touches either. This is what makes the rest of the block a test of
+    // the *effective* profile specifically.
+    expect(t['mainSelectionUnchanged']).toBe('default');
+    expect(t['generationHeld']).toBe('true');
+  });
+
+  test('the two profiles resolve to the two guilds, and are distinct', () => {
+    expect(t['effective.guildA']).toBe(PROFILE);
+    expect(t['effective.guildB']).toBe(PROFILE_B);
+  });
+
+  test('THE REGRESSION: guild B is served its own persona, not guild A\'s', () => {
+    // The resolver's own answer, first: this is what the definition *should* be.
+    expect(t['identity.guildA']).toBe(GUILD_A_IDENTITY);
+    expect(t['identity.guildB']).toBe(GUILD_B_IDENTITY);
+
+    // And the memo under test. Against a memo keyed on the main selection these
+    // two are both the identity of whichever turn arrived first — the symptom is
+    // uniquely confusing because every *other* prompt file in the same turn
+    // follows the guild correctly through `resolvePromptPath()`.
+    expect(t['def.guildA']).toBe(GUILD_A_IDENTITY);
+    expect(t['def.guildB']).toBe(GUILD_B_IDENTITY);
+  });
+
+  test('alternating guilds stay separated, in both orders', () => {
+    expect(t['def.guildA.2']).toBe(GUILD_A_IDENTITY);
+    expect(t['def.guildB.2']).toBe(GUILD_B_IDENTITY);
+  });
+
+  test('an unassigned guild and a DM both follow the main page', () => {
+    // The documented fallback, and the case a resolver that ignored `null`
+    // guild ids would quietly break.
+    expect(t['effective.guildUnassigned']).toBe('default');
+    expect(t['def.guildUnassigned']).toBe(DEFAULT_IDENTITY);
+    expect(t['effective.dm']).toBe('default');
+    expect(t['def.dm']).toBe(DEFAULT_IDENTITY);
+  });
+
+  test('the memo still memoises within one guild', () => {
+    // If this ever stops being stable, the fix has been made by deleting the
+    // cache — which is not the fix, and would cost `openai.ts` and
+    // `google-genai.ts` two persona assemblies per turn.
+    expect(t['cacheStillCaches']).toBe('true');
   });
 });
 

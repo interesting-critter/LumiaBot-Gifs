@@ -19,6 +19,7 @@ import { gifService } from './gif';
 import { formatDiscordResponseText } from '../utils/discord-markdown';
 import { buildResponseCard } from '../utils/response-card';
 import { dashboardLoggerService } from './dashboard-logger';
+import { runWithPromptContext } from './prompts';
 
 interface BoredomState {
   enabled: boolean;
@@ -222,118 +223,138 @@ export class BoredomService {
 
       const turnStartedAt = Date.now();
 
-      // fetchChannelHistory takes only (channel, beforeMessageId) and applies
-      // its own CHANNEL_MAX_HISTORY limit, so the previous third argument was
-      // silently ignored. config.boredom.historyLimit has never affected this.
-      const rawMessages = await channelHistoryService.fetchChannelHistory(channel);
-      const turns = channelHistoryService.convertToTurns(rawMessages, client.user?.id);
+      // WHY THE WHOLE TURN IS WRAPPED
+      // -----------------------------
+      // A spontaneous post is a full generation turn, and its prompt reads are
+      // spread across several awaits (history fetch, the typing pause, the
+      // completion itself, the GIF extraction that follows). Wrapping only the
+      // `createChatCompletion` call would leave the reads on either side of it
+      // resolving against whatever profile happened to be ambient — which, with
+      // this timer firing on its own schedule, is a genuinely concurrent case and
+      // exactly the cross-guild cross-talk the per-guild profiles must not have.
+      //
+      // So the wrapper encloses the turn from the first read to the dashboard log
+      // write. The guild only becomes known here (the channel is picked randomly
+      // at runtime), which is why this entry point is wrapped at the point of
+      // selection rather than at the timer.
+      //
+      // The wrapper's value is returned, not discarded: the turn body still
+      // `return false`s on empty output, and that answer reaches the caller
+      // (which re-arms the timer differently) exactly as it did unwrapped.
+      return runWithPromptContext(channel.guildId, async () => {
+        // fetchChannelHistory takes only (channel, beforeMessageId) and applies
+        // its own CHANNEL_MAX_HISTORY limit, so the previous third argument was
+        // silently ignored. config.boredom.historyLimit has never affected this.
+        const rawMessages = await channelHistoryService.fetchChannelHistory(channel);
+        const turns = channelHistoryService.convertToTurns(rawMessages, client.user?.id);
 
-      const isGifEnabled = channel.guildId ? gifService.isGifEnabled(channel.guildId) : false;
+        const isGifEnabled = channel.guildId ? gifService.isGifEnabled(channel.guildId) : false;
 
-      const spontaneousInstructions = [
-        'You are popping into the channel spontaneously. Read the recent chat history to see what was being talked about.',
-        'Either chime in with a quick, funny, or chaotic observation about their recent conversation, or bring up a random thought fitting your persona if chat has been quiet.',
-        'Do not ping anyone or say "hey guys", just speak naturally into the room.',
-        'Keep it short (1-3 sentences).',
-        'Do not include [REACT: ...] tags or emoji reaction directives.',
-      ].join(' ');
+        const spontaneousInstructions = [
+          'You are popping into the channel spontaneously. Read the recent chat history to see what was being talked about.',
+          'Either chime in with a quick, funny, or chaotic observation about their recent conversation, or bring up a random thought fitting your persona if chat has been quiet.',
+          'Do not ping anyone or say "hey guys", just speak naturally into the room.',
+          'Keep it short (1-3 sentences).',
+          'Do not include [REACT: ...] tags or emoji reaction directives.',
+        ].join(' ');
 
-      if (config.boredom.showTyping) {
-        try {
-          await channel.sendTyping();
-          await new Promise((resolve) => setTimeout(resolve, 3000));
-        } catch {}
-      }
+        if (config.boredom.showTyping) {
+          try {
+            await channel.sendTyping();
+            await new Promise((resolve) => setTimeout(resolve, 3000));
+          } catch {}
+        }
 
-      const aiService = getAIService();
-      // A boredom turn has no user prompt, so the payload the service built is
-      // the only record of what was actually sent. Worth capturing.
-      let fullPrompt: string | undefined;
-      const response = await aiService.createChatCompletion({
-        messages: turns,
-        systemPromptOverride: spontaneousInstructions,
-        enableSearch: false,
-        enableKnowledgeGraph: false,
-        isGifEnabled,
-        guildId: channel.guildId,
-        onFullPrompt: (captured: string) => { fullPrompt = captured; },
-      });
-
-      const { text: textWithoutGif, gifUrl } = isGifEnabled
-        ? await gifService.extractAndResolveGif(response)
-        : { text: response, gifUrl: undefined };
-
-      // Same single-card layout as the mention and /chat paths: spontaneous
-      // chatter is model output over live channel text, so it gets the identical
-      // treatment rather than a second, differently-formatted send path.
-      const card = config.bot.embed.enabled
-        ? buildResponseCard({ text: textWithoutGif, gifUrl })
-        : null;
-
-      // Always computed, and always the *text* form, because the dashboard log
-      // below records what the model said. Deriving it from the send shape would
-      // log an empty string for every card turn, which would silently blind the
-      // activity log.
-      const formatted = formatDiscordResponseText(textWithoutGif);
-      if (!formatted.trim() && !card) {
-        console.warn('⚠️ [BOREDOM] Generated empty message, skipping output.');
-        return false;
-      }
-
-      if (card) {
-        await channel.send({
-          embeds: [card],
-          // See the note below on why this is the shared helper rather than an
-          // inline `{ parse: [] }`. An embed never resolves mentions anyway; the
-          // helper is passed for consistency with the text path.
-          allowedMentions: buildAllowedMentions(),
+        const aiService = getAIService();
+        // A boredom turn has no user prompt, so the payload the service built is
+        // the only record of what was actually sent. Worth capturing.
+        let fullPrompt: string | undefined;
+        const response = await aiService.createChatCompletion({
+          messages: turns,
+          systemPromptOverride: spontaneousInstructions,
+          enableSearch: false,
+          enableKnowledgeGraph: false,
+          isGifEnabled,
+          guildId: channel.guildId,
+          onFullPrompt: (captured: string) => { fullPrompt = captured; },
         });
-      } else if (formatted.trim()) {
-        // The text is model output over whatever the channel was talking about, so
-        // it can contain anything the prompt did — including a `@everyone`
-        // copied out of a linked page. `buildAllowedMentions` is the shared form
-        // every other untrusted-text path now uses.
-        //
-        // NOTE for the next reader: the helper also sets `repliedUser: false`,
-        // which is a no-op here (a `channel.send` has no replied message to
-        // suppress), so this is behaviourally identical to the inline
-        // `{ parse: [] }` it replaces. The semantics deliberately match; the
-        // consolidation is what is being bought here, so please do not "fix"
-        // this back into a private shape.
-        await channel.send({
-          content: formatted,
-          allowedMentions: buildAllowedMentions(),
+
+        const { text: textWithoutGif, gifUrl } = isGifEnabled
+          ? await gifService.extractAndResolveGif(response)
+          : { text: response, gifUrl: undefined };
+
+        // Same single-card layout as the mention and /chat paths: spontaneous
+        // chatter is model output over live channel text, so it gets the identical
+        // treatment rather than a second, differently-formatted send path.
+        const card = config.bot.embed.enabled
+          ? buildResponseCard({ text: textWithoutGif, gifUrl })
+          : null;
+
+        // Always computed, and always the *text* form, because the dashboard log
+        // below records what the model said. Deriving it from the send shape would
+        // log an empty string for every card turn, which would silently blind the
+        // activity log.
+        const formatted = formatDiscordResponseText(textWithoutGif);
+        if (!formatted.trim() && !card) {
+          console.warn('⚠️ [BOREDOM] Generated empty message, skipping output.');
+          return false;
+        }
+
+        if (card) {
+          await channel.send({
+            embeds: [card],
+            // See the note below on why this is the shared helper rather than an
+            // inline `{ parse: [] }`. An embed never resolves mentions anyway; the
+            // helper is passed for consistency with the text path.
+            allowedMentions: buildAllowedMentions(),
+          });
+        } else if (formatted.trim()) {
+          // The text is model output over whatever the channel was talking about, so
+          // it can contain anything the prompt did — including a `@everyone`
+          // copied out of a linked page. `buildAllowedMentions` is the shared form
+          // every other untrusted-text path now uses.
+          //
+          // NOTE for the next reader: the helper also sets `repliedUser: false`,
+          // which is a no-op here (a `channel.send` has no replied message to
+          // suppress), so this is behaviourally identical to the inline
+          // `{ parse: [] }` it replaces. The semantics deliberately match; the
+          // consolidation is what is being bought here, so please do not "fix"
+          // this back into a private shape.
+          await channel.send({
+            content: formatted,
+            allowedMentions: buildAllowedMentions(),
+          });
+        }
+
+        // Pre-card layout only. With the card the GIF is already the embed's
+        // image; sending the bare link here too would show it twice and put the
+        // URL back on screen, which is exactly what the card was introduced to
+        // avoid.
+        if (!card && gifUrl) {
+          await channel.send(gifUrl);
+        }
+
+        const now = new Date().toISOString();
+        this.setStateValue('last_run_at', now);
+        console.log(`😴 [BOREDOM] Spontaneous message sent to #${channel.name}`);
+
+        dashboardLoggerService.log({
+          source: 'boredom',
+          prompt: '[spontaneous chatter — no user prompt]',
+          fullPrompt,
+          response: formatted,
+          durationMs: Date.now() - turnStartedAt,
+          channelId: channel.id,
+          channelName: channel.name,
+          guildId: channel.guildId || undefined,
+          guildName: channel.guild?.name,
+          gifUrl,
+          searchEnabled: false,
+          knowledgeEnabled: false,
         });
-      }
 
-      // Pre-card layout only. With the card the GIF is already the embed's
-      // image; sending the bare link here too would show it twice and put the
-      // URL back on screen, which is exactly what the card was introduced to
-      // avoid.
-      if (!card && gifUrl) {
-        await channel.send(gifUrl);
-      }
-
-      const now = new Date().toISOString();
-      this.setStateValue('last_run_at', now);
-      console.log(`😴 [BOREDOM] Spontaneous message sent to #${channel.name}`);
-
-      dashboardLoggerService.log({
-        source: 'boredom',
-        prompt: '[spontaneous chatter — no user prompt]',
-        fullPrompt,
-        response: formatted,
-        durationMs: Date.now() - turnStartedAt,
-        channelId: channel.id,
-        channelName: channel.name,
-        guildId: channel.guildId || undefined,
-        guildName: channel.guild?.name,
-        gifUrl,
-        searchEnabled: false,
-        knowledgeEnabled: false,
+        return true;
       });
-
-      return true;
     } catch (error) {
       console.error('❌ [BOREDOM] Error executing spontaneous chat:', error);
       return false;
