@@ -59,6 +59,7 @@ export const LEGACY_DB_FILENAMES: readonly string[] = [
   'api_usage.db',
   'boredom.db',
   'conversations.db',
+  'dashboard_logs.db',
   'dashboard_settings.db',
   'gif_settings.db',
   'guild_memories.db',
