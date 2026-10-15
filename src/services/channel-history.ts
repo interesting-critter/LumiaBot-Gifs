@@ -1,4 +1,5 @@
-import type { Message, TextChannel, ThreadChannel, NewsChannel, VoiceChannel, StageChannel, DMChannel } from 'discord.js';
+import type { APIEmbed, Message, TextChannel, ThreadChannel, NewsChannel, VoiceChannel, StageChannel, DMChannel } from 'discord.js';
+import { EmbedType } from 'discord.js';
 import { config } from '../utils/config';
 import type { ChatMessage } from './openai';
 import type { ContextMessage } from './orchestrator/types';
@@ -20,6 +21,124 @@ interface PromptTurn {
   speakerKey: string;
 }
 
+/** Marker used for an embed that carries media but no text of its own. */
+const EMBED_IMAGE_MARKER = '[image]';
+const EMBED_VIDEO_MARKER = '[video]';
+
+/**
+ * Reduce one embed to the text a reader would actually have to read, in the
+ * order Discord renders it: description, then title, then fields.
+ *
+ * WHY NOT author.name AND footer.text
+ * -----------------------------------
+ * Those two are deliberately dropped. On this bot's own response card they are
+ * pure decorative chrome — `⋆˖⁺‧₊☽Name☾₊‧⁺˖⋆` and `૮₍ ˃ ⤙ ˂ ₎ა arf.` — and the card
+ * is posted once per turn, so re-injecting them would repeat the same two lines
+ * of noise in every prompt forever. They also carry no information the message
+ * author is not already tagged with (`buildPromptTurn` prefixes every non-bot
+ * message with `[displayName]:`, and embeds are posted by someone who is in the
+ * channel under that name).
+ *
+ * A human embed's author/footer is occasionally informative, but the cost is
+ * paid on every turn of a long channel, which outweighs the rare gain. If that
+ * ever turns out to matter, the right place to add it is here — not in the
+ * send path — so every read path picks it up at once.
+ */
+function extractEmbedText(embed: APIEmbed): string[] {
+  // Discord auto-generates a `link` embed for ANY message containing a URL, so
+  // a plain "https://…" from a human arrives here as an embed. Left unhandled
+  // it would dump the page title and scraped description into the prompt; two
+  // reasons that is not simply free text:
+  //
+  //   1. Provenance. The title is *not* something the author typed, and pasting
+  //      it unlabelled invites the model to treat scraped page text as something
+  //      a person in the channel said (and scraped page text is the cheapest
+  //      prompt-injection vector available). The `[link preview: …]` label keeps
+  //      the provenance visible.
+  //   2. Budget. The URL itself is already in `message.content`, so the preview
+  //      adds no new *reference* — only the one thing that makes the link
+  //      intelligible, which is its title. The preview description is scraped
+  //      ad-copy, frequently the longest part of the payload, and would crowd
+  //      out the message the person actually wrote.
+  //
+  // So: keep the title, label it, drop the rest. A link preview with no title
+  // (Discord sends those for some redirects) contributes nothing — the URL in
+  // `message.content` is still there.
+  if (embed.type === EmbedType.Link) {
+    const title = embed.title?.trim();
+    return title ? [`[link preview: ${title}]`] : [];
+  }
+
+  const parts: string[] = [];
+
+  const description = embed.description?.trim();
+  if (description) parts.push(description);
+
+  const title = embed.title?.trim();
+  if (title) parts.push(title);
+
+  // A field-only embed (no description, or no title either) is common: status
+  // embeds, build notices, and every embed that never sets a description.
+  for (const field of embed.fields ?? []) {
+    const name = field.name?.trim();
+    const value = field.value?.trim();
+    if (name && value) parts.push(`${name}: ${value}`);
+    else if (value) parts.push(value);
+    else if (name) parts.push(name);
+  }
+
+  return parts;
+}
+
+/**
+ * Fallback marker for an embed with media but no text.
+ *
+ * `embed.image.url` / `embed.video.url` are URLs and URLs stay out of the
+ * prompt: the bot's card hides its GIF *behind* an embed image precisely so the
+ * link is never printed, and echoing it here would undo that from the read
+ * side. But a bare card with no description (a GIF-only turn) would otherwise
+ * be indistinguishable from a message that never rendered, so it gets the same
+ * `[image]` token an attachment would get.
+ *
+ * Deliberately NOT emitted when the embed also has text: a card that says
+ * something and carries a GIF is just a reply, and an extra `[image]` on the
+ * bot's own past turns would teach the model to claim it posted pictures. The
+ * marker stands in for missing text, it is not a description of the message.
+ */
+function extractEmbedMediaMarker(embed: APIEmbed): string[] {
+  if (extractEmbedText(embed).length > 0) return [];
+  if (embed.video?.url || embed.type === EmbedType.GIFV || embed.type === EmbedType.Video) {
+    return [EMBED_VIDEO_MARKER];
+  }
+  if (embed.image?.url || embed.thumbnail?.url || embed.type === EmbedType.Image) {
+    return [EMBED_IMAGE_MARKER];
+  }
+  return [];
+}
+
+/**
+ * Flatten every embed on a message into one block of plain text.
+ *
+ * Discord permits up to 10 embeds per message, and they are rendered as separate
+ * cards, so each is considered on its own and the blocks are kept apart rather
+ * than concatenated — otherwise the tail of the last field of the first embed
+ * would read as continuous with the description of the second.
+ */
+export function extractEmbedContent(embeds: readonly APIEmbed[]): string[] {
+  const blocks: string[] = [];
+
+  for (const embed of embeds) {
+    const text = extractEmbedText(embed);
+    if (text.length > 0) {
+      blocks.push(text.join('\n'));
+      continue;
+    }
+    blocks.push(...extractEmbedMediaMarker(embed));
+  }
+
+  return blocks.filter((block) => block.trim().length > 0);
+}
+
 export class ChannelHistoryService {
   private readonly maxMessages: number;
   private readonly maxMessageLength: number;
@@ -35,6 +154,20 @@ export class ChannelHistoryService {
       .replace(/"/g, '&quot;')
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;');
+  }
+
+  /**
+   * Clip one piece of a message to `maxMessageLength`, marking that it was cut.
+   *
+   * Never splits a surrogate pair: slicing between the high and low half of an
+   * emoji leaves invalid UTF-16, which is exactly the class of bug
+   * `response-card.ts` already had to work around on the send side.
+   */
+  private truncate(text: string): string {
+    if (text.length <= this.maxMessageLength) return text;
+    let head = text.slice(0, this.maxMessageLength);
+    if (/[\uD800-\uDBFF]$/.test(head)) head = head.slice(0, -1);
+    return `${head}...`;
   }
 
   private buildPromptTurn(message: ChannelMessage, currentBotId?: string, format: TurnFormat = 'default'): PromptTurn {
@@ -116,13 +249,32 @@ export class ChannelHistoryService {
           return;
         }
 
-        // Skip empty messages
-        if (!message.content.trim() && message.attachments.size === 0 && message.stickers.size === 0) {
+        // Read the embeds before deciding whether this message is empty.
+        //
+        // THIS IS THE FIX FOR THE RESPONSE CARD. The bot replies with an embed
+        // (see `utils/response-card.ts`) and sends no `content` alongside it, so
+        // a card has `content === ''`, no attachments and no stickers. The old
+        // filter below discarded exactly those messages, which meant the bot
+        // could not read back its own replies and lost all self-continuity in
+        // channel context. Anything else a human posts as a rich embed was
+        // invisible for the same reason.
+        //
+        // This is deliberately fixed on the READ side: the card stays one
+        // message with no exposed GIF link, and every read path (`/chat`,
+        // `/dryrun`, mentions, boredom, the orchestrator) is fixed at once
+        // because they all funnel through this method.
+        const embedBlocks = extractEmbedContent(message.embeds.map((embed) => embed.data));
+
+        // Skip empty messages — an embed now counts as content.
+        if (
+          !message.content.trim() &&
+          embedBlocks.length === 0 &&
+          message.attachments.size === 0 &&
+          message.stickers.size === 0
+        ) {
           return;
         }
 
-        // Build content including attachment and sticker info
-        let content = message.content;
         const annotations: string[] = [];
         if (message.attachments.size > 0) {
           annotations.push(...message.attachments.map(att => {
@@ -134,14 +286,27 @@ export class ChannelHistoryService {
         if (message.stickers.size > 0) {
           annotations.push(...message.stickers.map(s => `[sticker: ${s.name}]`));
         }
-        if (annotations.length > 0) {
-          const annotationInfo = annotations.join(' ');
-          content = content ? `${content} ${annotationInfo}` : annotationInfo;
+        // Truncate very long messages.
+        //
+        // Done per source — the author's words and the flattened embed text each
+        // get their own full `maxMessageLength` budget — rather than on the
+        // combined string. A single shared cut would be actively misleading now:
+        // a 180-char message followed by a 400-char link preview would leave
+        // `[link preview: Some very long page ti...`, i.e. visible text that is a
+        // fragment saying nothing true about the message. Per-source, each piece
+        // is either complete or clearly marked `...`, and nothing that was there
+        // can silently evict something else.
+        let content = this.truncate(message.content);
+        const embedText = this.truncate(embedBlocks.join('\n\n'));
+        if (embedText) {
+          content = content ? `${content}\n\n${embedText}` : embedText;
         }
 
-        // Truncate very long messages
-        if (content.length > this.maxMessageLength) {
-          content = content.substring(0, this.maxMessageLength) + '...';
+        // Annotations go on last and are never truncated: they are the shortest
+        // and the most load-bearing part (`[image]` is the only trace of a
+        // GIF-only turn), so a long body must not be able to cut them off.
+        if (annotations.length > 0) {
+          content = content ? `${content} ${annotations.join(' ')}` : annotations.join(' ');
         }
 
         processedMessages.push({
