@@ -155,6 +155,93 @@ OPENAI_API_KEY=optional-for-local
 OPENAI_MODEL=local-model
 ```
 
+### Named provider registry (several providers at once)
+
+The single-provider setup above can only ever point at one host. To serve
+several providers from one deployment — a local proxy *and* Google's API, or
+OpenAI and OpenRouter — declare them by name instead, each with its own base
+URL, its own key and its own model list, and switch between them live from the
+dashboard.
+
+**Example: an OpenAI-compatible proxy plus a Google endpoint**
+
+```env
+OPENAI_PROVIDERS=openai=,proxy=https://myproxy.example/v1
+GOOGLE_PROVIDERS=official=https://generativelanguage.googleapis.com
+OPENAI_KEYS=openai=sk-abc;proxy=sk-proxy-xyz
+GOOGLE_KEYS=official=AIza123
+DASHBOARD_MODELS=openai=gpt-4o,gpt-4o-mini;proxy=anthropic/claude-sonnet-4-5,deepseek/deepseek-chat;official=gemini-3-flash
+```
+
+Picking a model in the dashboard now switches the provider, the URL, the key and
+the model together. The dashboard groups the picker by provider **name** and
+never shows the URL.
+
+#### The five variables
+
+| Variable | Format | Pairs separated by |
+| --- | --- | --- |
+| `OPENAI_PROVIDERS` | `name=baseUrl` | `,` |
+| `GOOGLE_PROVIDERS` | `name=baseUrl` | `,` |
+| `OPENAI_KEYS` | `name=apiKey` | `;` |
+| `GOOGLE_KEYS` | `name=apiKey` | `;` |
+| `DASHBOARD_MODELS` | `name=model,model,model` | `;` between pairs, `,` between models |
+
+**The mixed delimiters are intentional** — the three variables group
+differently, so the separators follow the grouping. `DASHBOARD_MODELS` is the
+only variable whose *value* is itself a list, which is why it needs both: a
+comma inside a models value can never be mistaken for the semicolon between
+values. Getting these backwards is the single most likely way to break the
+configuration.
+
+#### Rules the bot enforces
+
+- **Precedence is all-or-nothing.** Set **any one** of the five variables and
+  the registry is active; `OPENAI_BASE_URL`, `OPENAI_API_KEY`, `GEMINI_API_KEY`
+  and `GEMINI_BASE_URL` are then ignored for routing — even for the kind whose
+  registry list you left empty. A half-migrated `.env` would otherwise route one
+  provider through another provider's credential. Set **none** of them and the
+  legacy single-provider setup above behaves exactly as before.
+- **One key per provider.** `OPENAI_KEYS=openai=sk-1,sk-2` uses the **first**
+  key and logs a loud warning; it is not a rotation pool. If you need rotation,
+  run your own proxy and point that provider's base URL at it. This is a design
+  decision, not an oversight.
+- **Names are unique across both `*_PROVIDERS` variables**, because `*_KEYS` and
+  `DASHBOARD_MODELS` are keyed by the bare name and could not otherwise say
+  which provider they meant. The second occurrence is dropped with a warning.
+- **Pairs split at the first `=`**, so a URL containing `?key=abc` survives.
+  `,` is the pair separator in `*_PROVIDERS`, so a URL containing a literal
+  comma *is* mis-split rather than rejected.
+- **An empty base URL is legal** and means "use the SDK's default endpoint" —
+  which is how the official OpenAI and Google providers are normally configured
+  (`openai=` above). It is never warned about.
+- **Transport follows the variable you declared the provider in**, never the
+  model name: `OPENAI_PROVIDERS` routes through the OpenAI-compatible SDK,
+  `GOOGLE_PROVIDERS` through the Google GenAI SDK. So a `claude-*` model behind
+  an OpenAI-compatible proxy routes correctly.
+
+#### Boot-time validation
+
+Unusable entries are dropped and reported in one bordered block; the bot still
+starts. Dropped with a warning: a `*_KEYS` or `DASHBOARD_MODELS` name with no
+matching provider, a duplicate name, an empty name, an entry with no `=`. Kept
+but flagged: a provider with no models (configured but unselectable in the
+dashboard) and a provider with no key (requests routed to it will fail to
+authenticate). A dropped key or model list is not a fallback — nothing reads it.
+
+#### Upgrading
+
+- `DASHBOARD_MODEL_OPTIONS` still works as a fallback whenever
+  `DASHBOARD_MODELS` is unset, so you can add providers first and split your
+  model list per provider later. While it is the effective list, the dashboard
+  renders the old flat picker.
+- A model selection you already persisted is kept. If it was stored as a bare
+  model string (before the registry), it is migrated on read to attach the
+  provider that offers it, with a one-time warning.
+- If the same model name is offered by **two** providers, the dashboard and the
+  `/api/models` endpoint require you to name the provider; the request is
+  rejected with a `400` naming both candidates rather than silently picking one.
+
 ### Using Google GenAI (Direct Gemini API)
 
 For Gemini 3 models, you can use Google's native GenAI SDK instead of going through an OpenAI-compatible proxy. This provides better native support for Gemini-specific features.
@@ -178,6 +265,12 @@ GEMINI_API_KEY=your_gemini_api_key_here  # Get from https://ai.google.dev/
 - If `GEMINI_API_KEY` is set AND the model name contains "gemini-3", the bot automatically uses the Google GenAI SDK
 - Otherwise, it falls back to the OpenAI SDK (for OpenRouter, Together AI, etc.)
 - The bot logs which service it's using on startup: `[AI Service] Using Google GenAI for gemini-3-flash`
+
+> With a [provider registry](#named-provider-registry-several-providers-at-once)
+> configured, `GEMINI_API_KEY` and `GEMINI_BASE_URL` are ignored for routing —
+> a Google provider declares its own key and endpoint under `GOOGLE_PROVIDERS` /
+> `GOOGLE_KEYS`, and its transport is chosen by that declaration rather than by
+> sniffing the model name.
 
 ### Getting Discord Credentials
 
@@ -403,11 +496,37 @@ rejected with an error instead of silently wedging the bot on a bad model. If
 you leave the list empty the card is read-only and the model stays fixed by the
 environment.
 
+#### Grouped picker (provider registry)
+
+With a [provider registry](#named-provider-registry-several-providers-at-once)
+configured, the same card renders a **grouped** dropdown instead of a flat one:
+
+```env
+DASHBOARD_MODELS=openai=gpt-4o,gpt-4o-mini;proxy=anthropic/claude-sonnet-4-5,deepseek/deepseek-chat
+```
+
+Each provider becomes one `<optgroup>` labelled with the provider's **name** —
+never its URL, since an operator's URL can be an internal hostname and a bare
+URL is unreadable as a picker label. Picking a model switches the provider, its
+base URL, its API key and the model together, and the Model card reports the
+active provider by name.
+
+- A model offered by **two** providers appears under both groups. Sending it
+  without naming a provider is ambiguous, so it is rejected with a `400` that
+  names both candidates.
+- A provider with no models is skipped rather than rendered as an empty group;
+  one with no key still appears, but requests routed to it will fail to
+  authenticate.
+- `DASHBOARD_MODEL_OPTIONS` remains the fallback whenever `DASHBOARD_MODELS` is
+  unset, and while it is in effect the picker stays flat.
+
 Notes on how the switch propagates:
 
 - Provider routing updates too — selecting a Gemini model switches the bot from
   the OpenAI client to Google GenAI (provided `GEMINI_API_KEY` is set), and
-  thinking/reasoning configuration follows the new model.
+  thinking/reasoning configuration follows the new model. Under the provider
+  registry, the transport is decided by the provider's declared kind instead of
+  by the model name, so the same rule holds for every provider in the registry.
 - "Revert to env model" clears the override and restores whatever
   `OPENAI_MODEL` resolves to. If `OPENAI_MODEL` is unset, that is the built-in
   `gpt-4o-mini` default, which the UI flags in amber so a revert is never a
@@ -425,6 +544,7 @@ DASHBOARD_LOG_WINDOW_HOURS=12
 DASHBOARD_USAGE_WINDOW_HOURS=24
 LLM_DAILY_REQUEST_LIMIT=500   # your provider's requests-per-day ceiling
 DASHBOARD_MODEL_OPTIONS=gpt-4o,kimi-k2-thinking   # enables the live model switcher
+DASHBOARD_MODELS=openai=gpt-4o;proxy=anthropic/claude-sonnet-4-5  # grouped picker; see the provider registry
 
 # Unauthenticated liveness ping — point monitors here, not at the dashboard
 HEALTH_PORT=3002

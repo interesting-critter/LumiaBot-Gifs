@@ -1,5 +1,12 @@
-import { config } from '../utils/config';
+import { activeProviderApiKey, activeProviderBaseUrl } from '../utils/config';
 import { intEnv } from '../utils/env';
+// Side-effect import. This module reads the active provider through the helpers
+// above, and those go through a resolver that lives in `utils/config.ts` and is
+// installed by `services/active-provider.ts` — see the note there for why the
+// dependency cannot simply be an import in the other direction. Importing it
+// here is what guarantees the resolver is installed before `initBalance()` runs
+// from `index.ts`, which is this module's first caller in the real bot.
+import './active-provider';
 
 interface MoonshotBalance {
   cash_balance: number;
@@ -85,25 +92,36 @@ const BALANCE_TIMEOUT_MS = intEnv('MOONSHOT_BALANCE_TIMEOUT_MS', 10_000, { min: 
 /**
  * Currency symbol based on the Moonshot endpoint domain.
  * moonshot.ai reports in USD, moonshot.cn reports in Yuan.
+ *
+ * Read from the ACTIVE provider's base URL rather than `config.openai.baseUrl`:
+ * under the registry the boot-time URL belongs to whatever provider happened to
+ * be first in `.env`, so a dashboard switch from `moonshot.cn` to `moonshot.ai`
+ * would otherwise keep printing `¥` against a USD balance. When the registry is
+ * inactive the active provider IS the legacy one, so this is unchanged.
  */
 function getCurrencySymbol(): string {
-  const baseUrl = (config.openai.baseUrl || '').toLowerCase();
-  return baseUrl.includes('moonshot.cn') ? '¥' : '$';
+  return activeProviderBaseUrl().toLowerCase().includes('moonshot.cn') ? '¥' : '$';
 }
 
 export function getBalanceCurrency(): string {
   return getCurrencySymbol();
 }
 
+/**
+ * The `/balance` and `/tokenizers` endpoints are on the Moonshot account's own
+ * host, so they follow the selected provider for the same reason the chat
+ * request does. Read per call, not cached: the selection can change while the
+ * process runs, and a cached URL is exactly the boot-time bug in miniature.
+ */
 function getHeaders(): Record<string, string> {
   return {
     'Content-Type': 'application/json',
-    'Authorization': `Bearer ${config.openai.apiKey}`,
+    'Authorization': `Bearer ${activeProviderApiKey()}`,
   };
 }
 
 function getBaseUrl(): string {
-  return config.openai.baseUrl!.replace(/\/+$/, '');
+  return activeProviderBaseUrl().replace(/\/+$/, '');
 }
 
 /**
