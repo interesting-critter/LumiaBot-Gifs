@@ -2207,5 +2207,12 @@ export function getVisionService() {
     model: vision.model,
     maxTokens: vision.maxTokens,
     temperature: vision.temperature,
+    // Explicitly disconnect the secondary vision model from the main model's
+    // OPENAI_EXTRA_BODY / OPENAI_RAW_BODY_PARAMS. The OpenAIService constructor
+    // uses an `in` check to tell "key not provided" (inherit) apart from
+    // "key explicitly undefined" (don't inherit), so passing `undefined` here
+    // opts out without needing dedicated VISION_SECONDARY_* env vars.
+    extraBody: undefined,
+    rawBodyParams: undefined,
   });
 }

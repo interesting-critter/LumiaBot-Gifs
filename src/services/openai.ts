@@ -407,8 +407,18 @@ export class OpenAIService {
     this.defaultTopP = options?.topP ?? config.openai.topP;
     this.defaultTopK = options?.topK ?? config.openai.topK;
     this.filterReasoning = options?.filterReasoning ?? config.openai.filterReasoning;
-    this.extraBody = options?.extraBody ?? config.openai.extraBody;
-    this.rawBodyParams = options?.rawBodyParams ?? config.openai.rawBodyParams;
+    // Distinguish "caller did not pass this key" (inherit from main model config)
+    // from "caller explicitly passed undefined" (opt out of inheritance). The
+    // `??` fallback alone can't tell those apart, because both produce
+    // `undefined` on the left-hand side — which would silently leak the main
+    // model's OPENAI_EXTRA_BODY / OPENAI_RAW_BODY_PARAMS into a caller that
+    // wanted to be disconnected (e.g. the secondary vision service).
+    this.extraBody = options && 'extraBody' in options
+      ? options.extraBody
+      : config.openai.extraBody;
+    this.rawBodyParams = options && 'rawBodyParams' in options
+      ? options.rawBodyParams
+      : config.openai.rawBodyParams;
   }
 
   /**
