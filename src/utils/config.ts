@@ -1,4 +1,11 @@
 import { boolEnv, floatEnv, hexColorEnv, intEnv, strEnv } from './env';
+import {
+  createProviderRegistry,
+  deriveModelOptions,
+  LEGACY_PROVIDER_NAME,
+  type NamedProvider,
+  type ProviderEnvInput,
+} from './provider-registry';
 
 /**
  * Env vars that are read as bounded numbers, for the boot-time sanity report in
@@ -233,7 +240,8 @@ export function parseModelPromptProfiles(
       // A warning, not a drop: DASHBOARD_MODEL_OPTIONS can legitimately be
       // empty (switching disabled) or out of date relative to this file.
       console.warn(
-        `⚠️ [Config] MODEL_PROMPT_PROFILES: "${model}" is not in DASHBOARD_MODEL_OPTIONS — ` +
+        `⚠️ [Config] MODEL_PROMPT_PROFILES: "${model}" is not a selectable model ` +
+          '(DASHBOARD_MODEL_OPTIONS / DASHBOARD_MODELS) — ' +
           'the binding only applies if that model becomes selectable.',
       );
     }
@@ -526,13 +534,75 @@ export function parseGuildPromptProfiles(
  * literal) because `config` is still in its temporal dead zone while it is
  * being initialised — referencing it from inside its own initialiser throws.
  */
-const dashboardModelOptions: string[] = strEnv('DASHBOARD_MODEL_OPTIONS', '')
+/**
+ * The legacy flat model list, `DASHBOARD_MODEL_OPTIONS`.
+ *
+ * Kept as a fallback rather than removed because it is what the dashboard, the
+ * model selector and several tests already read; `DASHBOARD_MODELS` groups the
+ * same models per provider, and when it is set the flat list is *derived* from
+ * it so every one of those readers keeps working with no change.
+ */
+const legacyDashboardModelOptions: string[] = strEnv('DASHBOARD_MODEL_OPTIONS', '')
   .split(',')
   .map((m) => m.trim())
   .filter(Boolean);
 
+/**
+ * The five provider-registry variables, read into a plain record.
+ *
+ * `process.env` is touched here, at module scope, and nowhere inside
+ * `provider-registry.ts` — the parsers there take this record so they stay pure
+ * and unit-testable. `process.env` is `Record<string, string | undefined>`, so
+ * the read is already in the right shape.
+ */
+const providerEnv: ProviderEnvInput = {
+  OPENAI_PROVIDERS: process.env.OPENAI_PROVIDERS,
+  OPENAI_KEYS: process.env.OPENAI_KEYS,
+  GOOGLE_PROVIDERS: process.env.GOOGLE_PROVIDERS,
+  GOOGLE_KEYS: process.env.GOOGLE_KEYS,
+  DASHBOARD_MODELS: process.env.DASHBOARD_MODELS,
+};
+
+/**
+ * The single implicit provider that stands in when none of the five new
+ * variables is set. Carries the legacy values verbatim so that "no new vars
+ * set" is behaviourally identical to a build without the registry — including
+ * the fact that `config.openai.baseUrl` / `config.gemini.baseUrl` are still the
+ * values routing actually reads.
+ */
+const legacyProvider: NamedProvider = {
+  name: LEGACY_PROVIDER_NAME,
+  kind: 'openai',
+  baseUrl: strEnv('OPENAI_BASE_URL', '') || undefined,
+  apiKey: process.env.OPENAI_API_KEY!,
+  models: [],
+};
+
+const { active: providersActive, registry: providerRegistry } = createProviderRegistry(
+  providerEnv,
+  legacyProvider,
+);
+
+/**
+ * The effective flat model list handed to `config.dashboard.modelOptions`.
+ *
+ * `DASHBOARD_MODELS` when it is set, and the union of every provider's models
+ * is derived from it — the grouped list has no flat form otherwise. Falling
+ * back to `DASHBOARD_MODEL_OPTIONS` when `DASHBOARD_MODELS` is unset keeps
+ * `MODEL_PROMPT_PROFILES` bindings working for an operator who added a
+ * provider but has not yet split their model list per provider.
+ */
+const dashboardModelOptions: string[] =
+  strEnv('DASHBOARD_MODELS', '').trim() !== ''
+    ? deriveModelOptions(providerRegistry)
+    : legacyDashboardModelOptions;
+
 const promptProfileIds: string[] = parsePromptProfileIds(strEnv('PROMPT_PROFILES', ''));
 
+// Validated against the *effective* list (the union above) rather than
+// `DASHBOARD_MODEL_OPTIONS` specifically: a model that is selectable on any
+// provider must be able to carry its own prompt profile, otherwise adding a
+// provider would silently unbind every per-model persona.
 const modelPromptProfiles: Record<string, string> = parseModelPromptProfiles(
   strEnv('MODEL_PROMPT_PROFILES', ''),
   promptProfileIds,
@@ -802,7 +872,53 @@ export const config = {
     logMaxEntries: intEnv('DASHBOARD_LOG_MAX_ENTRIES', 500, { min: 1 }),
     // Models the dashboard is allowed to switch between. Empty means the
     // switcher stays hidden and the model is fixed by the environment.
+    //
+    // Under `DASHBOARD_MODELS` this is the DEDUPLICATED UNION of every
+    // provider's models, in registry order — the flat view every existing
+    // consumer already reads, derived rather than configured, so nothing that
+    // takes a `string[]` of model ids has to change. `modelProviders` below is
+    // the grouped view that says *which provider* each model belongs to.
     modelOptions: dashboardModelOptions,
+    /**
+     * The provider-grouped model lists, or `[]` when the registry is not
+     * active.
+     *
+     * Empty rather than a synthetic one-provider group under legacy behaviour
+     * on purpose: "there is one provider you cannot switch between" and "there
+     * are several providers you can" are different dashboard layouts, and
+     * rendering the second for the first would be a change to behaviour that
+     * nobody asked for.
+     */
+    modelProviders: providersActive ? providerRegistry : [],
+  },
+
+  /**
+   * The named provider registry — `OPENAI_PROVIDERS`, `GOOGLE_PROVIDERS`,
+   * `*_KEYS` and `DASHBOARD_MODELS` parsed together and cross-validated.
+   * See `src/utils/provider-registry.ts` for the delimiter and precedence rules.
+   */
+  providers: {
+    /**
+     * True when at least one of the five new variables is set, i.e. the
+     * registry — not the legacy single-provider pair — is what routing should
+     * use. Callers must branch on this: with it false, `config.openai.baseUrl`
+     * and `config.gemini.baseUrl` remain the authoritative values and the
+     * registry's single implicit entry merely mirrors them.
+     */
+    active: providersActive,
+    /** Configured order. Names are unique across both kinds. */
+    registry: providerRegistry,
+    /**
+     * The provider to use when the caller has no better idea (no dashboard
+     * selection, no per-request override).
+     *
+     * A function rather than a value because the answer genuinely depends on
+     * state the caller has and this config does not: with the registry active
+     * it is the first configured provider, because `.env` order is the closest
+     * thing this feature has to a "primary" declaration, and picking it here
+     * rather than at each call site keeps every call site from re-deriving it.
+     */
+    defaultProvider: (): NamedProvider | undefined => providerRegistry[0],
   },
 
   /**
@@ -909,8 +1025,99 @@ export function isMoonshotThinkingModel(): boolean {
   return (model.includes('moonshot') || model.includes('kimi')) && (model.includes('thinking') || model.includes('k2.5') || model.includes('k2.6'));
 }
 
+/* ------------------------------------------------------------------------- *
+ * ACTIVE PROVIDER
+ *
+ * "Which provider is a request going to right now?" is the question every
+ * URL-shaped feature flag has to answer: Moonshot pricing in CNY, OpenRouter's
+ * reasoning-filter quirk, which host the request is authenticated against.
+ * Under the registry the answer changes while the process runs, and it is NOT
+ * derivable from `config.openai.*` — those hold the *boot-time* legacy pair,
+ * which is not consulted for routing at all once the registry is active.
+ *
+ * WHY THIS IS AN INJECTED ACCESSOR AND NOT AN IMPORT
+ * --------------------------------------------------
+ * The answer lives in `ModelSelectorService.getActiveProvider()`, and that
+ * module already imports `config`. Importing it back here would close the cycle
+ * `config -> model-selector -> config`, which in ESM does not fail loudly: the
+ * partially-evaluated `config` module is handed to `model-selector`, whose
+ * module-scope `new Database(dbPath(...))` and `config.openai.model` reads run
+ * before `config` has finished building — so the failure would surface as a
+ * provider that is silently `undefined`, in whichever module happened to be
+ * imported first.
+ *
+ * A settable accessor breaks the cycle for the same reason `model-selector`
+ * mirrors the active model into `config.openai.modelAlias` rather than being
+ * consulted: the dependency is injected at runtime by
+ * `src/services/active-provider.ts`, which is allowed to know about both
+ * modules. Until it has been imported, the resolver falls back to
+ * `config.providers.defaultProvider()` — the configured order's first entry,
+ * which under legacy behaviour is the single implicit provider carrying the
+ * legacy URL and key, i.e. today's behaviour exactly.
+ * ------------------------------------------------------------------------- */
+
+type ActiveProviderResolver = () => NamedProvider | undefined;
+
+let activeProviderResolver: ActiveProviderResolver = () => config.providers.defaultProvider();
+
+/**
+ * Install the resolver that answers "which provider is in effect right now?".
+ * Called once, at module load, by `services/active-provider.ts`.
+ */
+export function setActiveProviderResolver(resolver: ActiveProviderResolver): void {
+  activeProviderResolver = resolver;
+}
+
+/**
+ * The provider a request would be routed to right now, or `undefined` when
+ * nothing is configured. Never throws: a routing question must not be able to
+ * take down the caller.
+ */
+export function resolveActiveProvider(): NamedProvider | undefined {
+  try {
+    return activeProviderResolver();
+  } catch (error) {
+    console.warn('⚠️ [CONFIG] Could not resolve the active provider:', error);
+    return undefined;
+  }
+}
+
+/**
+ * Base URL of the active provider, exactly as configured.
+ *
+ * Falls back to `config.openai.baseUrl` ONLY when the registry is inactive,
+ * where that value *is* the provider's URL by construction. When the registry
+ * is active the fallback is deliberately absent: `OPENAI_BASE_URL` is not
+ * consulted for routing then, and borrowing it here would make every helper
+ * below answer about a host the request is not going to.
+ *
+ * Returned verbatim, not lowercased: it is used to build request URLs, where a
+ * path component can legitimately be case-sensitive. Callers doing substring
+ * matching should lowercase their own copy — that is what the `is*Provider()`
+ * helpers do.
+ */
+export function activeProviderBaseUrl(): string {
+  const provider = resolveActiveProvider();
+  if (config.providers.active) {
+    return provider?.baseUrl ?? '';
+  }
+  return provider?.baseUrl ?? config.openai.baseUrl ?? '';
+}
+
+/**
+ * API key of the active provider. Same legacy-registry split as
+ * {@link activeProviderBaseUrl}, for the same reason.
+ */
+export function activeProviderApiKey(): string {
+  const provider = resolveActiveProvider();
+  if (config.providers.active) {
+    return provider?.apiKey ?? '';
+  }
+  return provider?.apiKey ?? config.openai.apiKey;
+}
+
 export function isOpenRouterProvider(): boolean {
-  return (config.openai.baseUrl || '').toLowerCase().includes('openrouter');
+  return activeProviderBaseUrl().toLowerCase().includes('openrouter');
 }
 
 export function isGLMModel(): boolean {
@@ -924,7 +1131,7 @@ export function isGeminiFlashModel(): boolean {
 }
 
 export function isMoonshotProvider(): boolean {
-  const baseUrl = (config.openai.baseUrl || '').toLowerCase();
+  const baseUrl = activeProviderBaseUrl().toLowerCase();
   return baseUrl.includes('moonshot.cn') || baseUrl.includes('moonshot.ai');
 }
 

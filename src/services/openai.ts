@@ -1,5 +1,5 @@
 import OpenAI from 'openai';
-import { config, isGemini3Model, isDeepSeekModel, isMoonshotThinkingModel, isGeminiFlashModel, isGeminiProModel, isMoonshotProvider } from '../utils/config';
+import { config, isGemini3Model, isDeepSeekModel, isMoonshotThinkingModel, isGeminiFlashModel, isGeminiProModel, isMoonshotProvider, activeProviderApiKey, activeProviderBaseUrl } from '../utils/config';
 import {
   estimateTokenCount,
   checkBalance,
@@ -9,6 +9,12 @@ import {
   COST_OUTPUT_PER_M,
   type MoonshotUsage,
 } from './moonshot';
+// Imported for the same reason `moonshot.ts` imports it: `isMoonshotProvider()`
+// below is answered through the active provider, and that resolver is installed
+// by this module's side effect rather than by an import inside `utils/config.ts`
+// (which would cycle `config -> model-selector -> config`). See
+// `services/active-provider.ts`.
+import './active-provider';
 import { searxngService } from './searxng';
 import { asUntrustedContent } from './page-extractor';
 import { userMemoryService, PRONOUN_FALLBACK } from './user-memory';
@@ -59,6 +65,18 @@ import { formatPromptForLog } from './dashboard-logger';
  * serialisation slot for 30+ minutes with no way to cancel.
  */
 const REQUEST_TIMEOUT_MS = intEnv('OPENAI_REQUEST_TIMEOUT_MS', 120_000, { min: 5_000, max: 600_000 });
+
+/**
+ * The OpenAI SDK's own default endpoint, written out rather than inherited.
+ *
+ * `new OpenAI()` reads `process.env.OPENAI_BASE_URL` as a default *parameter*, so
+ * leaving `baseURL` out of the options means "use whatever that environment
+ * variable says", not "use the SDK default". Under the provider registry that
+ * variable is the legacy one the precedence rule declares ignored, so relying on
+ * the SDK's implicit default would post the selected provider's key to the host
+ * the operator migrated away from. See `buildClient`.
+ */
+const OPENAI_SDK_DEFAULT_BASE_URL = 'https://api.openai.com/v1';
 
 /**
  * Wall-clock budget for one chat turn (all attempts and tool rounds combined).
@@ -370,6 +388,15 @@ export class OpenAIService {
   private filterReasoning: boolean;
   private extraBody?: Record<string, unknown>;
   private rawBodyParams?: Record<string, unknown>;
+  /**
+   * The URL and key the current client was built with.
+   *
+   * Held only so {@link setProvider} can tell an actual provider switch from the
+   * far more common case of `getAIService()` being called again with the same
+   * provider, which must not rebuild the client on every message.
+   */
+  private baseUrl?: string;
+  private apiKey: string;
 
   constructor(options?: {
     apiKey?: string;
@@ -383,24 +410,11 @@ export class OpenAIService {
     extraBody?: Record<string, unknown>;
     rawBodyParams?: Record<string, unknown>;
   }) {
-    const clientConfig: { apiKey: string; baseURL?: string; timeout?: number; maxRetries?: number } = {
-      apiKey: options?.apiKey ?? config.openai.apiKey,
-      // Explicit, because the SDK defaults are far too permissive for a chat
-      // turn: `timeout` defaults to ~10 minutes and `maxRetries` to 2 internal
-      // retries. `maxRetries: 0` hands backoff ownership entirely to the
-      // explicit loop below, which already retries with a visible log line and a
-      // bounded budget — otherwise one hung upstream multiplied by three
-      // attempts times ten tool rounds pins a channel's serialisation slot.
-      timeout: REQUEST_TIMEOUT_MS,
-      maxRetries: 0,
-    };
-    
-    const baseUrl = options?.baseUrl ?? config.openai.baseUrl;
-    if (baseUrl) {
-      clientConfig.baseURL = baseUrl;
-    }
-    
-    this.client = new OpenAI(clientConfig);
+    const baseUrl = options?.baseUrl ?? this.initialBaseUrl();
+    this.baseUrl = baseUrl;
+    this.apiKey = options?.apiKey ?? this.initialApiKey();
+
+    this.client = this.buildClient(this.apiKey, baseUrl);
     this.model = options?.model ?? config.openai.modelAlias ?? config.openai.model;
     this.defaultMaxTokens = options?.maxTokens ?? config.openai.maxTokens;
     this.defaultTemperature = options?.temperature ?? config.openai.temperature;
@@ -422,6 +436,84 @@ export class OpenAIService {
   }
 
   /**
+   * Build the SDK client for one URL/key pair.
+   *
+   * Factored out because the client is built twice — once at construction and
+   * again on every real provider switch in {@link setProvider} — and the
+   * timeout/retry policy has to be identical in both, or a switch silently
+   * trades the hardened budget for the SDK's ~10-minute default with 2 internal
+   * retries.
+   *
+   * `timeout` and `maxRetries` are explicit because the SDK defaults are far too
+   * permissive for a chat turn: `timeout` defaults to ~10 minutes and
+   * `maxRetries` to 2 internal retries. `maxRetries: 0` hands backoff ownership
+   * entirely to the explicit retry loop below, which already retries with a
+   * visible log line and a bounded budget — otherwise one hung upstream
+   * multiplied by three attempts times ten tool rounds pins a channel's
+   * serialisation slot.
+   *
+   * An empty `apiKey` is passed through rather than defaulted: the SDK throws on
+   * `undefined` at construction (which would take the whole turn down at the
+   * point of selection), whereas `''` fails at the request with a 401 from the
+   * provider. A provider configured with no key must not inherit the previously
+   * selected provider's key either — that would post one operator's credential
+   * to a different host.
+   *
+   * WHY `baseURL` IS ALWAYS PASSED, NEVER OMITTED
+   * ---------------------------------------------
+   * `new OpenAI()` takes its base URL from a *default parameter*:
+   * `baseURL = Core.readEnv('OPENAI_BASE_URL')`. That fires only when the option
+   * is absent, so omitting `baseURL` for a provider configured with an empty URL
+   * — documented as "use the SDK's own default endpoint", which is how the
+   * official OpenAI provider is normally configured — silently routes that
+   * provider to whatever `OPENAI_BASE_URL` still says in the environment. Under
+   * the registry that is precisely the legacy variable the precedence rule
+   * declares ignored, and the failure is the worst shape this feature can take:
+   * the operator picks a provider in the dashboard and their key is posted to a
+   * host they did not select. So the default is pinned explicitly here and the
+   * environment is never consulted.
+   */
+  private buildClient(apiKey: string, baseUrl: string | undefined): OpenAI {
+    return new OpenAI({
+      apiKey,
+      baseURL: baseUrl || OPENAI_SDK_DEFAULT_BASE_URL,
+      timeout: REQUEST_TIMEOUT_MS,
+      maxRetries: 0,
+    });
+  }
+
+  /**
+   * The URL this instance should be constructed with when the caller named none.
+   *
+   * Under the registry the answer is the ACTIVE provider's, never
+   * `config.openai.baseUrl` — that value is the boot-time legacy pair and is not
+   * consulted for routing once the registry is active. The singleton below is
+   * constructed at module load, before any dashboard switch, so it is the one
+   * place where "which provider am I pointed at" has to be answered by the
+   * resolver rather than by a caller that already knows.
+   */
+  private initialBaseUrl(): string | undefined {
+    if (config.providers.active) return activeProviderBaseUrl() || undefined;
+    return config.openai.baseUrl;
+  }
+
+  /**
+   * The key this instance should be constructed with when the caller named none.
+   *
+   * Same split as {@link initialBaseUrl}, and it is load-bearing for BOOT rather
+   * than for a single request: `new OpenAI()` throws outright when `apiKey` is
+   * `undefined`, so a registry-only `.env` — one that sets `OPENAI_KEYS` and no
+   * legacy `OPENAI_API_KEY` at all, which is exactly what the precedence rule
+   * tells an operator they may do — would fail to start, with an error naming
+   * the one variable they were told is irrelevant. `''` instead of `undefined`
+   * keeps it constructible and lets the provider answer 401.
+   */
+  private initialApiKey(): string {
+    if (config.providers.active) return activeProviderApiKey();
+    return config.openai.apiKey ?? '';
+  }
+
+  /**
    * Re-point this instance at a different model.
    *
    * The exported `openaiService` singleton is constructed once at import time,
@@ -435,6 +527,61 @@ export class OpenAIService {
     }
     console.log(`🎛️ [AI] OpenAI service switching model ${this.model} → ${model}`);
     this.model = model;
+  }
+
+  /**
+   * Re-point this instance at a different provider — new URL, new key, and
+   * optionally a new model — rebuilding the SDK client when either changes.
+   *
+   * `setModel` alone is not enough under the registry: the singleton captured
+   * its URL and key at construction, so after a dashboard provider switch it
+   * would keep authenticating against, and sending the request to, the provider
+   * that was active at boot. Rebuilding only on an actual change keeps the
+   * per-message cost at zero for the common no-switch case.
+   *
+   * `name` is for the log line only. The URL is deliberately never logged: an
+   * operator's base URL can name an internal host, and a provider switch is
+   * precisely the moment an operator is most likely to paste a log somewhere
+   * public. Neither is the key.
+   *
+   * The URL/key pair is taken verbatim from the registry entry rather than
+   * merged with the constructor's config-derived values, so switching to a
+   * provider with no base URL correctly clears a previously-set one and falls
+   * back to the SDK default rather than silently keeping the old host.
+   */
+  setProvider(provider: { name?: string; baseUrl?: string; apiKey?: string; model?: string }): void {
+    const { name, model } = provider;
+
+    // Presence, not `undefined`-ness, is the signal: a registry provider with an
+    // empty URL legitimately means "use the SDK's default endpoint", and that has
+    // to be distinguishable from "this call did not mention the URL at all".
+    const urlChanged = 'baseUrl' in provider && provider.baseUrl !== this.baseUrl;
+    const keyChanged = 'apiKey' in provider && provider.apiKey !== this.apiKey;
+
+    if (urlChanged || keyChanged) {
+      const label = name ? `provider "${name}"` : 'provider';
+      console.log(
+        `🎛️ [AI] OpenAI service re-pointed at ${label}` +
+          `${urlChanged ? ' (new base URL)' : ''}${keyChanged ? ' (new API key)' : ''}`,
+      );
+      this.baseUrl = provider.baseUrl;
+      this.apiKey = provider.apiKey ?? '';
+      this.client = this.buildClient(this.apiKey, this.baseUrl);
+    }
+
+    if (model) {
+      this.setModel(model);
+    }
+  }
+
+  /** The URL this instance is currently pointed at, or `undefined` for the SDK default. */
+  getBaseUrl(): string | undefined {
+    return this.baseUrl;
+  }
+
+  /** The key this instance currently sends. Exposed for routing tests; never logged. */
+  getApiKey(): string {
+    return this.apiKey;
   }
 
   getModel(): string {
