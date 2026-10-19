@@ -1,5 +1,12 @@
 import { GoogleGenAI, type GenerateContentConfig, type GenerateContentParameters, type GenerateContentResponse, type Content, type FunctionDeclaration, Type, HarmCategory, HarmBlockThreshold, FunctionCallingConfigMode } from '@google/genai';
-import { config, isGeminiFlashModel, isGeminiProModel } from '../utils/config';
+import { config, isGeminiFlashModel, isGeminiProModel, resolveActiveProvider, activeProviderApiKey } from '../utils/config';
+// Side-effect import only: this installs the active-provider resolver that
+// `resolveActiveProvider()` reads. It has to be a side-effect import even though
+// no binding is used, because this module must not be the one that knows the
+// selection lives in `model-selector.ts` — a Gemini-only deployment never loads
+// `openai.ts`, and this is the module that would otherwise leave the resolver
+// uninstalled. See `services/active-provider.ts`.
+import './active-provider';
 import { getBotDefinition } from '../utils/bot-definition';
 import { searxngService } from './searxng';
 import { asUntrustedContent } from './page-extractor';
@@ -268,7 +275,7 @@ export class GoogleGenAIService {
       apiKey: string;
       httpOptions?: { baseUrl?: string; timeout?: number; retryOptions?: { attempts?: number } };
     } = {
-      apiKey: options?.apiKey ?? config.gemini.apiKey!,
+      apiKey: options?.apiKey ?? this.initialApiKey(),
       // Explicit, because the SDK defaults are unbounded (5 HTTP attempts, no
       // per-request timeout). `attempts: 1` means "no retries" and hands backoff
       // ownership to the explicit loop in `generateWithRetry`, which already has
@@ -279,7 +286,16 @@ export class GoogleGenAIService {
       },
     };
 
-    const baseUrl = options?.baseUrl ?? config.gemini.baseUrl;
+    // `config.gemini.baseUrl` is the LEGACY `GEMINI_BASE_URL`, and it is the
+    // default here only while the registry is inactive. Under the registry a
+    // provider configured with an empty URL means "the SDK's own default
+    // endpoint", so falling back to the legacy value would send that
+    // provider's key to the host the operator migrated away from — the exact
+    // failure the precedence rule exists to prevent, and it is silent because
+    // the URL is never logged. `getAIService()` always passes an explicit
+    // `baseUrl` (possibly `undefined`) under the registry, so this branch is
+    // reached with "no opinion" only by callers that have none.
+    const baseUrl = options?.baseUrl ?? this.initialBaseUrl();
     if (baseUrl) {
       clientConfig.httpOptions!.baseUrl = baseUrl;
     }
@@ -293,8 +309,49 @@ export class GoogleGenAIService {
 
     console.log(`🔮 [Google GenAI] Initialized with model: ${this.model}`);
     if (baseUrl) {
-      console.log(`🔮 [Google GenAI] Using custom base URL: ${baseUrl}`);
+      // The URL itself is not printed. It is an operator's configured endpoint,
+      // which under the registry may well be an internal hostname, and this line
+      // is the one most likely to end up pasted into an issue. Whether a custom
+      // endpoint is in use is the part worth knowing.
+      console.log(`🔮 [Google GenAI] Using a custom base URL (not the SDK default)`);
     }
+  }
+
+  /**
+   * The base URL to use when the caller named none.
+   *
+   * The legacy `GEMINI_BASE_URL` while the registry is inactive, where it *is*
+   * the provider's URL by construction. Under the registry it is deliberately
+   * NOT consulted — see the comment above — so a provider with no URL of its own
+   * gets the SDK's default endpoint instead.
+   */
+  private initialBaseUrl(): string | undefined {
+    if (config.providers.active) return undefined;
+    return config.gemini.baseUrl;
+  }
+
+  /**
+   * The API key to use when the caller named none. Same legacy/registry split as
+   * {@link initialBaseUrl}.
+   */
+  private initialApiKey(): string {
+    if (config.providers.active) return activeProviderApiKey();
+    return config.gemini.apiKey ?? '';
+  }
+
+  /**
+   * The URL this instance currently talks to, or `undefined` for the SDK
+   * default. Mirrors `OpenAIService.getBaseUrl()` so routing can be asserted
+   * through one shape for both transports; never logged, because it can be an
+   * operator-internal hostname.
+   */
+  getBaseUrl(): string | undefined {
+    return (this.client as unknown as { httpOptions?: { baseUrl?: string } }).httpOptions?.baseUrl;
+  }
+
+  /** The key this instance currently sends. For routing tests; never logged. */
+  getApiKey(): string {
+    return (this.client as unknown as { apiKey?: string }).apiKey ?? '';
   }
 
   /**
@@ -2137,17 +2194,75 @@ Use this sparingly and naturally when a reaction enhances your response.
 }
 
 /**
- * Factory function to get the appropriate AI service
- * Returns Google GenAI service if:
- * 1. Model is a Gemini 3 model
- * 2. Gemini API key is configured
- * 3. Gemini is explicitly enabled
- * 
- * Otherwise returns OpenAI service
+ * Factory function to get the appropriate AI service.
+ *
+ * HOW THE TRANSPORT IS CHOSEN
+ * ---------------------------
+ * Two regimes, and the boundary between them is `config.providers.active`:
+ *
+ * 1. Registry active (`OPENAI_PROVIDERS` / `GOOGLE_PROVIDERS` / `*_KEYS` /
+ *    `DASHBOARD_MODELS` set). The transport is whatever the SELECTED provider's
+ *    `kind` says it is. This is a *declaration*, not an inference: the operator
+ *    states which SDK reaches their endpoint. That matters because the previous
+ *    inference — sniffing the model string for `gemini-3` — reads the wrong
+ *    thing under the registry, where the model list is arbitrary. An operator
+ *    listing `claude-3` behind an OpenAI-compatible proxy would have it
+ *    misrouted to the Google SDK, and an operator listing `gemini-3-pro` behind
+ *    such a proxy would have it sent to the Google SDK too, from a key and a
+ *    host that have nothing to do with Google.
+ *
+ * 2. Registry inactive. Behaviour is unchanged from before the registry
+ *    existed, byte for byte including the `require('./openai')`: model sniffing
+ *    decides, and the OpenAI singleton is re-pointed at the selected model only.
+ *    An install with no new variables set must not notice this feature.
+ *
+ * The `require` is a *dynamic* import and must stay one. A static import of the
+ * OpenAI singleton (`import { openaiService } from "./openai"`, note the double
+ * quotes — `provider-parity.test.ts` greps the raw source for the single-quoted
+ * form, comments included) would evaluate that singleton — whose constructor
+ * throws when `OPENAI_API_KEY` is unset — in deployments that only ever run
+ * Google. That same test guards the absence of any cross-import between the two
+ * provider modules.
  */
 export function getAIService() {
   const { openai, gemini } = config;
-  const model = (openai.modelAlias || openai.model).toLowerCase();
+  const selectedModel = openai.modelAlias || openai.model;
+  const model = selectedModel.toLowerCase();
+
+  if (config.providers.active) {
+    const provider = resolveActiveProvider();
+    const name = provider?.name ?? 'unresolved';
+    const kind = provider?.kind ?? 'openai';
+
+    if (kind === 'google') {
+      // Constructed fresh per call, so URL, key and model are always current.
+      // `apiKey: ''` rather than falling through to `config.gemini.apiKey`: under
+      // the registry the legacy key is not consulted for routing at all, and a
+      // keyless provider must fail at the provider with a 401 rather than
+      // inherit another provider's credential.
+      console.log(`🔄 [AI Service] Provider "${name}" is a Google provider — using Google GenAI for ${model}`);
+      return new GoogleGenAIService({
+        apiKey: provider?.apiKey ?? '',
+        baseUrl: provider?.baseUrl,
+        model: selectedModel,
+      });
+    }
+
+    // Import dynamically to avoid circular dependency
+    const { openaiService } = require('./openai');
+    // The singleton captured its URL, key and model at construction time, so all
+    // three are re-pointed here — a provider switch changes the host we send to
+    // and the credential we send with it, not just the model name.
+    openaiService.setProvider({
+      name,
+      baseUrl: provider?.baseUrl,
+      apiKey: provider?.apiKey ?? '',
+      model: selectedModel,
+    });
+    console.log(`🔄 [AI Service] Provider "${name}" is an OpenAI-compatible provider — using OpenAI for ${model}`);
+    return openaiService;
+  }
+
   const isGemini3 = model.includes('gemini-3') || model.includes('gemini3');
   const hasGeminiConfig = gemini.enabled && gemini.apiKey;
 
@@ -2161,7 +2276,7 @@ export function getAIService() {
   const { openaiService } = require('./openai');
   // The singleton captured its model at construction time, so re-point it
   // whenever the dashboard has switched models since then.
-  openaiService.setModel(openai.modelAlias || openai.model);
+  openaiService.setModel(selectedModel);
   console.log(`🔄 [AI Service] Using OpenAI for ${model}`);
   return openaiService;
 }
@@ -2207,5 +2322,12 @@ export function getVisionService() {
     model: vision.model,
     maxTokens: vision.maxTokens,
     temperature: vision.temperature,
+    // Explicitly disconnect the secondary vision model from the main model's
+    // OPENAI_EXTRA_BODY / OPENAI_RAW_BODY_PARAMS. The OpenAIService constructor
+    // uses an `in` check to tell "key not provided" (inherit) apart from
+    // "key explicitly undefined" (don't inherit), so passing `undefined` here
+    // opts out without needing dedicated VISION_SECONDARY_* env vars.
+    extraBody: undefined,
+    rawBodyParams: undefined,
   });
 }

@@ -1514,6 +1514,117 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
       (rows.length > 8 ? '<p class="hint">and ' + (rows.length - 8) + ' more</p>' : '');
   }
 
+  /**
+   * The model picker's markup, as a pure string builder.
+   *
+   * Grouped or flat, decided by ONE fact: whether the server sent grouped
+   * options. `providerOptions` is `[]` under a legacy `.env` (`OPENAI_BASE_URL`
+   * / `OPENAI_API_KEY` with no `*_PROVIDERS`), and in that case this renders
+   * byte-for-byte what the picker rendered before the registry existed — a flat
+   * list of `model.options`, no optgroups, no provider on the wire. An operator
+   * who has never heard of providers must not be shown a picker that implies
+   * they can choose between them, because in that configuration there is
+   * nothing to choose between.
+   *
+   * WHY OPTGROUPS AND NOT A SECOND SELECT
+   * -------------------------------------
+   * The provider is part of the choice, not a filter around it: the same model
+   * id can sit on two providers with different prices and different uptimes,
+   * and picking "gemini-3-flash" only says what is being run, not where it is
+   * being run. One `<select>` with one `<option>` per (provider, model) pair
+   * keeps that a single atomic selection — a two-dropdown form makes it two
+   * half-states, and the intermediate one (a provider chosen, a model not yet)
+   * is not a configuration anything can act on.
+   *
+   * WHAT IS NEVER RENDERED
+   * ----------------------
+   * The provider NAME, never its base URL or its key. A base URL can be an
+   * internal hostname or carry a credential in a query string, and this page is
+   * served to a browser and cached by it; `ProviderOption` does not even carry
+   * those fields, so this function cannot print them by accident. The `kind` is
+   * the one extra thing worth showing, and only as a quiet suffix — it is what
+   * tells the operator why two providers with different auth styles are listed
+   * the same way.
+   *
+   * XSS: every operator-controlled string goes through `esc`, on both sides of
+   * every attribute and every text node. Provider names and model ids come from
+   * `.env`, which is still input — a value like `x" onload="alert(1)` is
+   * operator-supplied markup, and this file builds HTML by concatenation
+   * everywhere, so the escaping is the only thing standing between a typo in a
+   * config file and script execution in the dashboard.
+   */
+  function modelOptionsMarkup(model) {
+    var active = model.active;
+    var activeProvider = model.provider;
+
+    function optionHtml(name, provider) {
+      var selected = name === active &&
+        (provider === undefined || provider === activeProvider);
+      return '<option value="' + esc(name) + '"' +
+        (provider === undefined ? '' : ' data-provider="' + esc(provider) + '"') +
+        (selected ? ' selected' : '') +
+        '>' + esc(name) + '</option>';
+    }
+
+    var groups = model.providerOptions || [];
+
+    if (!groups.length) {
+      // Legacy mode: the flat list, exactly as it was before the registry.
+      return (model.options || []).map(function (name) {
+        return optionHtml(name, undefined);
+      }).join('');
+    }
+
+    // Null-prototype: membership is tested against operator-controlled strings,
+    // and a model id like `constructor` must not find `Object.prototype` there.
+    var listed = Object.create(null);
+    var markup = '';
+    groups.forEach(function (group) {
+      // NOT deduplicated across groups: a model offered by two providers is the
+      // case the provider name exists to disambiguate, so it must appear under
+      // both. `listed` records membership only, for the ungrouped leftovers
+      // below.
+      var models = group.models || [];
+      if (!models.length) {
+        // A provider with nothing selectable would render as an empty heading,
+        // which reads as a broken control rather than as "nothing configured".
+        return;
+      }
+      models.forEach(function (name) { listed[name] = true; });
+      markup += '<optgroup label="' + esc(groupLabel(group)) + '">' +
+        models.map(function (name) { return optionHtml(name, group.name); }).join('') +
+        '</optgroup>';
+    });
+
+    // `getState()` pins the active model into `options` when it is no longer on
+    // any provider's list, so an operator mid-edit still sees (and can keep)
+    // what they had. Those models belong to no group, so they are emitted
+    // ungrouped ABOVE the groups rather than dropped: a selection the picker
+    // cannot show is a selection the operator cannot reason about.
+    var loose = (model.options || []).filter(function (name) { return !listed[name]; });
+    if (loose.length) {
+      markup = loose.map(function (name) {
+        return optionHtml(name, activeProvider === null ? undefined : activeProvider);
+      }).join('') + markup;
+    }
+
+    return markup;
+  }
+
+  /**
+   * An optgroup's label: the provider's display name, plus the transport as a
+   * quiet suffix. `optgroup label` is a plain-text attribute — the browser
+   * renders it as text and never as markup — so the whole string is escaped
+   * once, here, and never assembled from already-escaped pieces.
+   */
+  function groupLabel(group) {
+    var name = group.name === null || group.name === undefined ? '(unnamed)' : group.name;
+    var suffix = group.kind === 'google' ? 'google genai'
+      : group.kind === 'openai' ? 'openai-compatible'
+      : null;
+    return suffix ? name + ' — ' + suffix : String(name);
+  }
+
   function renderModel(model) {
     var block = document.getElementById('model-block');
     var badge = document.getElementById('model-badge');
@@ -1523,16 +1634,19 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
       : '<span class="ds-badge">environment</span>';
 
     if (!model.canChange) {
-      block.innerHTML = factsHtml([
+      var readOnly = [
         ['Active', model.active],
         ['Revert target', model.environmentModel || 'built-in default ' + model.fallbackModel]
-      ]);
+      ];
+      // The one line this whole feature exists to show: which provider the
+      // request goes to. Absent in legacy mode, where there is no choice to
+      // report — `ModelState.provider` is null there rather than a stand-in name.
+      if (model.provider) readOnly.splice(1, 0, ['Provider', model.provider]);
+      block.innerHTML = factsHtml(readOnly);
       return;
     }
 
-    var options = model.options.map(function (name) {
-      return '<option value="' + esc(name) + '"' + (name === model.active ? ' selected' : '') + '>' + esc(name) + '</option>';
-    }).join('');
+    var options = modelOptionsMarkup(model);
 
     var envLine = model.environmentModel
       ? esc(model.environmentModel)
@@ -1547,6 +1661,7 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
         '<button class="ds-btn ds-btn-primary" id="model-apply">Apply</button>' +
       '</div>' +
       '<dl class="facts" style="margin-top:.9rem">' +
+        (model.provider ? fact('Provider', model.provider) : '') +
         rawFact('Revert to', envLine) +
         (model.changedAt ? fact('Last changed', timeAgo(model.changedAt)) : '') +
       '</dl>' +
@@ -1559,16 +1674,30 @@ dialog.sheet::backdrop{background:var(--overlay-fill);backdrop-filter:blur(var(-
     var select = document.getElementById('model-select');
     if (!select) return;
     var chosen = select.value;
+    // The provider travels with the model id, because the id alone does not
+    // identify a model any more: the same id can be offered by two providers.
+    // Read it off the selected option rather than remembering which row was
+    // clicked, because the select is rebuilt from scratch on every render.
+    var option = select.options[select.selectedIndex];
+    var provider = option ? option.getAttribute('data-provider') : null;
+
     var apply = document.getElementById('model-apply');
     if (apply) apply.disabled = true;
     select.disabled = true;
 
+    // `provider` is omitted entirely when the option carries none (legacy
+    // mode), which is exactly the "infer it from the model list" case the API
+    // documents — rather than being sent as `null`, which is a value the route
+    // would have to guess the meaning of.
+    var payload = { model: chosen };
+    if (provider) payload.provider = provider;
+
     api('/api/models', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: chosen })
+      body: JSON.stringify(payload)
     }).then(function () {
-      toast('Model switched to ' + chosen, 'ok');
+      toast('Model switched to ' + (provider ? provider + ' / ' : '') + chosen, 'ok');
       loadOverview();
     }).catch(function (err) {
       toast(err.message, 'bad');

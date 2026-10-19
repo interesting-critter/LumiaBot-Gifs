@@ -1260,6 +1260,12 @@ export function startDashboardServer(): DashboardServer | null {
       }
 
       // ---- Model switching ---------------------------------------------
+      //
+      // GET is a straight projection of the service's `ModelState`: whatever
+      // the service knows about providers (`provider`, `providerOptions`) is
+      // passed through untouched rather than reshaped here, so the UI never has
+      // a second, divergent idea of which providers exist. The state is the
+      // contract; this route only wraps it.
       if (path === '/api/models' && method === 'GET') {
         return json({ model: modelSelectorService.getState() });
       }
@@ -1270,13 +1276,41 @@ export function startDashboardServer(): DashboardServer | null {
         const model = asString(body.model);
         if (model === undefined) return fail('Missing "model"', 400);
 
+        // `provider` is OPTIONAL and additive. A client from before the named
+        // registry sends only `model`, and the service infers the provider from
+        // the model list — which is all a single-provider deployment can mean,
+        // and all the registry can mean when the model is offered by exactly
+        // one provider. `undefined` is passed rather than omitted so the call
+        // site stays one line and stays honest about what it is forwarding.
+        //
+        // A present-but-non-string value is rejected here for the same reason
+        // the profile route rejects `{"profile": {}}`: coercing it would turn
+        // an operator's broken client into a confusing allow-list message about
+        // a provider name they never typed.
+        let provider: string | undefined;
+        if (body.provider !== undefined) {
+          provider = asString(body.provider);
+          if (provider === undefined) {
+            return fail('"provider" must be a string when present', 400);
+          }
+        }
+
         try {
-          return json({ ok: true, model: modelSelectorService.setModel(model) });
+          return json({ ok: true, model: modelSelectorService.setModel(model, provider) });
         } catch (error) {
           // setModel only ever throws its own allow-list validation messages,
           // which are what the operator needs to see and carry no internals, so
           // the text is returned as-is — but it is logged too, so a future
           // failure mode that does leak cannot reach the client silently.
+          //
+          // That mapping is deliberately kept blanket-wide, and an ambiguous
+          // model (the same model name offered by two providers, with no
+          // provider given to disambiguate it) rides on it as a 400 rather than
+          // a 500. It is the same class of problem as a typo'd model: the
+          // request is well-formed and the operator's configuration is what
+          // makes it unresolvable, and the service's message names the
+          // providers involved. A 500 would say "the dashboard is broken" and
+          // send the operator looking at the wrong file.
           console.warn(`📊 [DASHBOARD] Rejected model "${model}":`, error);
           return fail(error instanceof Error ? error.message : String(error), 400);
         }
